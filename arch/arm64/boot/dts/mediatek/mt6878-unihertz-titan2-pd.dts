@@ -19,6 +19,11 @@
 	power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
 };
 
+/* the frame trigger touches DISP registers: keep the domain on for it, too */
+&disp_kick {
+	power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+};
+
 /* LK leaves SSUSB on; with the controller probed, hold it from the device */
 &ssusb {
 	power-domains = <&spm MT6878_POWER_DOMAIN_SSUSB>;

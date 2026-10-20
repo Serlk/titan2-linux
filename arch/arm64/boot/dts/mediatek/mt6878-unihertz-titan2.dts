@@ -37,7 +37,7 @@
 		 * atag,videolfb fb_base 0xfe04f000, 59.92 Hz. Format and stride
 		 * still to be confirmed on the device.
 		 */
-		simplefb@fe04f000 {
+		fb_main: simplefb@fe04f000 {
 			compatible = "simple-framebuffer";
 			reg = <0x0 0xfe04f000 0x0 (1440 * 1440 * 4)>;
 			width = <1440>;
@@ -324,6 +324,19 @@
 	soc-dbg-error-flag@d01a000 {
 		compatible = "mediatek, soc-dbg-error-flag";
 		status = "disabled";
+	};
+
+	/*
+	 * The panel runs in DSI command mode: start a frame through LK's
+	 * pipeline (mutex 0, OVL0, DSI0) after each simpledrm update.
+	 */
+	disp_kick: display-trigger@14001000 {
+		compatible = "mediatek,mt6878-cmdmode-fb-kick";
+		reg = <0x14001000 0x1000>,
+		      <0x14002000 0x1000>,
+		      <0x1401a000 0x1000>;
+		reg-names = "mutex", "ovl", "dsi";
+		mediatek,framebuffer = <&fb_main>;
 	};
 };
 
