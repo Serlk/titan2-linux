@@ -100,9 +100,23 @@ static inline struct drm_sysfb_device *to_drm_sysfb_device(struct drm_device *de
  */
 
 /**
+ * enum drm_sysfb_event_type - action passed to flush notifier callbacks
+ * @DRM_SYSFB_EVENT_FLUSH: the scanout buffer has been written, @clip is valid
+ * @DRM_SYSFB_EVENT_CRTC_ENABLE: the CRTC has been enabled (DPMS on)
+ * @DRM_SYSFB_EVENT_CRTC_DISABLE: the CRTC has been disabled (DPMS off,
+ *	fbdev blank); a helper may switch the display off until it is enabled
+ */
+enum drm_sysfb_event_type {
+	DRM_SYSFB_EVENT_FLUSH,
+	DRM_SYSFB_EVENT_CRTC_ENABLE,
+	DRM_SYSFB_EVENT_CRTC_DISABLE,
+};
+
+/**
  * struct drm_sysfb_flush_event - scanout buffer has been written
  * @dev: the sysfb DRM device whose scanout buffer changed
  * @clip: bounding box of all written areas, in scanout coordinates
+ *	(only for DRM_SYSFB_EVENT_FLUSH)
  */
 struct drm_sysfb_flush_event {
 	struct drm_device *dev;
@@ -191,10 +205,14 @@ to_drm_sysfb_crtc_state(struct drm_crtc_state *base)
 enum drm_mode_status drm_sysfb_crtc_helper_mode_valid(struct drm_crtc *crtc,
 						      const struct drm_display_mode *mode);
 int drm_sysfb_crtc_helper_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *new_state);
+void drm_sysfb_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_commit *state);
+void drm_sysfb_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_commit *state);
 
 #define DRM_SYSFB_CRTC_HELPER_FUNCS \
 	.mode_valid = drm_sysfb_crtc_helper_mode_valid, \
-	.atomic_check = drm_sysfb_crtc_helper_atomic_check
+	.atomic_check = drm_sysfb_crtc_helper_atomic_check, \
+	.atomic_enable = drm_sysfb_crtc_helper_atomic_enable, \
+	.atomic_disable = drm_sysfb_crtc_helper_atomic_disable
 
 void drm_sysfb_crtc_reset(struct drm_crtc *crtc);
 struct drm_crtc_state *drm_sysfb_crtc_atomic_duplicate_state(struct drm_crtc *crtc);
