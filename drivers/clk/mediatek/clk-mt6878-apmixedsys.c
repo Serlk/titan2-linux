@@ -67,60 +67,38 @@
 #define PLLEN_ALL_SET	0x074
 #define PLLEN_ALL_CLR	0x078
 
-#define FENC_STATUS_CON0	0x03c
-
 #define MT6878_PLL_FMAX		(3800UL * MHZ)
 #define MT6878_PLL_FMIN		(1500UL * MHZ)
 #define MT6878_INTEGER_BITS	8
 
-#define PLL_SETCLR(_id, _name, _en_set_reg,			\
-		   _en_clr_bit, _flags, _pd_reg,		\
-		   _pd_shift, _tuner_reg, _tuner_en_reg,	\
-		   _tuner_en_bit, _pcw_reg, _pcw_shift,		\
-		   _pcwbits) {					\
+/*
+ * All MT6878 APMIXEDSYS PLLs are switched through the common PLLEN_ALL
+ * register and its SET/CLR aliases; _en_bit is the PLL's bit in there.
+ */
+#define PLL_SETCLR(_id, _name, _reg, _en_bit, _flags,		\
+		   _pd_reg, _pd_shift, _tuner_reg,		\
+		   _tuner_en_reg, _tuner_en_bit,		\
+		   _pcw_reg, _pcw_shift, _pcwbits) {		\
 	.id = _id,						\
 	.name = _name,						\
-	.reg = 0,						\
+	.reg = _reg,						\
 	.en_reg = PLLEN_ALL,					\
 	.en_set_reg = PLLEN_ALL_SET,				\
 	.en_clr_reg = PLLEN_ALL_CLR,				\
+	.pll_en_bit = _en_bit,					\
 	.flags = _flags,					\
 	.fmax = MT6878_PLL_FMAX,				\
 	.fmin = MT6878_PLL_FMIN,				\
 	.pd_reg = _pd_reg,					\
 	.pd_shift = _pd_shift,					\
 	.tuner_reg = _tuner_reg,				\
-	.tuner_en_reg = _tuner_en_reg,			\
+	.tuner_en_reg = _tuner_en_reg,				\
 	.tuner_en_bit = _tuner_en_bit,				\
 	.pcw_reg = _pcw_reg,					\
 	.pcw_shift = _pcw_shift,				\
 	.pcwbits = _pcwbits,					\
 	.pcwibits = MT6878_INTEGER_BITS,			\
-}
-
-#define PLL_FENC(_id, _name, _reg, _fenc_sta_ofs, _fenc_sta_bit,\
-		_flags, _pd_reg, _pd_shift,		\
-		_pcw_reg, _pcw_shift, _pcwbits,		\
-		_pll_en_bit) {				\
-	.id = _id,					\
-	.name = _name,					\
-	.reg = _reg,					\
-	.fenc_sta_ofs = _fenc_sta_ofs,			\
-	.fenc_sta_bit = _fenc_sta_bit,			\
-	.flags = _flags,				\
-	.fmax = MT6878_PLL_FMAX,			\
-	.fmin = MT6878_PLL_FMIN,			\
-	.pd_reg = _pd_reg,				\
-	.pd_shift = _pd_shift,				\
-	.pcw_reg = _pcw_reg,				\
-	.pcw_shift = _pcw_shift,			\
-	.pcwbits = _pcwbits,				\
-	.pcwibits = MT6878_INTEGER_BITS,		\
-	.en_reg = PLLEN_ALL,				\
-	.en_set_reg = PLLEN_ALL_SET,			\
-	.en_clr_reg = PLLEN_ALL_CLR,			\
-	.pll_en_bit = _pll_en_bit,			\
-	.ops = &mtk_pll_fenc_clr_set_ops,		\
+	.ops = &mtk_pll_setclr_ops,				\
 }
 
 struct mtk_pll_desc {
@@ -128,48 +106,34 @@ struct mtk_pll_desc {
 	size_t num_clks;
 };
 
+/*
+ * MAINPLL, UNIVPLL and MMPLL are shared with other masters through the
+ * hardware voter and need a reset-bar sequence (PLL RSTB at 0x080..0x088)
+ * that this driver does not implement, so they are left running.
+ */
 static const struct mtk_pll_data apmixed_plls[] = {
-	PLL_SETCLR(CLK_APMIXED_ARMPLL_LL, "armpll-ll",
-		9, 0, PLL_AO,
-		ARMPLL_LL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		ARMPLL_LL_CON1, 0, 22/*pcw*/),
-	PLL_SETCLR(CLK_APMIXED_ARMPLL_BL, "armpll-bl",
-		8, 0, PLL_AO,
-		ARMPLL_BL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		ARMPLL_BL_CON1, 0, 22/*pcw*/),
-	PLL_SETCLR(CLK_APMIXED_CCIPLL, "ccipll",
-		7, 0, PLL_AO,
-		CCIPLL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		CCIPLL_CON1, 0, 22/*pcw*/),
-	PLL_FENC(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_CON0/*base*/, FENC_STATUS_CON0,
-		6, PLL_AO, MAINPLL_CON1, 24/*pd*/, MAINPLL_CON1, 0, 22, 0/*tuner*/),
-	PLL_FENC(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_CON0/*base*/, FENC_STATUS_CON0,
-		 5, 0, UNIVPLL_CON1, 24/*pd*/, UNIVPLL_CON1, 0, 22, 0/*tuner*/),
-	PLL_SETCLR(CLK_APMIXED_MSDCPLL, "msdcpll",
-		4, 0, 0,
-		MSDCPLL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		MSDCPLL_CON1, 0, 22/*pcw*/),
-	PLL_FENC(CLK_APMIXED_MMPLL, "mmpll", MMPLL_CON0/*base*/, FENC_STATUS_CON0,
-		 3, 0, MMPLL_CON1, 24/*pd*/, MMPLL_CON1, 0, 22, 0/*tuner*/),
-	PLL_SETCLR(CLK_APMIXED_UFSPLL, "ufspll",
-		2, 0, 0,
-		UFSPLL_CON1, 24/*pd*/,
-		0, 0, 0/*tuner*/,
-		UFSPLL_CON1, 0, 22/*pcw*/),
-	PLL_SETCLR(CLK_APMIXED_APLL1, "apll1",
-		1, 0, 0,
-		APLL1_CON1, 24/*pd*/,
-		APLL1_TUNER_CON0, AP_PLL_CON3, 0/*tuner*/,
-		APLL1_CON2, 0, 32/*pcw*/),
-	PLL_SETCLR(CLK_APMIXED_APLL2, "apll2",
-		0, 0, 0,
-		APLL2_CON1, 24/*pd*/,
-		APLL2_TUNER_CON0, AP_PLL_CON3, 1/*tuner*/,
-		APLL2_CON2, 0, 32/*pcw*/),
+	PLL_SETCLR(CLK_APMIXED_ARMPLL_LL, "armpll-ll", ARMPLL_LL_CON0, 9,
+		   PLL_AO, ARMPLL_LL_CON1, 24, 0, 0, 0, ARMPLL_LL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_ARMPLL_BL, "armpll-bl", ARMPLL_BL_CON0, 8,
+		   PLL_AO, ARMPLL_BL_CON1, 24, 0, 0, 0, ARMPLL_BL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_CCIPLL, "ccipll", CCIPLL_CON0, 7,
+		   PLL_AO, CCIPLL_CON1, 24, 0, 0, 0, CCIPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_CON0, 6,
+		   PLL_AO, MAINPLL_CON1, 24, 0, 0, 0, MAINPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_CON0, 5,
+		   PLL_AO, UNIVPLL_CON1, 24, 0, 0, 0, UNIVPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_MSDCPLL, "msdcpll", MSDCPLL_CON0, 4,
+		   0, MSDCPLL_CON1, 24, 0, 0, 0, MSDCPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_MMPLL, "mmpll", MMPLL_CON0, 3,
+		   PLL_AO, MMPLL_CON1, 24, 0, 0, 0, MMPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_UFSPLL, "ufspll", UFSPLL_CON0, 2,
+		   0, UFSPLL_CON1, 24, 0, 0, 0, UFSPLL_CON1, 0, 22),
+	PLL_SETCLR(CLK_APMIXED_APLL1, "apll1", APLL1_CON0, 1,
+		   0, APLL1_CON1, 24, APLL1_TUNER_CON0, AP_PLL_CON3, 0,
+		   APLL1_CON2, 0, 32),
+	PLL_SETCLR(CLK_APMIXED_APLL2, "apll2", APLL2_CON0, 0,
+		   0, APLL2_CON1, 24, APLL2_TUNER_CON0, AP_PLL_CON3, 1,
+		   APLL2_CON2, 0, 32),
 };
 
 static const struct mtk_pll_desc apmixed_desc = {
