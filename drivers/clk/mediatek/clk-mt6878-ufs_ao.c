@@ -32,17 +32,17 @@ static const struct mtk_gate_regs ufsao_cg_regs = {
 
 static const struct mtk_gate ufsao_clks[] = {
 	GATE_UFSAO(CLK_UFSAO_UNIPRO_TX_SYM, "ufsao_unipro_tx_sym",
-			"top_f26m_ck"/* parent */, 0),
+			"f26m_ck"/* parent */, 0),
 	GATE_UFSAO(CLK_UFSAO_UNIPRO_RX_SYM0, "ufsao_unipro_rx_sym0",
-			"top_f26m_ck"/* parent */, 1),
+			"f26m_ck"/* parent */, 1),
 	GATE_UFSAO(CLK_UFSAO_UNIPRO_RX_SYM1, "ufsao_unipro_rx_sym1",
-			"top_f26m_ck"/* parent */, 2),
+			"f26m_ck"/* parent */, 2),
 	GATE_UFSAO(CLK_UFSAO_UNIPRO_SYS, "ufsao_unipro_sys",
-			"top_ufs_ck"/* parent */, 3),
+			"ufs_ck"/* parent */, 3),
 	GATE_UFSAO(CLK_UFSAO_UNIPRO_SAP_CFG, "ufsao_unipro_sap_cfg",
-			"top_f26m_ck"/* parent */, 8),
+			"f26m_ck"/* parent */, 8),
 	GATE_UFSAO(CLK_UFSAO_PHY_TOP_AHB_S_BUS, "ufsao_phy_ahb_s_bus",
-			"hf_fufs_faxi_ck"/* parent */, 9),
+			"axi_ufs_ck"/* parent */, 9),
 };
 
 static const struct mtk_clk_desc ufsao_mcd = {
