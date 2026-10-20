@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, CPU DVFS and thermal bring-up.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * On top of the default board file:
+ * - CPUFREQ HW: the MCUPM firmware started by the boot loader does the
+ *   DVFS, Linux picks a performance state from the firmware LUTs; no
+ *   voltage or frequency comes from this DT.
+ * - LVTS AP/MCU domains, read only (the boot firmware set them up and
+ *   armed the hardware thermal reset at 119 C), with the thermal zones of
+ *   mt6878.dtsi: passive 85 C on the CPU clusters, critical 110 C.
+ * Kept as a separate board file until both have been seen on the device.
+ */
+
+#include "mt6878-unihertz-titan2.dts"
+
+&performance {
+	status = "okay";
+};
+
+&lvts_ap {
+	status = "okay";
+};
+
+&lvts_mcu {
+	status = "okay";
+};
