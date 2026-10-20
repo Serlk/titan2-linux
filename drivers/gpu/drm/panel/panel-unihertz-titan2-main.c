@@ -9,6 +9,11 @@
  * (its source is not published); nothing in the controller is programmed
  * beyond standard DCS commands.
  *
+ * The boot loader leaves the panel on, showing its picture from the panel
+ * frame memory: the first prepare takes it over without a reset. Once on,
+ * the panel only goes to sleep and back (DCS sleep in/out) with the
+ * display; its power is cut when the driver goes away.
+ *
  * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  */
 
@@ -47,6 +52,15 @@ static const struct {
 
 #define TITAN2_MAIN_NUM_SUPPLIES ARRAY_SIZE(titan2_main_supplies)
 
+enum titan2_main_state {
+	TITAN2_MAIN_OFF,
+	/* on and initialized by the boot loader, not touched yet */
+	TITAN2_MAIN_BOOT_ON,
+	/* powered and initialized, in sleep mode */
+	TITAN2_MAIN_SLEEP,
+	TITAN2_MAIN_ON,
+};
+
 struct titan2_main_panel {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
@@ -55,6 +69,7 @@ struct titan2_main_panel {
 	struct gpio_desc *touch_reset_gpio;
 	/* supplies held by us; set at probe when the boot loader left them on */
 	bool powered;
+	enum titan2_main_state state;
 };
 
 static inline struct titan2_main_panel *to_titan2_main(struct drm_panel *panel)
@@ -67,7 +82,7 @@ static int titan2_main_power_on(struct titan2_main_panel *ctx)
 	unsigned int i;
 	int ret;
 
-	/* handover from the boot loader: only reset and initialize */
+	/* supplies already on (boot loader, sleep): only reset and initialize */
 	if (ctx->powered)
 		goto reset;
 
@@ -85,7 +100,7 @@ static int titan2_main_power_on(struct titan2_main_panel *ctx)
 reset:
 	/* the touch controller sharing the panel is reset with it */
 	if (ctx->touch_reset_gpio) {
-		gpiod_set_value_cansleep(ctx->touch_reset_gpio, 1);
+		gpiod_direction_output(ctx->touch_reset_gpio, 1);
 		usleep_range(2000, 3000);
 		gpiod_set_value_cansleep(ctx->touch_reset_gpio, 0);
 		usleep_range(2000, 3000);
@@ -124,6 +139,7 @@ static void titan2_main_power_off(struct titan2_main_panel *ctx)
 	regulator_disable(ctx->supplies[SUPPLY_LCD]);
 	regulator_disable(ctx->supplies[SUPPLY_PM]);
 	ctx->powered = false;
+	ctx->state = TITAN2_MAIN_OFF;
 }
 
 static int titan2_main_on(struct titan2_main_panel *ctx)
@@ -166,10 +182,46 @@ static int titan2_main_on(struct titan2_main_panel *ctx)
 	return dsi_ctx.accum_err;
 }
 
+/*
+ * Sleep out, then display on: the order of the standard DCS wake up, seen
+ * working on the device; the panel keeps its frame memory meanwhile.
+ */
+static int titan2_main_exit_sleep(struct titan2_main_panel *ctx)
+{
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+
+	return dsi_ctx.accum_err;
+}
+
 static int titan2_main_prepare(struct drm_panel *panel)
 {
 	struct titan2_main_panel *ctx = to_titan2_main(panel);
 	int ret;
+
+	switch (ctx->state) {
+	case TITAN2_MAIN_ON:
+		return 0;
+	case TITAN2_MAIN_BOOT_ON:
+		/* keep the boot picture until the first frame */
+		dev_info(&ctx->dsi->dev, "taking over the panel from the boot loader\n");
+		ctx->state = TITAN2_MAIN_ON;
+		return 0;
+	case TITAN2_MAIN_SLEEP:
+		ret = titan2_main_exit_sleep(ctx);
+		if (!ret) {
+			ctx->state = TITAN2_MAIN_ON;
+			return 0;
+		}
+		/* reset and initialize it again, the supplies stay on */
+		dev_err(&ctx->dsi->dev, "failed to wake the panel up: %d\n", ret);
+		break;
+	case TITAN2_MAIN_OFF:
+		break;
+	}
 
 	ret = titan2_main_power_on(ctx);
 	if (ret)
@@ -181,13 +233,14 @@ static int titan2_main_prepare(struct drm_panel *panel)
 		titan2_main_power_off(ctx);
 		return ret;
 	}
+	ctx->state = TITAN2_MAIN_ON;
 
 	return 0;
 }
 
-static int titan2_main_unprepare(struct drm_panel *panel)
+/* The stock sequence and delays, without cutting the power afterwards */
+static int titan2_main_enter_sleep(struct titan2_main_panel *ctx)
 {
-	struct titan2_main_panel *ctx = to_titan2_main(panel);
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 
 	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
@@ -198,7 +251,18 @@ static int titan2_main_unprepare(struct drm_panel *panel)
 		dev_err(&ctx->dsi->dev, "failed to put panel to sleep: %d\n",
 			dsi_ctx.accum_err);
 
-	titan2_main_power_off(ctx);
+	return dsi_ctx.accum_err;
+}
+
+static int titan2_main_unprepare(struct drm_panel *panel)
+{
+	struct titan2_main_panel *ctx = to_titan2_main(panel);
+
+	if (ctx->state != TITAN2_MAIN_ON)
+		return 0;
+
+	titan2_main_enter_sleep(ctx);
+	ctx->state = TITAN2_MAIN_SLEEP;
 
 	return 0;
 }
@@ -240,6 +304,10 @@ static int titan2_main_hold_boot_supplies(struct titan2_main_panel *ctx)
 		if (regulator_is_enabled(ctx->supplies[i]) <= 0)
 			return 0;
 
+	/* powered, but held in reset: not initialized */
+	if (gpiod_get_value_cansleep(ctx->reset_gpio) != 0)
+		return 0;
+
 	for (i = 0; i < TITAN2_MAIN_NUM_SUPPLIES; i++) {
 		ret = regulator_enable(ctx->supplies[i]);
 		if (ret) {
@@ -249,8 +317,22 @@ static int titan2_main_hold_boot_supplies(struct titan2_main_panel *ctx)
 		}
 	}
 	ctx->powered = true;
+	ctx->state = TITAN2_MAIN_BOOT_ON;
 
 	return 0;
+}
+
+/* Give the supplies back without changing anything at the panel */
+static void titan2_main_release_supplies(struct titan2_main_panel *ctx)
+{
+	unsigned int i;
+
+	if (!ctx->powered)
+		return;
+
+	for (i = 0; i < TITAN2_MAIN_NUM_SUPPLIES; i++)
+		regulator_disable(ctx->supplies[i]);
+	ctx->powered = false;
 }
 
 static const struct drm_panel_funcs titan2_main_panel_funcs = {
@@ -282,16 +364,17 @@ static int titan2_main_probe(struct mipi_dsi_device *dsi)
 	}
 
 	/*
-	 * The boot loader leaves the panel on: request the reset lines
-	 * deasserted so that probing does not blank the screen.
+	 * The boot loader leaves the panel on: take the reset lines as they
+	 * are, so that probing does not blank the screen. The state of the
+	 * panel reset tells whether the panel has been brought up.
 	 */
-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "failed to get reset GPIO\n");
 
 	ctx->touch_reset_gpio = devm_gpiod_get_optional(dev, "touch-reset",
-							GPIOD_OUT_LOW);
+							GPIOD_ASIS);
 	if (IS_ERR(ctx->touch_reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->touch_reset_gpio),
 				     "failed to get touch reset GPIO\n");
@@ -301,6 +384,8 @@ static int titan2_main_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
+	/* lane bit rate of the factory driver (PLL 430 MHz), as left by LK */
+	dsi->hs_rate = 860000000;
 	/* command mode: no MIPI_DSI_MODE_VIDEO */
 	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
@@ -315,13 +400,24 @@ static int titan2_main_probe(struct mipi_dsi_device *dsi)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to hold the supplies\n");
 
+	/* keep the panel running, or in reset until it is powered up */
+	ret = gpiod_direction_output(ctx->reset_gpio,
+				     ctx->state == TITAN2_MAIN_BOOT_ON ? 0 : 1);
+	if (ret) {
+		titan2_main_release_supplies(ctx);
+		return dev_err_probe(dev, ret, "failed to set up reset GPIO\n");
+	}
+
 	drm_panel_add(&ctx->panel);
 
+	/*
+	 * On failure (or deferral) leave the panel as the boot loader left
+	 * it: it keeps showing the boot picture.
+	 */
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
 		drm_panel_remove(&ctx->panel);
-		if (ctx->powered)
-			titan2_main_power_off(ctx);
+		titan2_main_release_supplies(ctx);
 		return dev_err_probe(dev, ret, "failed to attach to DSI host\n");
 	}
 
