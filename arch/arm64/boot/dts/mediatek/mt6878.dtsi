@@ -1123,6 +1123,20 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Always-on system timer. Every idle state of the CPUs stops
+		 * the arch timer, so this is the tick broadcast device that
+		 * lets all of them, and with them MCUSYS, power down at once.
+		 */
+		systimer: timer@1cc10000 {
+			compatible = "mediatek,mt6878-timer",
+				     "mediatek,mt6765-timer";
+			reg = <0x1cc10000 0x1000>;
+			interrupts = <GIC_SPI 249 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk13m>;
+			status = "disabled";
+		};
+
 		mminfra_config: clock-controller@1e800000 {
 			compatible = "mediatek,mt6878-mminfra-config", "syscon";
 			reg = <0x1e800000 0x1000>;
