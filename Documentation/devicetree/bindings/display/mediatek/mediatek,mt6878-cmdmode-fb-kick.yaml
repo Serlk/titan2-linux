@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/mediatek/mediatek,mt6878-cmdmode-fb-kick.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek frame trigger for a command-mode DSI boot framebuffer
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The bootloader of some MediaTek phones sets up the display pipeline
+  (OVL -> ... -> DSI) for a DSI panel in command mode and hands over a
+  simple-framebuffer. In command mode the panel keeps its own frame memory,
+  so framebuffer writes only become visible after the pipeline has been
+  started for one frame through the DISP mutex and the DSI START register.
+
+  This node describes the registers needed to start such frames on the
+  pipeline left by the bootloader. Nothing else (timings, PLLs, panel) is
+  programmed. It is meant for bring-up until a full display driver exists
+  and must not be used together with one for the same display.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-cmdmode-fb-kick
+
+  reg:
+    items:
+      - description: DISP mutex
+      - description: OVL feeding the DSI
+      - description: DSI controller
+
+  reg-names:
+    items:
+      - const: mutex
+      - const: ovl
+      - const: dsi
+
+  mediatek,framebuffer:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: simple-framebuffer node whose memory the OVL scans out.
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    minItems: 1
+    maxItems: 8
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - mediatek,framebuffer
+
+additionalProperties: false
+
+examples:
+  - |
+    chosen {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        fb_main: framebuffer@fe04f000 {
+            compatible = "simple-framebuffer";
+            reg = <0xfe04f000 0x7e9000>;
+            width = <1440>;
+            height = <1440>;
+            stride = <5760>;
+            format = "a8r8g8b8";
+        };
+    };
+
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        display-trigger@14001000 {
+            compatible = "mediatek,mt6878-cmdmode-fb-kick";
+            reg = <0x14001000 0x1000>,
+                  <0x14002000 0x1000>,
+                  <0x1401a000 0x1000>;
+            reg-names = "mutex", "ovl", "dsi";
+            mediatek,framebuffer = <&fb_main>;
+        };
+    };
