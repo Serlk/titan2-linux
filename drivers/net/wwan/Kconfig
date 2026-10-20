@@ -106,6 +106,24 @@ config IOSM
 
 	  If unsure, say N.
 
+config MTK_CCCI
+	tristate "MediaTek SoC-integrated modem (CCCI)"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	help
+	  Enables the driver for the modem built into MediaTek smartphone
+	  SoCs such as the MT6878, which talks to the application processor
+	  through CCCI over the CCIF and DPMAIF interfaces.
+
+	  This first version only checks the modem setup the bootloader
+	  handed over (reserved memory, modem arguments) and exposes it in
+	  debugfs. It does not power or start the modem.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called mtk_ccci.
+
+	  If unsure, say N.
+
 config MTK_T7XX
 	tristate "MediaTek PCIe 5G WWAN modem T7xx device"
 	depends on PCI
