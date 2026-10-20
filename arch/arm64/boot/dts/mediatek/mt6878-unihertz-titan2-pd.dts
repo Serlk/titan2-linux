@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, second bring-up stage: the SCPSYS power controller on.
+ *
+ * Kept as a separate board file until the power controller has been seen
+ * probing on the device. Both changes go together: simplefb holds the
+ * display domain (and its mm-infra parent) that LK left on, so the panel
+ * stays lit until a DRM driver takes over; if the power controller fails
+ * to probe, simplefb defers as well (the screen keeps LK's last image).
+ */
+
+#include "mt6878-unihertz-titan2.dts"
+
+&spm {
+	status = "okay";
+};
+
+&{/chosen/simplefb@fe04f000} {
+	power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+};
