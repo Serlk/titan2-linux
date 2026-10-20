@@ -14,7 +14,6 @@
 #include <linux/soc/mediatek/mtk-mmsys.h>
 
 #include "mtk-mmsys.h"
-#include "mt6878-mmsys.h"
 #include "mt8167-mmsys.h"
 #include "mt8173-mmsys.h"
 #include "mt8183-mmsys.h"
@@ -50,10 +49,13 @@ static const struct mtk_mmsys_driver_data mt6795_mmsys_driver_data = {
 	.num_resets = 64,
 };
 
+/*
+ * No routes: the display path is the one the boot loader programmed
+ * (OVL0_2L cascaded through OVL1_2L and OVL2_2L, then the picture quality
+ * engines in the state it left them, into DSI0).
+ */
 static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
 	.clk_driver = "clk-mt6878-mm",
-	.routes = mmsys_mt6878_routing_table,
-	.num_routes = ARRAY_SIZE(mmsys_mt6878_routing_table),
 };
 
 static const struct mtk_mmsys_driver_data mt6797_mmsys_driver_data = {
