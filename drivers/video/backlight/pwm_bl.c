@@ -9,8 +9,10 @@
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/backlight.h>
 #include <linux/err.h>
 #include <linux/pwm.h>
@@ -446,6 +448,8 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	struct pwm_bl_data *pb;
 	struct pwm_state state;
 	unsigned int i;
+	u64 boot_duty = 0;
+	bool keep_boot;
 	int ret;
 
 	if (!data) {
@@ -517,6 +521,24 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	 */
 	if (!state.period && (data->pwm_period_ns > 0))
 		state.period = data->pwm_period_ns;
+
+	/*
+	 * pwm_init_state() asks for a zero duty cycle. If the bootloader
+	 * left the backlight on and the board wants to keep it, carry its
+	 * duty cycle over (rescaled to our period) instead of blinking.
+	 */
+	keep_boot = pwm_is_enabled(pb->pwm) &&
+		    device_property_read_bool(&pdev->dev, "keep-boot-brightness");
+	if (keep_boot) {
+		struct pwm_state cur;
+
+		pwm_get_state(pb->pwm, &cur);
+		if (cur.period && state.period)
+			boot_duty = min(mul_u64_u64_div_u64(cur.duty_cycle, state.period,
+							    cur.period),
+					state.period);
+		state.duty_cycle = boot_duty;
+	}
 
 	ret = pwm_apply_might_sleep(pb->pwm, &state);
 	if (ret) {
@@ -597,6 +619,25 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 			 "invalid default brightness level: %u, using %u\n",
 			 data->dft_brightness, data->max_brightness);
 		data->dft_brightness = data->max_brightness;
+	}
+
+	if (keep_boot && boot_duty && pb->levels) {
+		unsigned int best = data->dft_brightness;
+		u64 best_delta = U64_MAX;
+
+		/* the level whose duty cycle is nearest to the bootloader's */
+		for (i = 1; i <= data->max_brightness; i++) {
+			u64 duty = compute_duty_cycle(pb, i, &state);
+			u64 delta = duty > boot_duty ? duty - boot_duty : boot_duty - duty;
+
+			if (delta < best_delta) {
+				best_delta = delta;
+				best = i;
+			}
+		}
+		dev_info(&pdev->dev, "keeping boot brightness: duty %llu/%llu ns -> level %u\n",
+			 boot_duty, state.period, best);
+		data->dft_brightness = best;
 	}
 
 	bl->props.brightness = data->dft_brightness;

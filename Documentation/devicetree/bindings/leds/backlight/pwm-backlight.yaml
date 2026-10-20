@@ -42,6 +42,14 @@ properties:
       Delay in ms between disabling the backlight using GPIO and setting PWM
       value to 0.
 
+  keep-boot-brightness:
+    description:
+      If the PWM is already running when the driver probes (the bootloader
+      switched the backlight on), keep its duty cycle instead of starting
+      from zero, and start at the brightness level closest to it rather than
+      at default-brightness-level.
+    type: boolean
+
   num-interpolated-steps:
     description:
       Number of interpolated steps between each value of brightness-levels
