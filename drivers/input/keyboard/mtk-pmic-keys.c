@@ -13,6 +13,7 @@
 #include <linux/mfd/mt6357/registers.h>
 #include <linux/mfd/mt6358/registers.h>
 #include <linux/mfd/mt6359/registers.h>
+#include <linux/mfd/mt6363/registers.h>
 #include <linux/mfd/mt6397/core.h>
 #include <linux/mfd/mt6397/registers.h>
 #include <linux/module.h>
@@ -134,6 +135,21 @@ static const struct mtk_pmic_regs mt6359_regs = {
 	.key_release_irq = true,
 };
 
+/*
+ * On MT6363 the key interrupts are enabled by the PMIC interrupt controller
+ * and the long-press reset is configured by the bootloader: there is no
+ * interrupt selection to do and the reset setup is left untouched.
+ */
+static const struct mtk_pmic_regs mt6363_regs = {
+	.keys_regs[MTK_PMIC_PWRKEY_INDEX] =
+		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
+				   0x1, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
+	.keys_regs[MTK_PMIC_HOMEKEY_INDEX] =
+		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
+				   0x3, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
+	.key_release_irq = true,
+};
+
 struct mtk_pmic_keys_info {
 	struct mtk_pmic_keys *keys;
 	const struct mtk_pmic_keys_regs *regs;
@@ -163,6 +179,9 @@ static void mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
 	u32 long_press_mode, long_press_debounce;
 	u32 value, mask;
 	int error;
+
+	if (!regs->pmic_rst_reg)
+		return;
 
 	kregs_home = &regs->keys_regs[MTK_PMIC_HOMEKEY_INDEX];
 	kregs_pwr = &regs->keys_regs[MTK_PMIC_PWRKEY_INDEX];
@@ -317,6 +336,9 @@ static const struct of_device_id of_mtk_pmic_keys_match_tbl[] = {
 		.compatible = "mediatek,mt6359-keys",
 		.data = &mt6359_regs,
 	}, {
+		.compatible = "mediatek,mt6363-keys",
+		.data = &mt6363_regs,
+	}, {
 		/* sentinel */
 	}
 };
@@ -326,7 +348,6 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 {
 	int error, index = 0;
 	unsigned int keycount;
-	struct mt6397_chip *pmic_chip = dev_get_drvdata(pdev->dev.parent);
 	struct device_node *node = pdev->dev.of_node;
 	static const char *const irqnames[] = { "powerkey", "homekey" };
 	static const char *const irqnames_r[] = { "powerkey_r", "homekey_r" };
@@ -341,8 +362,18 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	keys->dev = &pdev->dev;
-	keys->regmap = pmic_chip->regmap;
 	mtk_pmic_regs = of_id->data;
+
+	/*
+	 * SPMI PMICs register their regmap on the PMIC device, while the
+	 * MT6397 family MFD hands out the PMIC wrapper regmap in its data.
+	 */
+	keys->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+	if (!keys->regmap) {
+		struct mt6397_chip *pmic_chip = dev_get_drvdata(pdev->dev.parent);
+
+		keys->regmap = pmic_chip->regmap;
+	}
 
 	keys->input_dev = input_dev = devm_input_allocate_device(keys->dev);
 	if (!input_dev) {

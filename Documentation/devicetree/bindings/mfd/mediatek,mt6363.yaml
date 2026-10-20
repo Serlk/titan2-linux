@@ -1,0 +1,152 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/mediatek,mt6363.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6363 and MT6369 SPMI PMICs
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The MT6363 and MT6369 are Power Management ICs connected to the SoC over
+  SPMI. MT6363 is the main PMIC: it provides the buck converters and LDOs
+  for the SoC, the power and home keys and an AUXADC. MT6369 is a second
+  PMIC with more LDOs (USB, SD card, connectivity, audio).
+
+  The PMIC is an interrupt controller for its functions: the interrupts are
+  signalled to the SPMI controller as Request Capable Slave (RCS) messages.
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt6363
+      - mediatek,mt6369
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 3
+    description: |
+      cell 1: SPMI slave ID of this PMIC
+      cell 2: PMIC interrupt number
+      cell 3: interrupt flags, as defined in
+              dt-bindings/interrupt-controller/irq.h
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 0
+
+  adc:
+    type: object
+    $ref: /schemas/iio/adc/mediatek,mt6359-auxadc.yaml#
+    unevaluatedProperties: false
+
+  keys:
+    type: object
+    $ref: /schemas/input/mediatek,pmic-keys.yaml#
+    unevaluatedProperties: false
+
+  regulators:
+    type: object
+    $ref: /schemas/regulator/mediatek,mt6369-regulator.yaml#
+    unevaluatedProperties: false
+
+patternProperties:
+  "^regulators@[0-9a-f]+$":
+    type: object
+    $ref: /schemas/regulator/mediatek,mt6363-regulator.yaml#
+    unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-controller
+  - "#interrupt-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: mediatek,mt6363
+    then:
+      properties:
+        regulators: false
+      required:
+        - "#address-cells"
+        - "#size-cells"
+    else:
+      properties:
+        adc: false
+        keys: false
+      patternProperties:
+        "^regulators@[0-9a-f]+$": false
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/input/input.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        pmic@4 {
+            compatible = "mediatek,mt6363";
+            reg = <0x4 SPMI_USID>;
+            interrupts = <0x4 0 IRQ_TYPE_LEVEL_HIGH>;
+            interrupt-controller;
+            #interrupt-cells = <3>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            keys {
+                compatible = "mediatek,mt6363-keys";
+
+                power {
+                    linux,keycodes = <KEY_POWER>;
+                    wakeup-source;
+                };
+            };
+
+            regulators@30 {
+                compatible = "mediatek,mt6363-regulator";
+                reg = <0x30>;
+
+                vbuck5 {
+                    regulator-name = "vproc-b";
+                    regulator-always-on;
+                };
+            };
+        };
+
+        pmic@5 {
+            compatible = "mediatek,mt6369";
+            reg = <0x5 SPMI_USID>;
+            interrupts = <0x5 0 IRQ_TYPE_LEVEL_HIGH>;
+            interrupt-controller;
+            #interrupt-cells = <3>;
+
+            regulators {
+                compatible = "mediatek,mt6369-regulator";
+
+                vusb {
+                    regulator-name = "vusb";
+                    regulator-always-on;
+                };
+            };
+        };
+    };

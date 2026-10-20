@@ -1148,6 +1148,23 @@ config MFD_MT6397
 	  accessing the device; additional drivers must be enabled in order
 	  to use the functionality of the device.
 
+config MFD_MTK_SPMI_PMIC
+	tristate "MediaTek SPMI PMICs"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on SPMI
+	select IRQ_DOMAIN
+	select MFD_CORE
+	select REGMAP_SPMI
+	help
+	  Say yes here to enable support for the MediaTek MT6363 and MT6369
+	  SPMI PMICs. This driver provides the common register access and
+	  interrupt handling, the PMIC functions (regulators, keys, ADC)
+	  need their own drivers.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called mtk-spmi-pmic.
+
 config MFD_MENF21BMC
 	tristate "MEN 14F021P00 Board Management Controller Support"
 	depends on I2C

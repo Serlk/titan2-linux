@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/regulator/mediatek,mt6369-regulator.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6369 PMIC Regulators
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The MT6369 SPMI PMIC provides 2 BUCK and 15 LDO (Low DropOut) regulators.
+  The node is a child of the MT6369 PMIC node, see
+  Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml.
+
+properties:
+  compatible:
+    const: mediatek,mt6369-regulator
+
+patternProperties:
+  "^v(buck1|pa)$":
+    description: Buck regulators
+    type: object
+    $ref: regulator.yaml#
+    unevaluatedProperties: false
+    properties:
+      regulator-allowed-modes:
+        description: |
+          Buck regulator operating modes allowed. Valid values below.
+            0 - Normal mode with automatic power saving, reducing the switching
+                frequency when light load conditions are detected
+            1 - Forced Continuous Conduction mode (FCCM) for improved voltage
+                regulation accuracy with constant switching frequency but lower
+                regulator efficiency
+            2 - Forced Low Power mode for improved regulator efficiency, used
+                when no heavy load is expected
+        maxItems: 3
+        items:
+          enum: [ 0, 1, 2 ]
+
+  "^v(sram-core|digrf|aux18|usb|ibr|io28|fp|tp|mch|mc|cn33-1|cn33-2|aud28|ant18|efuse)$":
+    description: LDO regulators
+    type: object
+    $ref: regulator.yaml#
+    unevaluatedProperties: false
+    properties:
+      regulator-allowed-modes:
+        description: |
+          LDO regulator operating modes allowed. Valid values below.
+            0 - Normal mode
+            2 - Forced Low Power mode, for light loads
+        maxItems: 2
+        items:
+          enum: [ 0, 2 ]
+
+required:
+  - compatible
+
+additionalProperties: false
+
+examples:
+  - |
+    regulators {
+        compatible = "mediatek,mt6369-regulator";
+
+        vusb {
+            regulator-name = "vusb";
+            regulator-always-on;
+        };
+
+        vmc {
+            regulator-name = "vmc";
+            regulator-min-microvolt = <1800000>;
+            regulator-max-microvolt = <3300000>;
+        };
+    };

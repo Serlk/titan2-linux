@@ -13,14 +13,43 @@ description: |+
   On MediaTek SoCs the PMIC is connected via SPMI and the controller allows
   for multiple SoCs to control a single SPMI master.
 
+  The SPMI 2.0 variants also act as an interrupt controller for the Request
+  Capable Slave (RCS) interrupts raised by the devices on the bus.
+
 allOf:
   - $ref: spmi.yaml
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-spmi
+    then:
+      properties:
+        clocks: false
+        clock-names: false
+        assigned-clocks: false
+        assigned-clock-parents: false
+      required:
+        - interrupts
+        - interrupt-names
+        - interrupt-controller
+        - "#interrupt-cells"
+    else:
+      properties:
+        interrupts: false
+        interrupt-names: false
+        interrupt-controller: false
+        "#interrupt-cells": false
+      required:
+        - clocks
+        - clock-names
 
 properties:
   compatible:
     oneOf:
       - enum:
           - mediatek,mt6873-spmi
+          - mediatek,mt6878-spmi
           - mediatek,mt8195-spmi
       - items:
           - enum:
@@ -53,12 +82,26 @@ properties:
   assigned-clock-parents:
     maxItems: 1
 
+  interrupts:
+    maxItems: 1
+
+  interrupt-names:
+    const: rcs
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 3
+    description: |
+      cell 1: slave ID for the requested interrupt (0-15)
+      cell 2: the requested peripheral interrupt (0-7)
+      cell 3: interrupt flags indicating level-sense information,
+              as defined in dt-bindings/interrupt-controller/irq.h
+
 required:
   - compatible
   - reg
   - reg-names
-  - clocks
-  - clock-names
 
 unevaluatedProperties: false
 
@@ -79,5 +122,21 @@ examples:
                       "spmimst_clk_mux";
         assigned-clocks = <&topckgen CLK_TOP_PWRAP_ULPOSC_SEL>;
         assigned-clock-parents = <&topckgen CLK_TOP_OSC_D10>;
+    };
+
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    spmi@1cc04000 {
+        compatible = "mediatek,mt6878-spmi";
+        reg = <0x1cc04000 0x900>,
+              <0x1cc01000 0x100>;
+        reg-names = "pmif", "spmimst";
+        interrupts-extended = <&pio 212 IRQ_TYPE_LEVEL_HIGH>;
+        interrupt-names = "rcs";
+        interrupt-controller;
+        #interrupt-cells = <3>;
+        #address-cells = <2>;
+        #size-cells = <0>;
     };
 ...
