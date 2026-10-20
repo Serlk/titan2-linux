@@ -753,16 +753,24 @@
 			};
 		};
 
+		/*
+		 * The GPU PLL controllers sit in the MFG block, which the GPU
+		 * microcontroller (GPUEB) powers on and off on its own. Reading
+		 * them while MFG is down stalls the bus, so keep them disabled
+		 * until there is a GPU driver that holds MFG up.
+		 */
 		mfgpll: clock-controller@13fa0000 {
 			compatible = "mediatek,mt6878-mfgpll-pll-ctrl", "syscon";
 			reg = <0x13fa0000 0x800>;
 			#clock-cells = <1>;
+			status = "disabled";
 		};
 
 		mfgscpll: clock-controller@13fa0c00 {
 			compatible = "mediatek,mt6878-mfgscpll-pll-ctrl", "syscon";
 			reg = <0x13fa0c00 0x1000>;
 			#clock-cells = <1>;
+			status = "disabled";
 		};
 
 		/*
@@ -1021,10 +1029,16 @@
 			#clock-cells = <1>;
 		};
 
+		/*
+		 * Part of the SCP (sensor hub) subsystem: only accessible while
+		 * the SCP is powered and clocked, which Linux does not control
+		 * yet. Nothing uses these gates so far.
+		 */
 		scp_cfg: clock-controller@1cb21000 {
 			compatible = "mediatek,mt6878-scp-cfg", "syscon";
 			reg = <0x1cb21000 0x1000>;
 			#clock-cells = <1>;
+			status = "disabled";
 		};
 
 		spmi: spmi@1cc04000 {
