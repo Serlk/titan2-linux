@@ -7,6 +7,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/module.h>
@@ -24,6 +25,8 @@
 #define OVL_FME_CPL_INT					BIT(1)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
+#define OVL_EN						BIT(0)
+#define OVL_BYPASS_SHADOW				BIT(22)
 #define DISP_REG_OVL_RST			0x0014
 #define DISP_REG_OVL_ROI_SIZE			0x0020
 #define DISP_REG_OVL_DATAPATH_CON		0x0024
@@ -51,6 +54,8 @@
 #define DISP_REG_OVL_ADDR(ovl, n)		((ovl)->data->addr + 0x20 * (n))
 #define DISP_REG_OVL_HDR_ADDR(ovl, n)		((ovl)->data->addr + 0x20 * (n) + 0x04)
 #define DISP_REG_OVL_HDR_PITCH(ovl, n)		((ovl)->data->addr + 0x20 * (n) + 0x08)
+#define DISP_REG_OVL_ADDR_MSB(ovl, n)		((ovl)->data->addr + 0x20 * (n) + 0x0c)
+#define OVL_ADDR_MSB					GENMASK(3, 0)
 
 #define GMC_THRESHOLD_BITS	16
 #define GMC_THRESHOLD_HIGH	((1 << GMC_THRESHOLD_BITS) / 4)
@@ -150,6 +155,10 @@ struct mtk_disp_ovl_data {
 	const u32 *formats;
 	size_t num_formats;
 	bool supports_clrfmt_ext;
+	/* registers take effect right away, not at the next frame */
+	bool bypass_shadow;
+	/* bits 35:32 of the layer address in ADDR_MSB */
+	bool supports_addr_msb;
 };
 
 /*
@@ -268,14 +277,16 @@ void mtk_ovl_start(struct device *dev)
 		reg = reg | OVL_LAYER_SMI_ID_EN;
 		writel_relaxed(reg, ovl->regs + DISP_REG_OVL_DATAPATH_CON);
 	}
-	writel_relaxed(0x1, ovl->regs + DISP_REG_OVL_EN);
+	writel_relaxed(OVL_EN | (ovl->data->bypass_shadow ? OVL_BYPASS_SHADOW : 0),
+		       ovl->regs + DISP_REG_OVL_EN);
 }
 
 void mtk_ovl_stop(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
 
-	writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_EN);
+	writel_relaxed(ovl->data->bypass_shadow ? OVL_BYPASS_SHADOW : 0,
+		       ovl->regs + DISP_REG_OVL_EN);
 	if (ovl->data->smi_id_en) {
 		unsigned int reg;
 
@@ -563,6 +574,11 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 			      DISP_REG_OVL_OFFSET(idx));
 	mtk_ddp_write_relaxed(cmdq_pkt, addr, &ovl->cmdq_reg, ovl->regs,
 			      DISP_REG_OVL_ADDR(ovl, idx));
+	if (ovl->data->supports_addr_msb)
+		mtk_ddp_write_relaxed(cmdq_pkt,
+				      FIELD_PREP(OVL_ADDR_MSB, upper_32_bits(pending->addr)),
+				      &ovl->cmdq_reg, ovl->regs,
+				      DISP_REG_OVL_ADDR_MSB(ovl, idx));
 
 	if (ovl->data->supports_afbc)
 		mtk_ovl_afbc_layer_config(ovl, idx, pending, cmdq_pkt);
@@ -681,6 +697,25 @@ static const struct mtk_disp_ovl_data mt8167_ovl_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+/*
+ * OVL_2L of MT6878: as on MT8192, with 36-bit layer addresses and the
+ * shadow registers bypassed, as the MediaTek downstream driver runs it.
+ */
+static const struct mtk_disp_ovl_data mt6878_ovl_2l_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 2,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.blend_modes = BIT(DRM_MODE_BLEND_PREMULTI) |
+		       BIT(DRM_MODE_BLEND_COVERAGE) |
+		       BIT(DRM_MODE_BLEND_PIXEL_NONE),
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.bypass_shadow = true,
+	.supports_addr_msb = true,
+};
+
 static const struct mtk_disp_ovl_data mt8173_ovl_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 8,
@@ -752,6 +787,8 @@ static const struct mtk_disp_ovl_data mt8195_ovl_driver_data = {
 static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-ovl",
 	  .data = &mt2701_ovl_driver_data},
+	{ .compatible = "mediatek,mt6878-disp-ovl-2l",
+	  .data = &mt6878_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt8167-disp-ovl",
 	  .data = &mt8167_ovl_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-ovl",
