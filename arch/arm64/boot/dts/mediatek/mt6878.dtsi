@@ -1256,9 +1256,14 @@
 		};
 
 		watchdog: watchdog@1c00a000 {
+			/*
+			 * simple-mfd: the reboot-mode child below only gets a
+			 * device (and "reboot bootloader" only works) if the
+			 * node's children are populated.
+			 */
 			compatible = "mediatek,mt6878-wdt",
 				     "mediatek,mt6589-wdt",
-				     "syscon";
+				     "syscon", "simple-mfd";
 			reg = <0x1c00a000 0x100>;
 
 			reboot-mode {

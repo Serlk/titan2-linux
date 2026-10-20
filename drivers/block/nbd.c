@@ -1589,8 +1589,15 @@ static int nbd_start_device_ioctl(struct nbd_device *nbd)
 	if (max_part)
 		set_bit(GD_NEED_PART_SCAN, &nbd->disk->state);
 	mutex_unlock(&nbd->config_lock);
-	ret = wait_event_interruptible(config->recv_wq,
-					 atomic_read(&config->recv_threads) == 0);
+	/*
+	 * The freezer wakes user space tasks with a fake signal: in an
+	 * interruptible wait that would end the wait and shut the
+	 * connection down below, and all I/O on the device would fail
+	 * after any system suspend attempt. Sleep freezable instead, the
+	 * task is then frozen in place; a real signal still ends the wait.
+	 */
+	ret = wait_event_freezable(config->recv_wq,
+				   atomic_read(&config->recv_threads) == 0);
 	if (ret) {
 		sock_shutdown(nbd);
 		nbd_clear_que(nbd);

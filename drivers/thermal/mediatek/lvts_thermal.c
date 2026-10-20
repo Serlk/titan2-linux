@@ -104,6 +104,9 @@
 #define LVTS_COEFF_CONST_MT6878		280000
 #define LVTS_COUNT_R_GOLDEN_MT6878	14437
 #define LVTS_GOLDEN_TEMP_MT6878		60
+/* Plausible range of a firmware configured controller reading */
+#define LVTS_FW_TEMP_MIN		(-40000)
+#define LVTS_FW_TEMP_MAX		150000
 
 #define LVTS_MSR_READ_TIMEOUT_US	400
 #define LVTS_MSR_READ_WAIT_US		(LVTS_MSR_READ_TIMEOUT_US / 2)
@@ -383,6 +386,27 @@ static int lvts_get_temp(struct thermal_zone_device *tz, int *temp)
 	void __iomem *msr = lvts_sensor->msr;
 	u32 value;
 	int rc;
+
+	/*
+	 * Controllers left running by the firmware (MT6878): the valid bit
+	 * is not dependable there, it is often found clear for sensing
+	 * points the firmware does measure, and the MediaTek downstream driver ignores
+	 * it. The register holds the last filtered result; zero means no
+	 * measurement yet. The firmware armed a hardware reset at 119 C,
+	 * so a reading far outside the operating range is not a real one.
+	 */
+	if (lvts_data->fw_configured) {
+		value = readl(msr) & 0xFFFF;
+		if (!value)
+			return -EAGAIN;
+
+		rc = lvts_data->ops->lvts_sensor_raw_to_temp(value, lvts_sensor);
+		if (rc < LVTS_FW_TEMP_MIN || rc > LVTS_FW_TEMP_MAX)
+			return -EAGAIN;
+
+		*temp = rc;
+		return 0;
+	}
 
 	/*
 	 * Measurement registers:
