@@ -51,6 +51,10 @@ void mtk_dsi_ddp_start(struct device *dev);
 void mtk_dsi_ddp_stop(struct device *dev);
 unsigned int mtk_dsi_encoder_index(struct device *dev);
 bool mtk_dsi_ddp_is_cmd_mode(struct device *dev);
+void mtk_dsi_ddp_register_vblank_cb(struct device *dev,
+				    void (*vblank_cb)(void *),
+				    void *vblank_cb_data);
+void mtk_dsi_ddp_unregister_vblank_cb(struct device *dev);
 void mtk_dsi_ddp_wait_idle(struct device *dev);
 void mtk_dsi_ddp_trigger(struct device *dev);
 

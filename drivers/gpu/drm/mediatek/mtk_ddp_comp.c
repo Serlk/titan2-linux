@@ -321,6 +321,8 @@ static const struct mtk_ddp_comp_funcs ddp_dsi = {
 	.stop = mtk_dsi_ddp_stop,
 	.encoder_index = mtk_dsi_encoder_index,
 	.is_cmd_mode = mtk_dsi_ddp_is_cmd_mode,
+	.register_vblank_cb = mtk_dsi_ddp_register_vblank_cb,
+	.unregister_vblank_cb = mtk_dsi_ddp_unregister_vblank_cb,
 	.wait_idle = mtk_dsi_ddp_wait_idle,
 	.trigger = mtk_dsi_ddp_trigger,
 };

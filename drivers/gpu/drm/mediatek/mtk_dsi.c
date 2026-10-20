@@ -42,6 +42,8 @@
 #define TE_RDY_INT_FLAG			BIT(2)
 #define VM_DONE_INT_FLAG		BIT(3)
 #define EXT_TE_RDY_INT_FLAG		BIT(4)
+/* MT6878 (and the MediaTek downstream driver): a frame of a command mode panel is sent */
+#define FRAME_DONE_INT_FLAG		EXT_TE_RDY_INT_FLAG
 #define DSI_BUSY			BIT(31)
 
 #define DSI_CON_CTRL		0x10
@@ -161,6 +163,17 @@
 
 #define NS_TO_CYCLE(n, c)    ((n) / (c) + (((n) % (c)) ? 1 : 0))
 
+/* longest a command mode frame may take, waiting for the TE edge included */
+#define MTK_DSI_FRAME_TIMEOUT_MS	100
+
+/*
+ * Command mode panels: start frames on the tearing effect signal of the
+ * panel (DSI_TE input) instead of right away.
+ */
+static bool dsi_te;
+module_param(dsi_te, bool, 0644);
+MODULE_PARM_DESC(dsi_te, "Command mode: start each frame on the tearing effect signal");
+
 #define MTK_DSI_HOST_IS_READ(type) \
 	((type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM) || \
 	(type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM) || \
@@ -196,6 +209,11 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	/*
+	 * The boot loader may leave the link running for a command mode
+	 * panel: keep its D-PHY timings and its lane state.
+	 */
+	bool boot_handover;
 };
 
 struct mtk_dsi {
@@ -214,6 +232,22 @@ struct mtk_dsi {
 	struct clk *hs_clk;
 
 	u32 data_rate;
+	/* lane bit rate requested by the peripheral (hs_rate), 0 if none */
+	unsigned long hs_rate;
+
+	/* D-PHY timings found at probe, valid for boot_rate */
+	u32 boot_timcon[4];
+	unsigned long boot_rate;
+	/* the lanes are still in the state the boot loader left them in */
+	bool lanes_from_boot;
+	/* engine and digital clocks kept on from probe to the first power on */
+	bool boot_clks_held;
+
+	/* command mode: a frame has been started and is not done yet */
+	bool frame_pending;
+	spinlock_t frame_lock;
+	void (*vblank_cb)(void *data);
+	void *vblank_cb_data;
 
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
@@ -250,6 +284,24 @@ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
 	u32 timcon0, timcon1, timcon2, timcon3;
 	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
 	struct mtk_phy_timing *timing = &dsi->phy_timing;
+
+	/*
+	 * The link still runs at the rate the boot loader set up: keep the
+	 * timings it programmed for it.
+	 */
+	if (dsi->boot_rate && dsi->boot_rate == dsi->data_rate) {
+		timing->lpx = FIELD_GET(LPX, dsi->boot_timcon[0]);
+		timing->da_hs_prepare = FIELD_GET(HS_PREP, dsi->boot_timcon[0]);
+		timing->da_hs_zero = FIELD_GET(HS_ZERO, dsi->boot_timcon[0]);
+		timing->da_hs_trail = FIELD_GET(HS_TRAIL, dsi->boot_timcon[0]);
+		timing->da_hs_exit = FIELD_GET(DA_HS_EXIT, dsi->boot_timcon[1]);
+
+		writel(dsi->boot_timcon[0], dsi->regs + DSI_PHY_TIMECON0);
+		writel(dsi->boot_timcon[1], dsi->regs + DSI_PHY_TIMECON1);
+		writel(dsi->boot_timcon[2], dsi->regs + DSI_PHY_TIMECON2);
+		writel(dsi->boot_timcon[3], dsi->regs + DSI_PHY_TIMECON3);
+		return;
+	}
 
 	timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
 	timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
@@ -589,6 +641,21 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 	mtk_dsi_ps_control(dsi, false);
 }
 
+/* Command mode: only the size of the frame and the pixel format matter */
+static void mtk_dsi_config_cmd_mode(struct mtk_dsi *dsi)
+{
+	struct videomode *vm = &dsi->vm;
+
+	writel(FIELD_PREP(VACT_NL, vm->vactive), dsi->regs + DSI_VACT_NL);
+
+	if (dsi->driver_data->has_size_ctl)
+		writel(FIELD_PREP(DSI_HEIGHT, vm->vactive) |
+		       FIELD_PREP(DSI_WIDTH, vm->hactive),
+		       dsi->regs + DSI_SIZE_CON);
+
+	mtk_dsi_ps_control(dsi, false);
+}
+
 static void mtk_dsi_start(struct mtk_dsi *dsi)
 {
 	writel(0, dsi->regs + DSI_START);
@@ -610,6 +677,7 @@ static bool mtk_dsi_is_cmd_mode(struct mtk_dsi *dsi)
 }
 
 static void mtk_dsi_wait_for_idle(struct mtk_dsi *dsi);
+static void mtk_dsi_wait_frame_done(struct mtk_dsi *dsi);
 
 static void mtk_dsi_set_cmd_mode(struct mtk_dsi *dsi)
 {
@@ -619,6 +687,9 @@ static void mtk_dsi_set_cmd_mode(struct mtk_dsi *dsi)
 static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 {
 	u32 inten = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+
+	if (mtk_dsi_is_cmd_mode(dsi))
+		inten |= FRAME_DONE_INT_FLAG;
 
 	writel(inten, dsi->regs + DSI_INTEN);
 }
@@ -653,13 +724,57 @@ static s32 mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
 	return ret;
 }
 
+/*
+ * Command mode: the frame started by mtk_dsi_ddp_trigger() has been sent.
+ * Report it to the CRTC as its vblank. Returns false if no frame was
+ * pending.
+ */
+static bool mtk_dsi_frame_done(struct mtk_dsi *dsi)
+{
+	void (*vblank_cb)(void *data) = NULL;
+	void *vblank_cb_data = NULL;
+	unsigned long flags;
+	bool pending;
+
+	spin_lock_irqsave(&dsi->frame_lock, flags);
+	pending = dsi->frame_pending;
+	dsi->frame_pending = false;
+	if (pending) {
+		vblank_cb = dsi->vblank_cb;
+		vblank_cb_data = dsi->vblank_cb_data;
+	}
+	spin_unlock_irqrestore(&dsi->frame_lock, flags);
+
+	if (vblank_cb)
+		vblank_cb(vblank_cb_data);
+
+	return pending;
+}
+
 static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 {
 	struct mtk_dsi *dsi = dev_id;
 	u32 status, tmp;
-	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG |
+		   FRAME_DONE_INT_FLAG;
+	u32 frame_flags = CMD_DONE_INT_FLAG | FRAME_DONE_INT_FLAG;
 
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
+
+	/*
+	 * The end of a command mode frame (the command queue holding the
+	 * write_memory_start packet is done) is not a command completion.
+	 */
+	if ((status & frame_flags) && READ_ONCE(dsi->frame_pending)) {
+		mtk_dsi_mask(dsi, DSI_INTSTA, status & frame_flags, 0);
+		if (mtk_dsi_frame_done(dsi))
+			wake_up(&dsi->irq_wait_queue);
+		status &= ~frame_flags;
+	} else if (status & FRAME_DONE_INT_FLAG) {
+		/* the second end of frame flag of a frame already done */
+		mtk_dsi_mask(dsi, DSI_INTSTA, FRAME_DONE_INT_FLAG, 0);
+		status &= ~FRAME_DONE_INT_FLAG;
+	}
 
 	if (status) {
 		do {
@@ -695,6 +810,14 @@ static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
 		dsi->lanes_ready = true;
 		mtk_dsi_rxtx_control(dsi);
 		usleep_range(30, 100);
+		/*
+		 * Lanes left in the stop state by the boot loader, with the
+		 * panel listening: no D-PHY reset, no ULPS exit sequence.
+		 */
+		if (dsi->lanes_from_boot) {
+			mtk_dsi_clk_hs_mode(dsi, 0);
+			return;
+		}
 		mtk_dsi_reset_dphy(dsi);
 		mtk_dsi_clk_ulp_mode_leave(dsi);
 		mtk_dsi_lane0_ulp_mode_leave(dsi);
@@ -704,9 +827,20 @@ static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
 	}
 }
 
+static void mtk_dsi_release_boot_clks(struct mtk_dsi *dsi)
+{
+	if (!dsi->boot_clks_held)
+		return;
+
+	clk_disable_unprepare(dsi->digital_clk);
+	clk_disable_unprepare(dsi->engine_clk);
+	dsi->boot_clks_held = false;
+}
+
 static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 {
 	struct device *dev = dsi->host.dev;
+	unsigned long rate;
 	int ret;
 	u32 bit_per_pixel;
 
@@ -723,13 +857,34 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
 					  dsi->lanes);
 
+	/* the lane rate the peripheral asks for, if it can carry the mode */
+	if (dsi->hs_rate) {
+		if (dsi->hs_rate >= dsi->data_rate)
+			dsi->data_rate = dsi->hs_rate;
+		else
+			dev_warn(dev, "HS rate %lu below the %u bps the mode needs\n",
+				 dsi->hs_rate, dsi->data_rate);
+	}
+
 	ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
 	if (ret < 0) {
 		dev_err(dev, "Failed to set data rate: %d\n", ret);
 		goto err_refcount;
 	}
 
-	phy_power_on(dsi->phy);
+	ret = phy_power_on(dsi->phy);
+	if (ret < 0) {
+		dev_err(dev, "Failed to power on the PHY: %d\n", ret);
+		goto err_refcount;
+	}
+
+	/* the PHY may run at another rate, e.g. as set up by the boot loader */
+	rate = clk_get_rate(dsi->hs_clk);
+	if (rate && rate != dsi->data_rate) {
+		dev_info(dev, "lanes run at %lu bps (%u bps requested)\n",
+			 rate, dsi->data_rate);
+		dsi->data_rate = rate;
+	}
 
 	ret = clk_prepare_enable(dsi->engine_clk);
 	if (ret < 0) {
@@ -743,6 +898,8 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		goto err_disable_engine_clk;
 	}
 
+	mtk_dsi_release_boot_clks(dsi);
+
 	mtk_dsi_enable(dsi);
 
 	if (dsi->driver_data->has_shadow_ctl)
@@ -752,9 +909,13 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_phy_timconfig(dsi);
 
-	mtk_dsi_ps_control(dsi, true);
-	mtk_dsi_set_vm_cmd(dsi);
-	mtk_dsi_config_vdo_timing(dsi);
+	if (mtk_dsi_is_cmd_mode(dsi)) {
+		mtk_dsi_config_cmd_mode(dsi);
+	} else {
+		mtk_dsi_ps_control(dsi, true);
+		mtk_dsi_set_vm_cmd(dsi);
+		mtk_dsi_config_vdo_timing(dsi);
+	}
 	mtk_dsi_set_interrupt_enable(dsi);
 
 	return 0;
@@ -782,12 +943,15 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 * mtk_dsi_start() needs to be called in mtk_output_dsi_enable(),
 	 * after dsi is fully set.
 	 */
-	mtk_dsi_stop(dsi);
-
-	if (mtk_dsi_is_cmd_mode(dsi))
+	if (mtk_dsi_is_cmd_mode(dsi)) {
+		/* do not cut a frame short */
+		mtk_dsi_wait_frame_done(dsi);
 		mtk_dsi_wait_for_idle(dsi);
-	else
+		mtk_dsi_stop(dsi);
+	} else {
+		mtk_dsi_stop(dsi);
 		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	}
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -802,6 +966,7 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	phy_power_off(dsi->phy);
 
 	dsi->lanes_ready = false;
+	dsi->lanes_from_boot = false;
 }
 
 static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
@@ -813,13 +978,13 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 
 	if (mtk_dsi_is_cmd_mode(dsi)) {
 		/*
-		 * The panel is initialized by now: let the transfer of each
-		 * frame wait for the tearing effect signal of the panel, and
-		 * keep the clock lane in LP between transfers. Frames are
-		 * started by the CRTC, see mtk_dsi_ddp_trigger().
+		 * The panel is initialized by now. Frames are started by the
+		 * CRTC, see mtk_dsi_ddp_trigger(); with dsi_te each transfer
+		 * waits for the tearing effect signal of the panel (not
+		 * before: an uninitialized panel gives no TE).
 		 */
-		mtk_dsi_mask(dsi, DSI_TXRX_CTRL, EXT_TE_EN | HSTX_CKLP_EN,
-			     EXT_TE_EN | HSTX_CKLP_EN);
+		if (dsi_te)
+			mtk_dsi_mask(dsi, DSI_TXRX_CTRL, EXT_TE_EN, EXT_TE_EN);
 	} else {
 		mtk_dsi_start(dsi);
 	}
@@ -831,6 +996,10 @@ static void mtk_output_dsi_disable(struct mtk_dsi *dsi)
 {
 	if (!dsi->enabled)
 		return;
+
+	/* the panel is told to sleep next: let the frame in flight end */
+	if (mtk_dsi_is_cmd_mode(dsi))
+		mtk_dsi_wait_frame_done(dsi);
 
 	dsi->enabled = false;
 }
@@ -949,13 +1118,59 @@ bool mtk_dsi_ddp_is_cmd_mode(struct device *dev)
 	return mtk_dsi_is_cmd_mode(dsi);
 }
 
+void mtk_dsi_ddp_register_vblank_cb(struct device *dev,
+				    void (*vblank_cb)(void *),
+				    void *vblank_cb_data)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&dsi->frame_lock, flags);
+	dsi->vblank_cb = vblank_cb;
+	dsi->vblank_cb_data = vblank_cb_data;
+	spin_unlock_irqrestore(&dsi->frame_lock, flags);
+}
+
+void mtk_dsi_ddp_unregister_vblank_cb(struct device *dev)
+{
+	mtk_dsi_ddp_register_vblank_cb(dev, NULL, NULL);
+}
+
+/*
+ * Command mode: wait for the frame started last. A frame that never ends
+ * is completed here, so that its page flip is not left hanging, and the
+ * engine is reset.
+ */
+static void mtk_dsi_wait_frame_done(struct mtk_dsi *dsi)
+{
+	long ret;
+
+	ret = wait_event_timeout(dsi->irq_wait_queue,
+				 !READ_ONCE(dsi->frame_pending),
+				 msecs_to_jiffies(MTK_DSI_FRAME_TIMEOUT_MS));
+	if (ret)
+		return;
+
+	if (!mtk_dsi_frame_done(dsi))
+		return;
+
+	dev_warn_ratelimited(dsi->dev, "frame not done after %u ms (INTSTA 0x%08x)\n",
+			     MTK_DSI_FRAME_TIMEOUT_MS,
+			     readl(dsi->regs + DSI_INTSTA));
+	mtk_dsi_enable(dsi);
+	mtk_dsi_reset_engine(dsi);
+}
+
 /* Wait until the previous frame (or command) has been sent */
 void mtk_dsi_ddp_wait_idle(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 
-	if (dsi->enabled)
-		mtk_dsi_wait_for_idle(dsi);
+	if (!dsi->refcount)
+		return;
+
+	mtk_dsi_wait_frame_done(dsi);
+	mtk_dsi_wait_for_idle(dsi);
 }
 
 /*
@@ -969,9 +1184,12 @@ void mtk_dsi_ddp_trigger(struct device *dev)
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 	u32 reg_cmdq_off = dsi->driver_data->reg_cmdq_off;
 
+	unsigned long flags;
+
 	if (!dsi->enabled || !mtk_dsi_is_cmd_mode(dsi))
 		return;
 
+	mtk_dsi_wait_frame_done(dsi);
 	mtk_dsi_wait_for_idle(dsi);
 
 	/* commands sent in between have overwritten the queue */
@@ -982,6 +1200,10 @@ void mtk_dsi_ddp_trigger(struct device *dev)
 	mtk_dsi_mask(dsi, DSI_CMDQ_SIZE, CMDQ_SIZE, 1);
 	if (dsi->driver_data->cmdq_long_packet_ctl)
 		mtk_dsi_mask(dsi, DSI_CMDQ_SIZE, CMDQ_SIZE_SEL, CMDQ_SIZE_SEL);
+
+	spin_lock_irqsave(&dsi->frame_lock, flags);
+	dsi->frame_pending = true;
+	spin_unlock_irqrestore(&dsi->frame_lock, flags);
 
 	mtk_dsi_start(dsi);
 }
@@ -1067,6 +1289,7 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->lanes = device->lanes;
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
+	dsi->hs_rate = device->hs_rate;
 	dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
 	if (IS_ERR(dsi->next_bridge)) {
 		ret = PTR_ERR(dsi->next_bridge);
@@ -1203,7 +1426,7 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 	u8 read_data[16];
 	void *src_addr;
 	u8 irq_flag = CMD_DONE_INT_FLAG;
-	u32 dsi_mode;
+	u32 dsi_mode, txrx_ctrl = 0;
 	int ret, i;
 
 	dsi_mode = readl(dsi->regs + DSI_MODE_CTRL);
@@ -1218,6 +1441,17 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		irq_flag |= LPRX_RD_RDY_INT_FLAG;
 
 	mtk_dsi_lane_ready(dsi);
+
+	/*
+	 * Commands must not wait for a tearing effect edge: a panel in
+	 * sleep mode gives none.
+	 */
+	txrx_ctrl = readl(dsi->regs + DSI_TXRX_CTRL);
+	if (txrx_ctrl & EXT_TE_EN) {
+		mtk_dsi_wait_frame_done(dsi);
+		mtk_dsi_wait_for_idle(dsi);
+		writel(txrx_ctrl & ~EXT_TE_EN, dsi->regs + DSI_TXRX_CTRL);
+	}
 
 	ret = mtk_dsi_host_send_cmd(dsi, msg, irq_flag);
 	if (ret)
@@ -1257,6 +1491,9 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		 recv_cnt, *((u8 *)(msg->tx_buf)));
 
 restore_dsi_mode:
+	if (txrx_ctrl & EXT_TE_EN)
+		mtk_dsi_mask(dsi, DSI_TXRX_CTRL, EXT_TE_EN, EXT_TE_EN);
+
 	if (dsi_mode & MODE) {
 		mtk_dsi_set_mode(dsi);
 		mtk_dsi_start(dsi);
@@ -1270,6 +1507,56 @@ static const struct mipi_dsi_host_ops mtk_dsi_ops = {
 	.detach = mtk_dsi_host_detach,
 	.transfer = mtk_dsi_host_transfer,
 };
+
+/*
+ * A boot loader driving a command mode panel leaves the controller enabled
+ * in command mode, with the D-PHY set up for the rate its PLL runs at.
+ * Keep those timings and do not take the lanes through a reset and an ULPS
+ * exit on the first power up: the panel is listening and keeps showing
+ * the boot picture until the first frame. Nothing is written here.
+ */
+static void mtk_dsi_read_boot_state(struct mtk_dsi *dsi)
+{
+	struct device *dev = dsi->dev;
+	u32 con_ctrl, mode_ctrl;
+	unsigned int i;
+
+	if (!dsi->driver_data->boot_handover)
+		return;
+
+	if (clk_prepare_enable(dsi->engine_clk))
+		return;
+	if (clk_prepare_enable(dsi->digital_clk)) {
+		clk_disable_unprepare(dsi->engine_clk);
+		return;
+	}
+
+	con_ctrl = readl(dsi->regs + DSI_CON_CTRL);
+	mode_ctrl = readl(dsi->regs + DSI_MODE_CTRL);
+	for (i = 0; i < ARRAY_SIZE(dsi->boot_timcon); i++)
+		dsi->boot_timcon[i] = readl(dsi->regs + DSI_PHY_TIMECON0 + 4 * i);
+
+	dsi->boot_rate = clk_get_rate(dsi->hs_clk);
+
+	if (!(con_ctrl & DSI_EN) || (mode_ctrl & MODE) != CMD_MODE ||
+	    !dsi->boot_timcon[0] || !dsi->boot_rate) {
+		dsi->boot_rate = 0;
+		clk_disable_unprepare(dsi->digital_clk);
+		clk_disable_unprepare(dsi->engine_clk);
+		return;
+	}
+
+	/*
+	 * The controller is running as the boot loader left it, with its
+	 * interrupts possibly enabled: keep its clocks on until it is
+	 * powered up for real.
+	 */
+	dsi->boot_clks_held = true;
+	dsi->lanes_from_boot = true;
+	dev_info(dev, "command mode link left on at %lu bps, keeping its D-PHY timings %08x %08x %08x %08x\n",
+		 dsi->boot_rate, dsi->boot_timcon[0], dsi->boot_timcon[1],
+		 dsi->boot_timcon[2], dsi->boot_timcon[3]);
+}
 
 static int mtk_dsi_probe(struct platform_device *pdev)
 {
@@ -1316,17 +1603,24 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	dsi->host.dev = dev;
 
 	init_waitqueue_head(&dsi->irq_wait_queue);
+	spin_lock_init(&dsi->frame_lock);
+	dsi->dev = dev;
 
 	platform_set_drvdata(pdev, dsi);
 
+	mtk_dsi_read_boot_state(dsi);
+
 	ret = mipi_dsi_host_register(&dsi->host);
-	if (ret < 0)
+	if (ret < 0) {
+		mtk_dsi_release_boot_clks(dsi);
 		return dev_err_probe(dev, ret, "Failed to register DSI host\n");
+	}
 
 	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
 			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
 	if (ret) {
 		mipi_dsi_host_unregister(&dsi->host);
+		mtk_dsi_release_boot_clks(dsi);
 		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
 	}
 
@@ -1342,7 +1636,19 @@ static void mtk_dsi_remove(struct platform_device *pdev)
 
 	mtk_output_dsi_disable(dsi);
 	mipi_dsi_host_unregister(&dsi->host);
+	mtk_dsi_release_boot_clks(dsi);
 }
+
+/* MT8186 layout; the command queue size is always set by software */
+static const struct mtk_dsi_driver_data mt6878_dsi_driver_data = {
+	.reg_cmdq_off = 0xd00,
+	.reg_vm_cmd_off = 0x200,
+	.reg_shadow_dbg_off = 0xc00,
+	.has_shadow_ctl = true,
+	.has_size_ctl = true,
+	.cmdq_long_packet_ctl = true,
+	.boot_handover = true,
+};
 
 static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
 	.reg_cmdq_off = 0x200,
@@ -1384,6 +1690,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6878-dsi", .data = &mt6878_dsi_driver_data },
 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
