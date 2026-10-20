@@ -26,6 +26,7 @@ static const struct mtk_gate_regs im_c_s_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &im_c_s_cg_regs,			\
 		.shift = _shift,			\
+		.flags = CLK_OPS_PARENT_ENABLE,		\
 		.ops = &mtk_clk_gate_ops_setclr,	\
 	}
 
@@ -53,6 +54,7 @@ static const struct mtk_gate_regs imp_es_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &imp_es_cg_regs,		\
 		.shift = _shift,			\
+		.flags = CLK_OPS_PARENT_ENABLE,		\
 		.ops = &mtk_clk_gate_ops_setclr,	\
 	}
 
@@ -78,6 +80,7 @@ static const struct mtk_clk_desc imp_iic_wrap_ess_desc = {
 		.parent_name = _parent,			\
 		.regs = &imp_es_cg_regs,		\
 		.shift = _shift,			\
+		.flags = CLK_OPS_PARENT_ENABLE,		\
 		.ops = &mtk_clk_gate_ops_setclr,	\
 	}
 
@@ -113,6 +116,7 @@ static const struct mtk_gate_regs imp_ws_cg_regs = {
 		.parent_name = _parent,			\
 		.regs = &imp_ws_cg_regs,		\
 		.shift = _shift,			\
+		.flags = CLK_OPS_PARENT_ENABLE,		\
 		.ops = &mtk_clk_gate_ops_setclr,	\
 	}
 
