@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, display bring-up: mediatek-drm on the main panel instead of
+ * simplefb and the LK frame trigger.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * Work in progress, not for flashing: the DSI PHY has no driver yet and
+ * mtk_dsi has no command mode support, so the pipeline does not come up.
+ * Builds on the -pd variant (power controller on). The panel power
+ * switches are plain GPIOs, kept on from boot (regulator-boot-on): the
+ * panel driver takes them over when it probes. The backlight stays as LK
+ * left it (disp_pwm0 has no mainline driver for MT6878 yet).
+ */
+
+#include "mt6878-unihertz-titan2-pd.dts"
+
+/ {
+	/* panel power switches, in the stock power-up order */
+	panel_pm: regulator-panel-pm {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_pm";
+		gpio = <&pio 149 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	panel_vci: regulator-panel-vci {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_vci";
+		gpio = <&pio 40 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	panel_lcm: regulator-panel-lcm {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_lcm";
+		gpio = <&pio 38 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	panel_lcd: regulator-panel-lcd {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_lcd";
+		gpio = <&pio 32 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+};
+
+/* both would write the registers mediatek-drm now owns */
+&{/chosen/simplefb@fe04f000} {
+	status = "disabled";
+};
+
+&disp_kick {
+	status = "disabled";
+};
+
+&mmsys {
+	power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+	status = "okay";
+};
+
+&disp_mutex0 {
+	status = "okay";
+};
+
+&disp_ovl0_2l {
+	status = "okay";
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&dsi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dsi0_te_pins>;
+	status = "okay";
+
+	panel@0 {
+		compatible = "unihertz,titan2-main-panel";
+		reg = <0>;
+		reset-gpios = <&pio 90 GPIO_ACTIVE_LOW>;
+		touch-reset-gpios = <&pio 6 GPIO_ACTIVE_LOW>;
+		pm-supply = <&panel_pm>;
+		vci-supply = <&panel_vci>;
+		lcm-supply = <&panel_lcm>;
+		lcd-supply = <&panel_lcd>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out>;
+			};
+		};
+	};
+
+	port {
+		dsi0_out: endpoint {
+			remote-endpoint = <&panel_in>;
+		};
+	};
+};
+
+&pio {
+	/* tearing effect input of DSI0 */
+	dsi0_te_pins: dsi0-te-pins {
+		pins-te {
+			pinmux = <PINMUX_GPIO89__FUNC_DSI_TE>;
+			input-enable;
+		};
+	};
+};
