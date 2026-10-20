@@ -20,7 +20,7 @@ config MTK_CMDQ
 config MTK_CONNINFRA
 	tristate "MediaTek CONNINFRA (connectivity subsystem) support"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
-	depends on OF && PM
+	depends on OF && PM && HAVE_ARM_SMCCC
 	select MFD_SYSCON
 	select REGMAP
 	help
