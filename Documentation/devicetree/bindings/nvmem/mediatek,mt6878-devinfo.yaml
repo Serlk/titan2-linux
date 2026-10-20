@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/nvmem/mediatek,mt6878-devinfo.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek boot loader provided device information (efuse copy)
+
+description: |
+  On MediaTek smartphone SoCs such as the MT6878 the efuse block cannot be
+  read from the normal world. The boot loader copies it into the
+  "atag,devinfo" property of /chosen (a little-endian word count followed
+  by the words). This node exposes that copy as an NVMEM provider; cell
+  offsets are byte offsets into the copied words, as in the vendor device
+  trees.
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+allOf:
+  - $ref: nvmem.yaml#
+  - $ref: nvmem-deprecated-cells.yaml#
+
+properties:
+  $nodename:
+    pattern: "^efuse(-[a-z0-9]+)?$"
+
+  compatible:
+    const: mediatek,mt6878-devinfo
+
+required:
+  - compatible
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    efuse {
+        compatible = "mediatek,mt6878-devinfo";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        lvts_efuse_data1: lvts-data1@1ac {
+            reg = <0x1ac 0x30>;
+        };
+    };
