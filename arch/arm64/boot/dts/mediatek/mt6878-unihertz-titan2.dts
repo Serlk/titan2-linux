@@ -28,6 +28,8 @@
 
 	chosen {
 		bootargs = "clk_ignore_unused pd_ignore_unused";
+		/* LK fills it from its TRNG, but only when the property exists */
+		kaslr-seed = /bits/ 64 <0>;
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
@@ -106,7 +108,6 @@
 		 * Programmable side key "Func2" (as the GPL v2 module gpio_key.ko
 		 * shipped with Titan 2 V01.00.14: GPIO73,
 		 * both edges, low = pressed, scan code 250, 200 us EINT debounce).
-		 * Not checked on mainline yet.
 		 */
 		key-func2 {
 			label = "Func2";
@@ -114,7 +115,6 @@
 			gpios = <&pio 73 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
 			wakeup-source;
-			status = "disabled";
 		};
 	};
 
@@ -129,7 +129,6 @@
 		gpio = <&pio 59 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		startup-delay-us = <20000>;
-		status = "disabled";
 	};
 };
 
@@ -145,9 +144,9 @@
 };
 
 /*
- * Input devices from the stock DT. The I2C buses are not
- * checked on mainline yet, so everything here starts disabled; enable the
- * device together with the supply it references.
+ * Input devices from the stock DT. The keyboard and the
+ * touchscreen take their supplies from the MT6369 on SPMI; a board without
+ * SPMI has to disable them together with it.
  */
 
 /*
@@ -166,7 +165,6 @@
 		/* GPIO6 is routed as touch,reset-gpio but the factory driver never drives it */
 		vdd-supply = <&mt6369_vtp>;
 		syna,startup-delay-ms = <100>;
-		status = "disabled";
 
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -197,7 +195,6 @@
 		reset-gpios = <&pio 4 GPIO_ACTIVE_LOW>;
 		vdd-supply = <&touchpad_vdd>;
 		syna,reset-delay-ms = <120>;
-		status = "disabled";
 
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -234,7 +231,6 @@
 		awinic,row-lines = <0 1 2 3 4 5 6 7 8>;
 		awinic,column-lines = <9 10 11 12 13 14 15>;
 		wakeup-source;
-		status = "disabled";
 
 		/*
 		 * The stock key_map[] as is: entry 7 * row + column. Duplicates and
@@ -367,6 +363,12 @@
 				linux,keycodes = <KEY_POWER>;
 				wakeup-source;
 			};
+
+			/* Programmable side key "Func1" (stock scan code 249) */
+			home {
+				linux,keycodes = <249>;
+				wakeup-source;
+			};
 		};
 
 		regulators@30 {
@@ -456,12 +458,11 @@
 
 			/*
 			 * Keyboard expander supply (stock mt6369_vio28-supply of
-			 * aw9523b_led@58). Disabled until that device is enabled: a
-			 * described but unused rail would be switched off at late init.
+			 * aw9523b_led@58). Neither the stock DT nor its driver (the GPL
+			 * module aw9523_key.ko) set a voltage: only switched on, at the level the PMIC comes up with.
 			 */
 			mt6369_vio28: vio28 {
 				regulator-name = "mt6369_vio28";
-				status = "disabled";
 			};
 
 			/* Touchscreen supply, set to 2.8 V by the factory driver */
@@ -469,7 +470,6 @@
 				regulator-name = "mt6369_vtp";
 				regulator-min-microvolt = <2800000>;
 				regulator-max-microvolt = <2800000>;
-				status = "disabled";
 			};
 		};
 	};

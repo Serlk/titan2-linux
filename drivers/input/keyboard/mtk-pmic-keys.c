@@ -139,14 +139,16 @@ static const struct mtk_pmic_regs mt6359_regs = {
  * On MT6363 the key interrupts are enabled by the PMIC interrupt controller
  * and the long-press reset is configured by the bootloader: there is no
  * interrupt selection to do and the reset setup is left untouched.
+ * TOPSTATUS holds the debounced key levels, low while pressed: PWRKEY in bit 1,
+ * HOMEKEY in bit 3 (bit 2 is the charger detection), as read by the bootloader.
  */
 static const struct mtk_pmic_regs mt6363_regs = {
 	.keys_regs[MTK_PMIC_PWRKEY_INDEX] =
 		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
-				   0x1, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
+				   0x2, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
 	.keys_regs[MTK_PMIC_HOMEKEY_INDEX] =
 		MTK_PMIC_KEYS_REGS(MT6363_TOPSTATUS,
-				   0x3, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
+				   0x8, MT6363_PSC_TOP_INT_CON0, 0x0, 0),
 	.key_release_irq = true,
 };
 
