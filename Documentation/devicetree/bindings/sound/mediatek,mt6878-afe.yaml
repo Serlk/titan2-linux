@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt6878-afe.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek Audio Front End PCM controller for MT6878
+
+maintainers:
+  - Serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The Audio Front End (AFE) of the MT6878 SoC moves audio between memory
+  and the audio interfaces (ADDA to the PMIC codec, I2S/ETDM, PCM, TDM).
+  The AFE gates its own module clocks through its register space; the
+  clocks below come from topckgen and pericfg_ao.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-afe
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  memory-region:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: mux for the audio internal bus
+      - description: mux selecting APLL1 for the audio clock tree
+      - description: mux selecting APLL2 for the audio clock tree
+      - description: mux for the audio engine, 44.1 kHz family
+      - description: mux for the audio engine, 48 kHz family
+      - description: mux for the audio high speed clock
+      - description: APLL1 output
+      - description: APLL2 output
+      - description: APLL1 divided by 4
+      - description: APLL2 divided by 4
+      - description: 26 MHz reference
+      - description: pericfg_ao audio slave bus gate
+      - description: pericfg_ao audio master bus gate
+      - description: pericfg_ao audio internal bus gate
+
+  clock-names:
+    items:
+      - const: top_aud_intbus
+      - const: top_aud_1
+      - const: top_aud_2
+      - const: top_aud_eng1
+      - const: top_aud_eng2
+      - const: top_aud_h
+      - const: apll1
+      - const: apll2
+      - const: apll1_d4
+      - const: apll2_d4
+      - const: clk26m
+      - const: peri_aud_slv
+      - const: peri_aud_mst
+      - const: peri_aud_intbus
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - power-domains
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6878-clock.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/power/mediatek,mt6878-power.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        afe@11050000 {
+            compatible = "mediatek,mt6878-afe";
+            reg = <0 0x11050000 0 0x9000>;
+            interrupts = <GIC_SPI 392 IRQ_TYPE_LEVEL_HIGH 0>;
+            power-domains = <&spm MT6878_POWER_DOMAIN_AUDIO>;
+            clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>,
+                     <&topckgen CLK_TOP_AUD_1_SEL>,
+                     <&topckgen CLK_TOP_AUD_2_SEL>,
+                     <&topckgen CLK_TOP_AUD_ENGEN1_SEL>,
+                     <&topckgen CLK_TOP_AUD_ENGEN2_SEL>,
+                     <&topckgen CLK_TOP_AUDIO_H_SEL>,
+                     <&topckgen CLK_TOP_APLL1>,
+                     <&topckgen CLK_TOP_APLL2>,
+                     <&topckgen CLK_TOP_APLL1_D4>,
+                     <&topckgen CLK_TOP_APLL2_D4>,
+                     <&topckgen CLK_TOP_TCK_26M_MX9>,
+                     <&pericfg_ao CLK_PERAOP_AUDIO0>,
+                     <&pericfg_ao CLK_PERAOP_AUDIO1>,
+                     <&pericfg_ao CLK_PERAOP_AUDIO2>;
+            clock-names = "top_aud_intbus",
+                          "top_aud_1",
+                          "top_aud_2",
+                          "top_aud_eng1",
+                          "top_aud_eng2",
+                          "top_aud_h",
+                          "apll1",
+                          "apll2",
+                          "apll1_d4",
+                          "apll2_d4",
+                          "clk26m",
+                          "peri_aud_slv",
+                          "peri_aud_mst",
+                          "peri_aud_intbus";
+        };
+    };
+
+...
