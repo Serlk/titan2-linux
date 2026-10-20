@@ -1122,6 +1122,22 @@ config MFD_MT6360
 	  PMIC part includes 2-channel BUCKs and 2-channel LDOs
 	  LDO part includes 4-channel LDOs
 
+config MFD_MT6375
+	tristate "MediaTek MT6375 SubPMIC"
+	select MFD_CORE
+	select REGMAP
+	select REGMAP_IRQ
+	depends on I2C
+	depends on OF || COMPILE_TEST
+	help
+	  Say Y here to enable the core of the MediaTek MT6375 SubPMIC: a
+	  switching battery charger with BC1.2 detection, ADC, coulomb
+	  counter and a USB Type-C/PD port controller behind one I2C bus.
+	  The function blocks are separate drivers.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called "mt6375".
+
 config MFD_MT6370
 	tristate "MediaTek MT6370 SubPMIC"
 	select MFD_CORE
