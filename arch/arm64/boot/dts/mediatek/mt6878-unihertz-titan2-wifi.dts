@@ -207,6 +207,24 @@
 		scp-remap-offset = <0x2100000>;
 		scp-remap-size = <0x20000>;
 	};
+
+	/*
+	 * Bluetooth core (BGF) of CONNSYS. HCI runs through rings in the
+	 * CONNSYS EMI (BEIF), its BT image is loaded there by LK. The
+	 * CONN_INFRA window is shared with CONNINFRA and Wi-Fi.
+	 */
+	bt@18800000 {
+		compatible = "mediatek,mt6878-bt";
+		reg = <0 0x18800000 0 0x30000>,
+		      <0 0x18000000 0 0x100000>;
+		reg-names = "bgf", "conninfra";
+		/* BGF2AP software interrupt, CONN2AP (BGF bus timeout) */
+		interrupts = <GIC_SPI 693 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 132 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "bgf2ap", "conn2ap";
+		mediatek,conninfra = <&consys>;
+		status = "disabled";
+	};
 };
 
 /*
