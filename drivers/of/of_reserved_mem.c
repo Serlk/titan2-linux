@@ -140,6 +140,19 @@ static int __init early_init_dt_reserve_memory(phys_addr_t base,
  * __reserved_mem_reserve_reg() - reserve memory described in the
  * first entry in 'reg' property
  */
+/*
+ * MediaTek's stock bootloader (LK) reserves the boot framebuffer it leaves
+ * on screen as "mediatek,framebuffer" without no-map. Kept in the linear
+ * map, it cannot be remapped write-combined, so simple-framebuffer and
+ * simpledrm fail on it. The region is never used as RAM, so treat it as
+ * no-map like the bootloaders that patch this in themselves.
+ */
+static bool __init __reserved_mem_is_nomap(unsigned long node)
+{
+	return of_get_flat_dt_prop(node, "no-map", NULL) ||
+	       of_flat_dt_is_compatible(node, "mediatek,framebuffer");
+}
+
 static int __init __reserved_mem_reserve_reg(unsigned long node,
 					     const char *uname)
 {
@@ -157,7 +170,7 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 		pr_warn("Reserved memory: node '%s' has %d <base size> entries, only the first is used\n",
 			uname, len);
 
-	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
+	nomap = __reserved_mem_is_nomap(node);
 
 	err = fdt_validate_reserved_mem_node(node, NULL);
 	if (err && err != -ENODEV)
@@ -649,7 +662,7 @@ static void __init fdt_init_reserved_mem_node(unsigned long node, const char *un
 	rmem->base = base;
 	rmem->size = size;
 
-	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
+	nomap = __reserved_mem_is_nomap(node);
 
 	err = __reserved_mem_init_node(rmem, node);
 	if (err != 0 && err != -ENODEV) {
