@@ -48,6 +48,10 @@ properties:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: CONNINFRA node powering CONNSYS
 
+  local-mac-address: true
+
+  mac-address: true
+
   emi-size:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: Size of the WFDMA pool, read by the boot loader only
