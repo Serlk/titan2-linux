@@ -28,6 +28,8 @@
 
 	chosen {
 		bootargs = "clk_ignore_unused pd_ignore_unused";
+		/* LK fills it from its TRNG, but only when the property exists */
+		kaslr-seed = /bits/ 64 <0>;
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
