@@ -79,13 +79,15 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (state->polarity != PWM_POLARITY_NORMAL)
 		return -EINVAL;
 
-	if (!state->enabled && mdp->enabled) {
-		mtk_disp_pwm_update_bits(mdp, DISP_PWM_EN,
-					 mdp->data->enable_mask, 0x0);
-		clk_disable_unprepare(mdp->clk_mm);
-		clk_disable_unprepare(mdp->clk_main);
-
-		mdp->enabled = false;
+	if (!state->enabled) {
+		/* nothing to do for a PWM that is already off */
+		if (mdp->enabled) {
+			mtk_disp_pwm_update_bits(mdp, DISP_PWM_EN,
+						 mdp->data->enable_mask, 0x0);
+			clk_disable_unprepare(mdp->clk_mm);
+			clk_disable_unprepare(mdp->clk_main);
+			mdp->enabled = false;
+		}
 		return 0;
 	}
 
