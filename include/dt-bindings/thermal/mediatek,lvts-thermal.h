@@ -109,4 +109,29 @@
 #define MT8196_AP_BOT2                  6
 #define MT8196_AP_BOT3                  7
 
+#define MT6878_MCU_BIG_CPU4_0		0
+#define MT6878_MCU_BIG_CPU4_1		1
+#define MT6878_MCU_BIG_CPU5_0		2
+#define MT6878_MCU_BIG_CPU5_1		3
+#define MT6878_MCU_BIG_CPU6_0		4
+#define MT6878_MCU_BIG_CPU6_1		5
+#define MT6878_MCU_BIG_CPU7_0		6
+#define MT6878_MCU_BIG_CPU7_1		7
+#define MT6878_MCU_LITTLE_CPU0		8
+#define MT6878_MCU_LITTLE_CPU1		9
+#define MT6878_MCU_LITTLE_CPU2		10
+#define MT6878_MCU_LITTLE_CPU3		11
+#define MT6878_MCU_DSU0			12
+#define MT6878_MCU_DSU1			13
+
+#define MT6878_AP_SOC_TOP0		0
+#define MT6878_AP_SOC_TOP1		1
+#define MT6878_AP_APU			2
+#define MT6878_AP_SOC_BOT0		3
+#define MT6878_AP_SOC_BOT1		4
+#define MT6878_AP_MD0			5
+#define MT6878_AP_MD1			6
+#define MT6878_AP_MD2			7
+#define MT6878_AP_MD3			8
+
 #endif /* __MEDIATEK_LVTS_DT_H */

@@ -154,6 +154,14 @@
 	};
 };
 
+/*
+ * CPU DVFS stays with the frequencies LK left until it has been seen
+ * working on the device: see mt6878-unihertz-titan2-dvfs.dts.
+ */
+&performance {
+	status = "disabled";
+};
+
 &pio {
 	key_gpio_default: key-default-pins {
 		pins-keys {

@@ -227,6 +227,20 @@ config NVMEM_MTK_EFUSE
 	  This driver can also be built as a module. If so, the module
 	  will be called efuse-mtk.
 
+config NVMEM_MTK_DEVINFO
+	tristate "MediaTek boot loader provided devinfo support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	help
+	  On recent MediaTek smartphone SoCs (MT6878) the efuse is not
+	  readable from Linux; the boot loader passes a copy of it in the
+	  "atag,devinfo" property of /chosen. This driver exposes that
+	  copy as a read-only NVMEM device, for calibration data such as
+	  the thermal sensor coefficients.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called nvmem_mtk-devinfo.
+
 config NVMEM_MXS_OCOTP
 	tristate "Freescale MXS On-Chip OTP Memory Support"
 	depends on ARCH_MXS || COMPILE_TEST

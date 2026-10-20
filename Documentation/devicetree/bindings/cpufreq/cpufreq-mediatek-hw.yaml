@@ -16,15 +16,19 @@ description:
 
 properties:
   compatible:
-    const: mediatek,cpufreq-hw
+    enum:
+      - mediatek,cpufreq-hw
+      - mediatek,mt6878-cpufreq-hw
 
   reg:
     minItems: 1
-    maxItems: 2
+    maxItems: 3
     description:
       Addresses and sizes for the memory of the HW bases in
       each frequency domain. Each entry corresponds to
       a register bank for each frequency domain present.
+      On MT6878 a third entry points to the firmware flag
+      that selects how the performance state is requested.
 
   "#performance-domain-cells":
     description:
@@ -37,6 +41,20 @@ required:
   - compatible
   - reg
   - "#performance-domain-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: mediatek,mt6878-cpufreq-hw
+    then:
+      properties:
+        reg:
+          minItems: 3
+    else:
+      properties:
+        reg:
+          maxItems: 2
 
 additionalProperties: false
 

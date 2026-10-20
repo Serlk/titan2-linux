@@ -41,6 +41,11 @@ struct mtk_cpufreq_priv {
 	struct device *dev;
 	const struct mtk_cpufreq_variant *variant;
 	void __iomem *fdvfs;
+	/*
+	 * The firmware takes a frequency in kHz instead of a LUT index
+	 * in the performance state register.
+	 */
+	bool perf_state_is_freq;
 };
 
 struct mtk_cpufreq_domain {
@@ -78,6 +83,42 @@ static int mtk_cpufreq_hw_mt8196_init(struct mtk_cpufreq_priv *priv)
 
 	return 0;
 }
+
+/*
+ * On MT6878 the MCUPM firmware, started by the boot loader, owns the DVFS
+ * engine and fills the LUTs. A flag word in its CSRAM (third register
+ * range) tells whether it expects a LUT index or a frequency in kHz in the
+ * performance state register.
+ */
+static int mtk_cpufreq_hw_mt6878_init(struct mtk_cpufreq_priv *priv)
+{
+	struct platform_device *pdev = to_platform_device(priv->dev);
+	void __iomem *flag;
+
+	flag = devm_platform_ioremap_resource(pdev, 2);
+	if (IS_ERR(flag))
+		return dev_err_probe(priv->dev, PTR_ERR(flag),
+				     "failed to map the frequency scaling flag\n");
+
+	priv->perf_state_is_freq = !!readl_relaxed(flag);
+
+	dev_info(priv->dev, "performance state in %s\n",
+		 priv->perf_state_is_freq ? "kHz" : "LUT index");
+
+	return 0;
+}
+
+static const struct mtk_cpufreq_variant cpufreq_mtk_mt6878_variant = {
+	.init = mtk_cpufreq_hw_mt6878_init,
+	.reg_offsets = {
+		[REG_FREQ_LUT_TABLE]	= 0x0,
+		[REG_FREQ_ENABLE]	= 0x84,
+		[REG_FREQ_PERF_STATE]	= 0x88,
+		[REG_FREQ_HW_STATE]	= 0x8c,
+		[REG_EM_POWER_TBL]	= 0x90,
+		[REG_FREQ_LATENCY]	= 0x114,
+	},
+};
 
 static const struct mtk_cpufreq_variant cpufreq_mtk_mt8196_variant = {
 	.init = mtk_cpufreq_hw_mt8196_init,
@@ -133,18 +174,26 @@ static void mtk_cpufreq_hw_fdvfs_switch(unsigned int target_freq,
 	}
 }
 
+static void mtk_cpufreq_hw_set_perf_state(struct cpufreq_policy *policy,
+					  unsigned int index,
+					  unsigned int fdvfs_freq)
+{
+	struct mtk_cpufreq_domain *data = policy->driver_data;
+	unsigned int target_freq = policy->freq_table[index].frequency;
+
+	if (data->parent->fdvfs)
+		mtk_cpufreq_hw_fdvfs_switch(fdvfs_freq, policy);
+	else if (data->parent->perf_state_is_freq)
+		writel_relaxed(target_freq, data->reg_bases[REG_FREQ_PERF_STATE]);
+	else
+		writel_relaxed(index, data->reg_bases[REG_FREQ_PERF_STATE]);
+}
+
 static int mtk_cpufreq_hw_target_index(struct cpufreq_policy *policy,
 				       unsigned int index)
 {
-	struct mtk_cpufreq_domain *data = policy->driver_data;
-	unsigned int target_freq;
-
-	if (data->parent->fdvfs) {
-		target_freq = policy->freq_table[index].frequency;
-		mtk_cpufreq_hw_fdvfs_switch(target_freq, policy);
-	} else {
-		writel_relaxed(index, data->reg_bases[REG_FREQ_PERF_STATE]);
-	}
+	mtk_cpufreq_hw_set_perf_state(policy, index,
+				      policy->freq_table[index].frequency);
 
 	return 0;
 }
@@ -162,7 +211,12 @@ static unsigned int mtk_cpufreq_hw_get(unsigned int cpu)
 	data = policy->driver_data;
 
 	index = readl_relaxed(data->reg_bases[REG_FREQ_PERF_STATE]);
-	index = min(index, LUT_MAX_ENTRIES - 1);
+
+	/* In kHz mode the register reads back the last requested frequency */
+	if (data->parent->perf_state_is_freq && index >= LUT_MAX_ENTRIES)
+		return index;
+
+	index = min_t(unsigned int, index, data->nr_opp - 1);
 
 	return data->table[index].frequency;
 }
@@ -170,15 +224,11 @@ static unsigned int mtk_cpufreq_hw_get(unsigned int cpu)
 static unsigned int mtk_cpufreq_hw_fast_switch(struct cpufreq_policy *policy,
 					       unsigned int target_freq)
 {
-	struct mtk_cpufreq_domain *data = policy->driver_data;
 	unsigned int index;
 
 	index = cpufreq_table_find_index_dl(policy, target_freq, false);
 
-	if (data->parent->fdvfs)
-		mtk_cpufreq_hw_fdvfs_switch(target_freq, policy);
-	else
-		writel_relaxed(index, data->reg_bases[REG_FREQ_PERF_STATE]);
+	mtk_cpufreq_hw_set_perf_state(policy, index, target_freq);
 
 	return policy->freq_table[index].frequency;
 }
@@ -422,6 +472,7 @@ static void mtk_cpufreq_hw_driver_remove(struct platform_device *pdev)
 
 static const struct of_device_id mtk_cpufreq_hw_match[] = {
 	{ .compatible = "mediatek,cpufreq-hw", .data = &cpufreq_mtk_base_variant },
+	{ .compatible = "mediatek,mt6878-cpufreq-hw", .data = &cpufreq_mtk_mt6878_variant },
 	{ .compatible = "mediatek,mt8196-cpufreq-hw", .data = &cpufreq_mtk_mt8196_variant },
 	{}
 };
