@@ -207,8 +207,9 @@ int mt7921_register_device(struct mt792x_dev *dev)
 	dev->pm.stats.last_wake_event = jiffies;
 	dev->pm.stats.last_doze_event = jiffies;
 
+	/* the SoC variant chooses its power management itself */
 	if (!mt76_is_usb(&dev->mt76) &&
-	    !is_mt7902(&dev->mt76)) {
+	    !is_mt7902(&dev->mt76) && !dev->soc_axi) {
 		dev->pm.enable_user = true;
 		dev->pm.enable = true;
 		dev->pm.ds_enable_user = true;
