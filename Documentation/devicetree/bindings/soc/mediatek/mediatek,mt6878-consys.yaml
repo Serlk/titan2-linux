@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6878-consys.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 CONNINFRA (connectivity subsystem infrastructure)
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  CONNINFRA powers and clocks the connectivity subsystem (CONNSYS) of
+  MediaTek smartphone SoCs and connects it to the external RF die (A-die).
+  The Wi-Fi, Bluetooth, GNSS and FM blocks of CONNSYS depend on it.
+  The compatible names the A-die. On MT6878 boards the boot loader detects
+  the A-die and rewrites the compatible of this node accordingly.
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt6878-6631-consys
+      - mediatek,mt6878-6631-6686-consys
+      - mediatek,mt6878-6637-consys
+
+  reg:
+    maxItems: 1
+    description: CONN_INFRA register window
+
+  power-domains:
+    maxItems: 1
+
+  vcn13-supply:
+    description: 1.35 V supply of the D-die analog front end and the A-die
+
+  vrfio18-supply:
+    description: 1.7 V I/O supply of the A-die and the crystal
+
+  pinctrl-names:
+    items:
+      - const: idle
+      - const: active
+
+  pinctrl-0: true
+  pinctrl-1: true
+
+  mediatek,topckgen:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: TOPCKGEN syscon, holding the CONNSYS host clock request
+
+  hwid-node:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    maxItems: 4
+    description:
+      GPIOs whose levels select the A-die, read by the boot loader only
+
+  adie-sku:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    maxItems: 8
+    description:
+      A-die for each hwid-node value (0 MT6637, 1 MT6631, 2 MT6631 with
+      MT6686), read by the boot loader only
+
+required:
+  - compatible
+  - reg
+  - power-domains
+  - vcn13-supply
+  - vrfio18-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        consys@18000000 {
+            compatible = "mediatek,mt6878-6637-consys";
+            reg = <0x18000000 0x100000>;
+            power-domains = <&spm 0>;
+            vcn13-supply = <&mt6363_vcn13>;
+            vrfio18-supply = <&mt6363_vrfio18>;
+            mediatek,topckgen = <&topckgen>;
+            hwid-node = <92 132 131>;
+            adie-sku = <1 1 0 0 2 2 1 0>;
+        };
+    };
