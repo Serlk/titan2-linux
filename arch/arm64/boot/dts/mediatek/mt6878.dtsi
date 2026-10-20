@@ -307,9 +307,10 @@
 			hw-voter-regmap = <&hwv>;
 		};
 
-		infracfg_ao: syscon@10001000 {
+		infracfg_ao: clock-controller@10001000 {
 			compatible = "mediatek,mt6878-infracfg-ao", "syscon";
 			reg = <0x10001000 0x1000>;
+			#clock-cells = <1>;
 		};
 
 		pio: pinctrl {
@@ -751,6 +752,156 @@
 			};
 		};
 
+		mfgpll: clock-controller@13fa0000 {
+			compatible = "mediatek,mt6878-mfgpll-pll-ctrl", "syscon";
+			reg = <0x13fa0000 0x800>;
+			#clock-cells = <1>;
+		};
+
+		mfgscpll: clock-controller@13fa0c00 {
+			compatible = "mediatek,mt6878-mfgscpll-pll-ctrl", "syscon";
+			reg = <0x13fa0c00 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		/*
+		 * The multimedia clock controllers below sit in switchable
+		 * power domains; they stay disabled until the nodes get their
+		 * power-domains from the SPM power controller.
+		 */
+		mmsys: syscon@14000000 {
+			compatible = "mediatek,mt6878-mmsys", "syscon";
+			reg = <0x14000000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys: clock-controller@15000000 {
+			compatible = "mediatek,mt6878-imgsys", "syscon";
+			reg = <0x15000000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys1_dip_top: clock-controller@15110000 {
+			compatible = "mediatek,mt6878-imgsys1-dip-top", "syscon";
+			reg = <0x15110000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys1_dip_nr1: clock-controller@15130000 {
+			compatible = "mediatek,mt6878-imgsys1-dip-nr1", "syscon";
+			reg = <0x15130000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys1_dip_nr2: clock-controller@15170000 {
+			compatible = "mediatek,mt6878-imgsys1-dip-nr2", "syscon";
+			reg = <0x15170000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys_wpe1: clock-controller@15220000 {
+			compatible = "mediatek,mt6878-imgsys-wpe1", "syscon";
+			reg = <0x15220000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys_wpe2: clock-controller@15520000 {
+			compatible = "mediatek,mt6878-imgsys-wpe2", "syscon";
+			reg = <0x15520000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys_traw: clock-controller@15710000 {
+			compatible = "mediatek,mt6878-imgsys-traw", "syscon";
+			reg = <0x15710000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		imgsys_vcore: clock-controller@15780000 {
+			compatible = "mediatek,mt6878-imgsys-vcore", "syscon";
+			reg = <0x15780000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vdecsys: clock-controller@1602f000 {
+			compatible = "mediatek,mt6878-vdecsys", "syscon";
+			reg = <0x1602f000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vencsys: clock-controller@17000000 {
+			compatible = "mediatek,mt6878-vencsys", "syscon";
+			reg = <0x17000000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_main: clock-controller@1a000000 {
+			compatible = "mediatek,mt6878-camsys-main", "syscon";
+			reg = <0x1a000000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_rawa: clock-controller@1a04f000 {
+			compatible = "mediatek,mt6878-camsys-rawa", "syscon";
+			reg = <0x1a04f000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_yuva: clock-controller@1a06f000 {
+			compatible = "mediatek,mt6878-camsys-yuva", "syscon";
+			reg = <0x1a06f000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_rawb: clock-controller@1a08f000 {
+			compatible = "mediatek,mt6878-camsys-rawb", "syscon";
+			reg = <0x1a08f000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_yuvb: clock-controller@1a0af000 {
+			compatible = "mediatek,mt6878-camsys-yuvb", "syscon";
+			reg = <0x1a0af000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_mraw: clock-controller@1a170000 {
+			compatible = "mediatek,mt6878-camsys-mraw", "syscon";
+			reg = <0x1a170000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		ccusys: clock-controller@1b200000 {
+			compatible = "mediatek,mt6878-ccusys", "syscon";
+			reg = <0x1b200000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		camsys_vcore: clock-controller@1b204000 {
+			compatible = "mediatek,mt6878-camsys-vcore", "syscon";
+			reg = <0x1b204000 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		scpsys: syscon@1c001000 {
 			compatible = "mediatek,mt6878-scpsys", "syscon", "simple-mfd";
 			reg = <0x1c001000 0x1000>;
@@ -863,6 +1014,18 @@
 			};
 		};
 
+		vlpckgen: clock-controller@1c012000 {
+			compatible = "mediatek,mt6878-vlpckgen", "syscon";
+			reg = <0x1c012000 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		scp_cfg: clock-controller@1cb21000 {
+			compatible = "mediatek,mt6878-scp-cfg", "syscon";
+			reg = <0x1cb21000 0x1000>;
+			#clock-cells = <1>;
+		};
+
 		spmi: spmi@1cc04000 {
 			compatible = "mediatek,mt6878-spmi";
 			reg = <0x1cc04000 0x900>,
@@ -874,6 +1037,21 @@
 			#interrupt-cells = <3>;
 			#address-cells = <2>;
 			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		mminfra_config: clock-controller@1e800000 {
+			compatible = "mediatek,mt6878-mminfra-config", "syscon";
+			reg = <0x1e800000 0x1000>;
+			#clock-cells = <1>;
+			mediatek,hardware-voter = <&hwv>;
+			status = "disabled";
+		};
+
+		mdpsys: clock-controller@1f000000 {
+			compatible = "mediatek,mt6878-mdpsys", "syscon";
+			reg = <0x1f000000 0x1000>;
+			#clock-cells = <1>;
 			status = "disabled";
 		};
 	};

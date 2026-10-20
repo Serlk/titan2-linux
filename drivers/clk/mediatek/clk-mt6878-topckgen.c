@@ -13,6 +13,7 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 
+#include "clk-gate.h"
 #include "clk-mtk.h"
 #include "clk-mux.h"
 
@@ -127,6 +128,7 @@
 #define TOP_MUX_MSDC30_1_HCLK_SHIFT		28
 #define TOP_MUX_AUD_INTBUS_SHIFT		29
 #define TOP_MUX_ATB_SHIFT			30
+#define TOP_MUX_DISP_PWM_SHIFT			0
 #define TOP_MUX_USB_TOP_SHIFT			1
 #define TOP_MUX_SSUSB_XHCI_SHIFT		2
 #define TOP_MUX_I2C_SHIFT			3
@@ -916,6 +918,16 @@ static const char * const atb_parents[] = {
 	"mainpll_d5_d2"
 };
 
+static const char * const disp_pwm_parents[] = {
+	"tck_26m_mx9_ck",
+	"univpll_d6_d4",
+	"osc_d2",
+	"osc_d4",
+	"osc_d16",
+	"univpll_d5_d4",
+	"mainpll_d4_d4"
+};
+
 static const char * const usb_parents[] = {
 	"tck_26m_mx9_ck",
 	"univpll_d5_d4",
@@ -1503,6 +1515,11 @@ static const struct mtk_mux top_muxes[] = {
 		atb_parents/* parent */, CLK_CFG_7, CLK_CFG_7_SET,
 		CLK_CFG_7_CLR/* set parent */, 16/* lsb */, 2/* width */,
 		CLK_CFG_UPDATE/* upd ofs */, TOP_MUX_ATB_SHIFT/* upd shift */),
+	MUX_GATE_CLR_SET_UPD(CLK_TOP_DISP_PWM_SEL/* dts */, "disp_pwm_sel",
+		disp_pwm_parents/* parent */, CLK_CFG_7, CLK_CFG_7_SET,
+		CLK_CFG_7_CLR/* set parent */, 24/* lsb */, 3/* width */,
+		31/* pdn */, CLK_CFG_UPDATE1/* upd ofs */,
+		TOP_MUX_DISP_PWM_SHIFT/* upd shift */),
 	/* CLK_CFG_8 */
 	MUX_GATE_CLR_SET_UPD(CLK_TOP_USB_TOP_SEL/* dts */, "usb_sel",
 		usb_parents/* parent */, CLK_CFG_8, CLK_CFG_8_SET,
@@ -1689,13 +1706,13 @@ static const struct mtk_mux top_muxes[] = {
 		CLK_CFG_18_CLR/* set parent */, 16/* lsb */, 2/* width */,
 		23/* pdn */, CLK_CFG_UPDATE2/* upd ofs */,
 		TOP_MUX_MFGSC_REF_SHIFT/* upd shift */),
-	/* CLK_CFG_20  - TODO */
-//	MUX_GATE(CLK_TOP_MFG_INT0_SEL/* dts */, "mfg_int0_sel",
-//		mfg_int0_parents/* parent */, CLK_CFG_20, CLK_CFG_20_SET,
-//		CLK_CFG_20_CLR/* set parent */, 16/* lsb */, 1/* width */),
-//	MUX_GATE(CLK_TOP_MFG1_INT1_SEL/* dts */, "mfg1_int1_sel",
-//		mfg1_int1_parents/* parent */, CLK_CFG_20, CLK_CFG_20_SET,
-//		CLK_CFG_20_CLR/* set parent */, 17/* lsb */, 1/* width */),
+	/* CLK_CFG_20 */
+	MUX_CLR_SET(CLK_TOP_MFG_INT0_SEL/* dts */, "mfg_int0_sel",
+		mfg_int0_parents/* parent */, CLK_CFG_20, CLK_CFG_20_SET,
+		CLK_CFG_20_CLR/* set parent */, 16/* lsb */, 1/* width */),
+	MUX_CLR_SET(CLK_TOP_MFG1_INT1_SEL/* dts */, "mfg1_int1_sel",
+		mfg1_int1_parents/* parent */, CLK_CFG_20, CLK_CFG_20_SET,
+		CLK_CFG_20_CLR/* set parent */, 17/* lsb */, 1/* width */),
 };
 
 static const struct mtk_composite top_aud_divs[] = {
@@ -1748,13 +1765,36 @@ static const struct mtk_composite top_aud_divs[] = {
 		8/* lsb */),
 };
 
+static const struct mtk_gate_regs top_cg_regs = {
+	.set_ofs = CLK_AUDDIV_0,
+	.clr_ofs = CLK_AUDDIV_0,
+	.sta_ofs = CLK_AUDDIV_0,
+};
+
+#define GATE_TOP(_id, _name, _parent, _shift)			\
+	GATE_MTK(_id, _name, _parent, &top_cg_regs, _shift,	\
+		 &mtk_clk_gate_ops_no_setclr)
+
+static const struct mtk_gate top_clks[] = {
+	/* CLK_AUDDIV_0 */
+	GATE_TOP(CLK_TOP_APLL12_DIV_SI1, "apll12_div_SI1", "aud_1_ck", 1),
+	GATE_TOP(CLK_TOP_APLL12_DIV_SI2, "apll12_div_SI2", "aud_1_ck", 2),
+	GATE_TOP(CLK_TOP_APLL12_DIV_SI4, "apll12_div_SI4", "aud_1_ck", 4),
+	GATE_TOP(CLK_TOP_APLL12_DIV_SO1, "apll12_div_SO1", "aud_1_ck", 7),
+	GATE_TOP(CLK_TOP_APLL12_DIV_SO2, "apll12_div_SO2", "aud_1_ck", 8),
+	GATE_TOP(CLK_TOP_APLL12_DIV_SO4, "apll12_div_SO4", "aud_1_ck", 10),
+	GATE_TOP(CLK_TOP_APLL12_DIV_FMI2S, "apll12_div_fmi2s", "aud_1_ck", 12),
+};
+
 static const struct mtk_clk_desc topck_desc = {
+	.clks = top_clks,
+	.num_clks = ARRAY_SIZE(top_clks),
 	.factor_clks = top_divs,
 	.num_factor_clks = ARRAY_SIZE(top_divs),
 	.mux_clks = top_muxes,
 	.num_mux_clks = ARRAY_SIZE(top_muxes),
-	//.composite_clks = top_aud_divs,
-	//.num_composite_clks = ARRAY_SIZE(top_aud_divs)
+	.composite_clks = top_aud_divs,
+	.num_composite_clks = ARRAY_SIZE(top_aud_divs),
 };
 
 static const struct of_device_id of_match_clk_mt6878_ck[] = {

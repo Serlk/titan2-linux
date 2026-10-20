@@ -34,7 +34,16 @@ obj-$(CONFIG_COMMON_CLK_MT6797_IMGSYS) += clk-mt6797-img.o
 obj-$(CONFIG_COMMON_CLK_MT6797_MMSYS) += clk-mt6797-mm.o
 obj-$(CONFIG_COMMON_CLK_MT6797_VDECSYS) += clk-mt6797-vdec.o
 obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
-obj-$(CONFIG_COMMON_CLK_MT6878) += clk-mt6878-apmixedsys.o clk-mt6878-topckgen.o clk-mt6878-peri_ao.o clk-mt6878-ufs_ao.o clk-mt6878-ufs_pdn.o clk-mt6878-imp_iic_wrap.o
+obj-$(CONFIG_COMMON_CLK_MT6878) += clk-mt6878-apmixedsys.o clk-mt6878-topckgen.o \
+				   clk-mt6878-vlpckgen.o clk-mt6878-infra_ao.o \
+				   clk-mt6878-peri_ao.o clk-mt6878-ufs_ao.o \
+				   clk-mt6878-ufs_pdn.o clk-mt6878-imp_iic_wrap.o \
+				   clk-mt6878-mfg.o clk-mt6878-scp.o
+obj-$(CONFIG_COMMON_CLK_MT6878_CAMSYS) += clk-mt6878-cam.o clk-mt6878-ccu.o
+obj-$(CONFIG_COMMON_CLK_MT6878_IMGSYS) += clk-mt6878-img.o
+obj-$(CONFIG_COMMON_CLK_MT6878_MDPSYS) += clk-mt6878-mdpsys.o
+obj-$(CONFIG_COMMON_CLK_MT6878_MMSYS) += clk-mt6878-mm.o clk-mt6878-mminfra.o
+obj-$(CONFIG_COMMON_CLK_MT6878_VCODEC) += clk-mt6878-vcodec.o
 obj-$(CONFIG_COMMON_CLK_MT2701) += clk-mt2701.o
 obj-$(CONFIG_COMMON_CLK_MT2701_AUDSYS) += clk-mt2701-aud.o
 obj-$(CONFIG_COMMON_CLK_MT2701_BDPSYS) += clk-mt2701-bdp.o

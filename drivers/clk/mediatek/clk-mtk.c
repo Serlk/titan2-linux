@@ -464,6 +464,35 @@ void mtk_clk_unregister_dividers(const struct mtk_clk_divider *mcds, int num,
 }
 EXPORT_SYMBOL_GPL(mtk_clk_unregister_dividers);
 
+#define MTK_CLK_MAX_ID(_n, _clks, _num)			\
+	do {						\
+		size_t _i;				\
+		for (_i = 0; _i < (_num); _i++)		\
+			_n = max_t(unsigned int, _n,	\
+				   (_clks)[_i].id + 1);	\
+	} while (0)
+
+/*
+ * The onecell table is indexed by the dt-bindings ID, which does not have to
+ * be dense or bounded by the number of registered clocks: size it for the
+ * largest ID that is actually used.
+ */
+static unsigned int mtk_clk_desc_num_ids(const struct mtk_clk_desc *mcd)
+{
+	unsigned int n = mcd->num_clks + mcd->num_composite_clks +
+			 mcd->num_fixed_clks + mcd->num_factor_clks +
+			 mcd->num_mux_clks + mcd->num_divider_clks;
+
+	MTK_CLK_MAX_ID(n, mcd->clks, mcd->num_clks);
+	MTK_CLK_MAX_ID(n, mcd->composite_clks, mcd->num_composite_clks);
+	MTK_CLK_MAX_ID(n, mcd->fixed_clks, mcd->num_fixed_clks);
+	MTK_CLK_MAX_ID(n, mcd->factor_clks, mcd->num_factor_clks);
+	MTK_CLK_MAX_ID(n, mcd->mux_clks, mcd->num_mux_clks);
+	MTK_CLK_MAX_ID(n, mcd->divider_clks, mcd->num_divider_clks);
+
+	return n;
+}
+
 static int __mtk_clk_simple_probe(struct platform_device *pdev,
 				  struct device_node *node)
 {
@@ -510,9 +539,7 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 	}
 
 	/* Calculate how many clk_hw_onecell_data entries to allocate */
-	num_clks = mcd->num_clks + mcd->num_composite_clks;
-	num_clks += mcd->num_fixed_clks + mcd->num_factor_clks;
-	num_clks += mcd->num_mux_clks + mcd->num_divider_clks;
+	num_clks = mtk_clk_desc_num_ids(mcd);
 
 	clk_data = mtk_alloc_clk_data(num_clks);
 	if (!clk_data) {
