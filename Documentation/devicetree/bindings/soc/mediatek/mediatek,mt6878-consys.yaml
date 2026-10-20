@@ -24,8 +24,18 @@ properties:
       - mediatek,mt6878-6637-consys
 
   reg:
-    maxItems: 1
-    description: CONN_INFRA register window
+    minItems: 1
+    items:
+      - description: CONN_INFRA register window
+      - description: Wi-Fi subsystem (WFSYS) register window
+      - description: SRCLKEN_RC (clock request controller), read only
+
+  reg-names:
+    minItems: 1
+    items:
+      - const: conninfra
+      - const: wfsys
+      - const: srclken-rc
 
   power-domains:
     maxItems: 1
@@ -36,13 +46,32 @@ properties:
   vrfio18-supply:
     description: 1.7 V I/O supply of the A-die and the crystal
 
+  vcn33-1-supply:
+    description: Wi-Fi and Bluetooth RF front end supply
+
+  vcn33-2-supply:
+    description: Wi-Fi RF front end supply
+
+  vant18-supply:
+    description: GNSS LNA supply
+
   pinctrl-names:
+    minItems: 2
     items:
       - const: idle
       - const: active
+      - const: adie-cfg
 
   pinctrl-0: true
   pinctrl-1: true
+  pinctrl-2:
+    description:
+      As "active", with the CONN_WF_CTRL2 pin as a GPIO that tells the A-die
+      the co-clock frequency while it leaves reset
+
+  mediatek,co-clock-52mhz:
+    type: boolean
+    description: The A-die is clocked by a 52 MHz instead of a 26 MHz co-clock
 
   mediatek,topckgen:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -61,6 +90,27 @@ properties:
       A-die for each hwid-node value (0 MT6637, 1 MT6631, 2 MT6631 with
       MT6686), read by the boot loader only
 
+  emi-addr:
+    $ref: /schemas/types.yaml#/definitions/uint64
+    description:
+      Base of the CONNSYS EMI region, written by the boot loader after it
+      placed the firmware there
+
+  emi-size:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Size of the CONNSYS EMI region
+
+patternProperties:
+  "^(ro|rw|ro-bt|ro-gps|ro-wifi)-emi-size$":
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Layout of the CONNSYS EMI region, read by the boot loader only
+
+  "^emi-(alignment|max-addr)$":
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Placement of the CONNSYS EMI region, read by the boot loader only
+
 required:
   - compatible
   - reg
@@ -78,12 +128,18 @@ examples:
 
         consys@18000000 {
             compatible = "mediatek,mt6878-6637-consys";
-            reg = <0x18000000 0x100000>;
+            reg = <0x18000000 0x100000>, <0x18400000 0x200000>;
+            reg-names = "conninfra", "wfsys";
             power-domains = <&spm 0>;
             vcn13-supply = <&mt6363_vcn13>;
             vrfio18-supply = <&mt6363_vrfio18>;
             mediatek,topckgen = <&topckgen>;
             hwid-node = <92 132 131>;
             adie-sku = <1 1 0 0 2 2 1 0>;
+            emi-size = <0xc00000>;
+            ro-emi-size = <0x680000>;
+            rw-emi-size = <0x480000>;
+            emi-alignment = <0x100000>;
+            emi-max-addr = <0x90000000>;
         };
     };
