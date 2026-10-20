@@ -5,6 +5,7 @@
 
 #include <linux/container_of.h>
 #include <linux/iosys-map.h>
+#include <linux/notifier.h>
 
 #include <video/pixel_format.h>
 
@@ -12,6 +13,7 @@
 #include <drm/drm_device.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_modes.h>
+#include <drm/drm_rect.h>
 
 struct drm_format_info;
 struct drm_scanout_buffer;
@@ -86,6 +88,29 @@ static inline struct drm_sysfb_device *to_drm_sysfb_device(struct drm_device *de
 {
 	return container_of(dev, struct drm_sysfb_device, dev);
 }
+
+/*
+ * Flush notification
+ *
+ * Some firmware-initialized displays only show the contents of the system
+ * framebuffer after the display hardware has been told to send a new frame,
+ * for example DSI panels in command mode with their own frame memory. The
+ * flush notifier lets a platform helper learn when a sysfb driver has written
+ * to the scanout buffer. Callbacks run in atomic context and must not sleep.
+ */
+
+/**
+ * struct drm_sysfb_flush_event - scanout buffer has been written
+ * @dev: the sysfb DRM device whose scanout buffer changed
+ * @clip: bounding box of all written areas, in scanout coordinates
+ */
+struct drm_sysfb_flush_event {
+	struct drm_device *dev;
+	struct drm_rect clip;
+};
+
+int drm_sysfb_register_flush_notifier(struct notifier_block *nb);
+int drm_sysfb_unregister_flush_notifier(struct notifier_block *nb);
 
 /*
  * Plane

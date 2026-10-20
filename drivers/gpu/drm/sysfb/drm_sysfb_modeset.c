@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/export.h>
+#include <linux/minmax.h>
+#include <linux/notifier.h>
 #include <linux/slab.h>
 
 #include <drm/drm_atomic.h>
@@ -326,6 +328,60 @@ int drm_sysfb_plane_helper_atomic_check(struct drm_plane *plane,
 }
 EXPORT_SYMBOL(drm_sysfb_plane_helper_atomic_check);
 
+/*
+ * Flush notification
+ */
+
+static ATOMIC_NOTIFIER_HEAD(drm_sysfb_flush_notifier_list);
+
+/**
+ * drm_sysfb_register_flush_notifier - get told about scanout buffer writes
+ * @nb: notifier block; its callback receives a struct drm_sysfb_flush_event
+ *
+ * Returns:
+ * 0 on success, or a negative errno code otherwise.
+ */
+int drm_sysfb_register_flush_notifier(struct notifier_block *nb)
+{
+	return atomic_notifier_chain_register(&drm_sysfb_flush_notifier_list, nb);
+}
+EXPORT_SYMBOL(drm_sysfb_register_flush_notifier);
+
+/**
+ * drm_sysfb_unregister_flush_notifier - stop flush notifications
+ * @nb: notifier block passed to drm_sysfb_register_flush_notifier()
+ *
+ * Returns:
+ * 0 on success, or a negative errno code otherwise.
+ */
+int drm_sysfb_unregister_flush_notifier(struct notifier_block *nb)
+{
+	return atomic_notifier_chain_unregister(&drm_sysfb_flush_notifier_list, nb);
+}
+EXPORT_SYMBOL(drm_sysfb_unregister_flush_notifier);
+
+static void drm_sysfb_notify_flush(struct drm_device *dev, const struct drm_rect *clip)
+{
+	struct drm_sysfb_flush_event event = {
+		.dev = dev,
+		.clip = *clip,
+	};
+
+	atomic_notifier_call_chain(&drm_sysfb_flush_notifier_list, 0, &event);
+}
+
+static void drm_sysfb_rect_union(struct drm_rect *r, const struct drm_rect *clip)
+{
+	if (!drm_rect_visible(r)) {
+		*r = *clip;
+		return;
+	}
+	r->x1 = min(r->x1, clip->x1);
+	r->y1 = min(r->y1, clip->y1);
+	r->x2 = max(r->x2, clip->x2);
+	r->y2 = max(r->y2, clip->y2);
+}
+
 void drm_sysfb_plane_helper_atomic_update(struct drm_plane *plane, struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = plane->dev;
@@ -341,7 +397,7 @@ void drm_sysfb_plane_helper_atomic_update(struct drm_plane *plane, struct drm_at
 	const struct drm_format_info *dst_format = sysfb_crtc_state->format;
 	drm_sysfb_blit_func blit_to_crtc = sysfb_plane_state->blit_to_crtc;
 	struct drm_atomic_helper_damage_iter iter;
-	struct drm_rect damage;
+	struct drm_rect damage, flushed = { };
 	int ret, idx;
 
 	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
@@ -362,7 +418,11 @@ void drm_sysfb_plane_helper_atomic_update(struct drm_plane *plane, struct drm_at
 		iosys_map_incr(&dst, drm_fb_clip_offset(dst_pitch, dst_format, &dst_clip));
 		blit_to_crtc(&dst, &dst_pitch, shadow_plane_state->data, fb, &damage,
 			     &shadow_plane_state->fmtcnv_state);
+		drm_sysfb_rect_union(&flushed, &dst_clip);
 	}
+
+	if (drm_rect_visible(&flushed))
+		drm_sysfb_notify_flush(dev, &flushed);
 
 	drm_dev_exit(idx);
 out_drm_gem_fb_end_cpu_access:
@@ -400,6 +460,9 @@ void drm_sysfb_plane_helper_atomic_disable(struct drm_plane *plane,
 		memset_io(dst_vmap, 0, linepixels * dst_format->cpp[0]);
 		dst_vmap += dst_pitch;
 	}
+
+	if (drm_rect_visible(&dst_clip))
+		drm_sysfb_notify_flush(dev, &dst_clip);
 
 	drm_dev_exit(idx);
 }
