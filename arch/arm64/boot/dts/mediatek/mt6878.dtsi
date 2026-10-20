@@ -252,6 +252,18 @@
 		clock-output-names = "clk32k";
 	};
 
+	/*
+	 * The calibrated on-chip ULPOSC1 (260 MHz, as the stock device tree;
+	 * the preloader logs "ULPOSC1 K done: 261M"). Parent of the osc_*
+	 * dividers in topckgen, e.g. of disp_pwm_sel as LK leaves it.
+	 */
+	ulposc: clock-260m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <260000000>;
+		clock-output-names = "ulposc";
+	};
+
 	pmu-a55 {
 		compatible = "arm,cortex-a55-pmu";
 		interrupt-parent = <&gic>;
