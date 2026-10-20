@@ -436,7 +436,7 @@
 			};
 
 			/* USB PHY 3.3V (stock: vusb33 of the USB controller) */
-			vusb {
+			mt6369_vusb: vusb {
 				regulator-name = "mt6369_vusb";
 				regulator-always-on;
 			};
@@ -486,7 +486,27 @@
 	};
 };
 
+/*
+ * USB device mode only for now. Type-C role detection (TCPC in the MT6375
+ * charger) is not described yet; the PHY forces the device role and VBUS
+ * valid (mediatek,software-role-switch), as the stock kernel does through
+ * mediatek,force-vbus.
+ *
+ * The SSUSB power domain is not referenced: the SCPSYS controller is still
+ * disabled, and the domain is left on by the boot chain (the preloader
+ * enumerates USB on every boot, LK only touches IPPC/MAC registers).
+ */
+&ssusb {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	vusb33-supply = <&mt6369_vusb>;
+	status = "okay";
+};
+
 &u2port {
+	/* stock eye diagram and disconnect threshold tuning */
+	mediatek,eye-vrt = <2>;
+	mediatek,discth = <9>;
 	status = "okay";
 };
 
