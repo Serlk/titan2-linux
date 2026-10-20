@@ -485,6 +485,27 @@
 			compatible = "mediatek,mt6363-regulator";
 			reg = <0x30>;
 
+			/*
+			 * Modem rails, always on in stock: vbuck1 digital RF
+			 * (0.7 V), vbuck2 modem core, vsram-modem modem SRAM
+			 * (0.8 V). LK sets them up and starts the modem; the
+			 * modem driver only checks the voltages.
+			 */
+			mt6363_vbuck1: vbuck1 {
+				regulator-name = "mt6363_vbuck1";
+				regulator-always-on;
+			};
+
+			mt6363_vbuck2: vbuck2 {
+				regulator-name = "mt6363_vbuck2";
+				regulator-always-on;
+			};
+
+			mt6363_vsram_modem: vsram-modem {
+				regulator-name = "mt6363_vsram_modem";
+				regulator-always-on;
+			};
+
 			/* CPU clusters (stock: proc1/proc3 and proc2 of the cpufreq node) */
 			vbuck5 {
 				regulator-name = "mt6363_vbuck5";
@@ -662,3 +683,10 @@
 };
 
 #include "mt6878-titan2-lk-compat.dtsi"
+
+/* still disabled in mt6878.dtsi: the supplies are only checked */
+&modem {
+	md-vmodem-supply = <&mt6363_vbuck2>;
+	md-vsram-supply = <&mt6363_vsram_modem>;
+	md-vdigrf-supply = <&mt6363_vbuck1>;
+};

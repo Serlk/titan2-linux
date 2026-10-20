@@ -27,16 +27,20 @@ properties:
     const: mediatek,mt6878-ccci
 
   reg:
+    minItems: 3
     items:
       - description: modem side registers
       - description: CCIF0, AP side
       - description: CCIF0, modem side
+      - description: infracfg block holding the CCIF0 reset
 
   reg-names:
+    minItems: 3
     items:
       - const: md
       - const: ccif-ap
       - const: ccif-md
+      - const: infra
 
   interrupts:
     items:
@@ -67,6 +71,35 @@ properties:
     description: Size in bytes of the CCIF channel data SRAM.
     default: 512
 
+  mediatek,ccif-reset-bit:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 31
+    description: Bit of CCIF0 in the reset set/clear registers of "infra".
+
+  mediatek,scpsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: SCPSYS syscon, to read the modem power state.
+
+  mediatek,topckgen:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: topckgen syscon holding the modem clock gates.
+
+  power-domains:
+    maxItems: 1
+    description:
+      The modem (MD) power domain. Leave it out while the bootloader
+      started modem is to be left alone: with it, the domain is attached
+      and held from probe on.
+
+  md-vmodem-supply:
+    description: Modem core supply.
+
+  md-vsram-supply:
+    description: Modem SRAM supply.
+
+  md-vdigrf-supply:
+    description: Modem digital RF supply.
+
   ccci,modem_info_v2:
     $ref: /schemas/types.yaml#/definitions/uint8-array
     description:
@@ -93,8 +126,9 @@ examples:
         compatible = "mediatek,mt6878-ccci";
         reg = <0x0d180000 0x2000>,
               <0x10209000 0x1000>,
-              <0x1020a000 0x1000>;
-        reg-names = "md", "ccif-ap", "ccif-md";
+              <0x1020a000 0x1000>,
+              <0x1020e000 0x1000>;
+        reg-names = "md", "ccif-ap", "ccif-md", "infra";
         interrupts = <GIC_SPI 491 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH>;
@@ -107,4 +141,5 @@ examples:
                  <&infracfg_ao CLK_IFRAO_CCIF5_MD>;
         clock-names = "ccif-ap", "ccif-md", "ccif1-ap",
                       "ccif1-md", "ccif4-md", "ccif5-md";
+        mediatek,ccif-reset-bit = <26>;
     };

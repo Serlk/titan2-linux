@@ -109,15 +109,19 @@ config IOSM
 config MTK_CCCI
 	tristate "MediaTek SoC-integrated modem (CCCI)"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
-	depends on OF && HAS_IOMEM
+	depends on OF && HAS_IOMEM && HAVE_ARM_SMCCC
+	select MFD_SYSCON
 	help
 	  Enables the driver for the modem built into MediaTek smartphone
 	  SoCs such as the MT6878, which talks to the application processor
 	  through CCCI over the CCIF and DPMAIF interfaces.
 
-	  This first version only checks the modem setup the bootloader
-	  handed over (reserved memory, modem arguments) and exposes it in
-	  debugfs. It does not power or start the modem.
+	  This early version checks the modem setup the bootloader handed
+	  over (reserved memory, modem arguments) and exposes it in debugfs,
+	  optionally with a read-only view of the CCIF mailbox. Restarting
+	  the modem is a debugfs command for bring-up, off by default; the
+	  boot handshake stops at its first step and no WWAN port is
+	  created yet.
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called mtk_ccci.
