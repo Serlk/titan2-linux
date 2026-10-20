@@ -7,6 +7,7 @@ drm_sysfb_helper-$(CONFIG_SCREEN_INFO) += drm_sysfb_screen_info.o
 obj-$(CONFIG_DRM_SYSFB_HELPER)	+= drm_sysfb_helper.o
 
 obj-$(CONFIG_DRM_COREBOOTDRM)	+= corebootdrm.o
+obj-$(CONFIG_DRM_MTK_CMDFB_KICK)	+= mtk_cmdfb_kick.o
 obj-$(CONFIG_DRM_EFIDRM)	+= efidrm.o
 obj-$(CONFIG_DRM_OFDRM)		+= ofdrm.o
 obj-$(CONFIG_DRM_SIMPLEDRM)	+= simpledrm.o

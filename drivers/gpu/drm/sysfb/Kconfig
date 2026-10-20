@@ -73,6 +73,23 @@ config DRM_SIMPLEDRM
 	  On x86 BIOS or UEFI systems, you should also select SYSFB_SIMPLEFB
 	  to use UEFI and VESA framebuffers.
 
+config DRM_MTK_CMDFB_KICK
+	tristate "Frame trigger for MediaTek command-mode DSI boot framebuffers"
+	depends on DRM_SIMPLEDRM && OF
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  On MediaTek SoCs whose bootloader leaves a DSI panel in command
+	  mode, framebuffer writes only reach the panel after a frame has
+	  been started. This driver starts one frame after each simpledrm
+	  update, reusing the pipeline set up by the bootloader, and turns
+	  off bootloader overlay layers. Timings and the panel are left as
+	  they are.
+
+	  Do not enable together with a full MediaTek DRM driver for the
+	  same display.
+
+	  If unsure, say N.
+
 config DRM_VESADRM
 	tristate "VESA framebuffer driver"
 	depends on DRM && MMU && X86 && (!SYSFB_SIMPLEFB || COMPILE_TEST)
