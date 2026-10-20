@@ -854,6 +854,20 @@
 			#clock-cells = <1>;
 		};
 
+		/*
+		 * D-PHY of DSI0. Placeholder: mainline has no driver for this
+		 * PHY generation yet (register layout differs from mt8183).
+		 */
+		mipi_tx0: dsi-phy@11e50000 {
+			compatible = "mediatek,mt6878-mipi-tx";
+			reg = <0x11e50000 0x1000>;
+			clocks = <&clk26m>;
+			#clock-cells = <0>;
+			#phy-cells = <0>;
+			clock-output-names = "mipi_tx0_pll";
+			status = "disabled";
+		};
+
 		usbphy: t-phy@11f40000 {
 			compatible = "mediatek,mt6785-tphy", "mediatek,generic-tphy-v2";
 			#address-cells = <1>;
@@ -953,6 +967,48 @@
 			compatible = "mediatek,mt6878-mmsys", "syscon";
 			reg = <0x14000000 0x1000>;
 			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
+		 * Display pipeline (mediatek-drm). Only the blocks of the main
+		 * path are described: OVL0_2L wired to DSI0 through the mmsys
+		 * crossbars, with the picture quality engines bypassed. There is
+		 * no IOMMU driver yet: the boot loader leaves the display larb
+		 * ports in bypass, so OVL reads physical addresses.
+		 */
+		disp_mutex0: mutex@14001000 {
+			compatible = "mediatek,mt6878-disp-mutex";
+			reg = <0x14001000 0x1000>;
+			interrupts = <GIC_SPI 303 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_MUTEX0>;
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+			status = "disabled";
+		};
+
+		disp_ovl0_2l: ovl@14002000 {
+			compatible = "mediatek,mt6878-disp-ovl-2l",
+				     "mediatek,mt8192-disp-ovl-2l";
+			reg = <0x14002000 0x1000>;
+			interrupts = <GIC_SPI 302 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+			status = "disabled";
+		};
+
+		dsi0: dsi@1401a000 {
+			compatible = "mediatek,mt6878-dsi", "mediatek,mt8186-dsi";
+			reg = <0x1401a000 0x1000>;
+			interrupts = <GIC_SPI 328 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mmsys CLK_MM_DISP_DSI0>,
+				 <&mmsys CLK_MM_DSI0>,
+				 <&mipi_tx0>;
+			clock-names = "engine", "digital", "hs";
+			phys = <&mipi_tx0>;
+			phy-names = "dphy";
+			power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
+			#address-cells = <1>;
+			#size-cells = <0>;
 			status = "disabled";
 		};
 
