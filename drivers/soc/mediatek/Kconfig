@@ -17,6 +17,19 @@ config MTK_CMDQ
 	  time limitation, such as updating display configuration during the
 	  vblank.
 
+config MTK_CONNINFRA
+	tristate "MediaTek CONNINFRA (connectivity subsystem) support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF && PM
+	select MFD_SYSCON
+	select REGMAP
+	help
+	  Say yes here to add support for CONNINFRA, the power and bus
+	  infrastructure of the MediaTek connectivity subsystem (CONNSYS)
+	  found on smartphone SoCs such as the MT6878. It switches the
+	  subsystem on and is shared by the Wi-Fi, Bluetooth, GNSS and FM
+	  drivers.
+
 config MTK_DEVAPC
 	tristate "Mediatek Device APC Support"
 	help
