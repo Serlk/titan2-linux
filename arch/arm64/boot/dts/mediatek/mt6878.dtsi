@@ -299,6 +299,38 @@
 			};
 		};
 
+		/*
+		 * Modem (CCCI). The node name is fixed: the stock LK looks
+		 * up "/soc/mddriver" and writes "ccci,modem_info_v2" (where
+		 * it left the modem arguments) into it; if LK did not start
+		 * the modem it also sets status = "disabled".
+		 *
+		 * The MD power domain is not described on purpose (see
+		 * scpsys): nothing may switch the modem until its driver
+		 * owns the whole power sequence.
+		 */
+		modem: mddriver@d180000 {
+			compatible = "mediatek,mt6878-ccci";
+			reg = <0x0d180000 0x2000>,
+			      <0x10209000 0x1000>,
+			      <0x1020a000 0x1000>;
+			reg-names = "md", "ccif-ap", "ccif-md";
+			interrupts = <GIC_SPI 491 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "wdt", "ccif0", "ccif1";
+			clocks = <&infracfg_ao CLK_IFRAO_CCIF_AP>,
+				 <&infracfg_ao CLK_IFRAO_CCIF_MD>,
+				 <&infracfg_ao CLK_IFRAO_CCIF1_AP>,
+				 <&infracfg_ao CLK_IFRAO_CCIF1_MD>,
+				 <&infracfg_ao CLK_IFRAO_CCIF4_MD>,
+				 <&infracfg_ao CLK_IFRAO_CCIF5_MD>;
+			clock-names = "ccif-ap", "ccif-md", "ccif1-ap",
+				      "ccif1-md", "ccif4-md", "ccif5-md";
+			mediatek,ccif-sram-size = <0x200>;
+			status = "disabled";
+		};
+
 		topckgen: syscon@10000000 {
 			compatible = "mediatek,mt6878-topckgen", "syscon";
 			reg = <0x10000000 0x1000>;
