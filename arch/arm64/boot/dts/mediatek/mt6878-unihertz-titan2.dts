@@ -124,10 +124,13 @@
 	 * 0x37 (4450 mV) in stock runtime logs. The current is a first-stage
 	 * cap, below the stock 1.2 A (SDP) / 2.05 A (DCP); termination and
 	 * the 0..50 degC charging window are the stock DT values.
+	 *
+	 * First stage: 4.35 V, what LK itself programs before the kernel, until
+	 * charging has been watched on the device; the stock 4.45 V comes later.
 	 */
 	battery: battery {
 		compatible = "simple-battery";
-		constant-charge-voltage-max-microvolt = <4450000>;
+		constant-charge-voltage-max-microvolt = <4350000>;
 		constant-charge-current-max-microamp = <1000000>;
 		charge-term-current-microamp = <300000>;
 		operating-range-celsius = <0 50>;
