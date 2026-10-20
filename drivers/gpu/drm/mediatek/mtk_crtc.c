@@ -43,6 +43,8 @@ struct mtk_crtc {
 	bool				enabled;
 
 	bool				pending_needs_vblank;
+	/* the output drives a command mode panel: frames are sent on request */
+	bool				cmd_mode;
 	struct drm_pending_vblank_event	*event;
 
 	struct drm_plane		*planes;
@@ -401,7 +403,9 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	}
 	if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
-	mtk_mutex_enable(mtk_crtc->mutex);
+	/* in command mode the mutex is enabled for each frame */
+	if (!mtk_crtc->cmd_mode)
+		mtk_mutex_enable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
@@ -555,6 +559,23 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
 	}
 }
 
+/*
+ * Command mode: nothing is scanned out until a frame is requested, so the
+ * new configuration is written right away, while the output is idle, and
+ * one frame is sent. The frame done interrupt of the first component then
+ * completes the page flip.
+ */
+static void mtk_crtc_cmd_mode_frame(struct mtk_crtc *mtk_crtc)
+{
+	struct mtk_ddp_comp *output = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+
+	mtk_ddp_comp_wait_idle(output);
+	mtk_crtc_ddp_config(&mtk_crtc->base, NULL);
+
+	mtk_mutex_enable(mtk_crtc->mutex);
+	mtk_ddp_comp_trigger(output);
+}
+
 static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
@@ -637,6 +658,9 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	mtk_crtc->config_updating = false;
 	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
 
+	if (mtk_crtc->cmd_mode && mtk_crtc->enabled)
+		mtk_crtc_cmd_mode_frame(mtk_crtc);
+
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 update_config_out:
 #endif
@@ -651,13 +675,15 @@ static void mtk_crtc_ddp_irq(void *data)
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;
-	if (!priv->data->shadow_register && !mtk_crtc->cmdq_client.chan)
+	/* in command mode the configuration is written with the frame request */
+	if (!priv->data->shadow_register && !mtk_crtc->cmdq_client.chan &&
+	    !mtk_crtc->cmd_mode)
 		mtk_crtc_ddp_config(crtc, NULL);
 	else if (mtk_crtc->cmdq_vblank_cnt > 0 && --mtk_crtc->cmdq_vblank_cnt == 0)
 		drm_err(dev, "mtk_crtc %d CMDQ execute command timeout!\n",
 			drm_crtc_index(&mtk_crtc->base));
 #else
-	if (!priv->data->shadow_register)
+	if (!priv->data->shadow_register && !mtk_crtc->cmd_mode)
 		mtk_crtc_ddp_config(crtc, NULL);
 #endif
 	mtk_drm_finish_page_flip(mtk_crtc);
@@ -791,6 +817,9 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 	}
 
 	mtk_crtc_update_output(crtc, state);
+
+	mtk_crtc->cmd_mode =
+		mtk_ddp_comp_is_cmd_mode(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
 
 	ret = mtk_crtc_ddp_hw_init(mtk_crtc);
 	if (ret) {

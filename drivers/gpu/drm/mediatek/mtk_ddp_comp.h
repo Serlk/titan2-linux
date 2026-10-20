@@ -90,6 +90,10 @@ struct mtk_ddp_comp_funcs {
 	void (*remove)(struct device *dev, struct mtk_mutex *mutex);
 	unsigned int (*encoder_index)(struct device *dev);
 	enum drm_mode_status (*mode_valid)(struct device *dev, const struct drm_display_mode *mode);
+	/* outputs driving command mode panels: frames are sent on request */
+	bool (*is_cmd_mode)(struct device *dev);
+	void (*wait_idle)(struct device *dev);
+	void (*trigger)(struct device *dev);
 };
 
 struct mtk_ddp_comp {
@@ -159,6 +163,25 @@ static inline void mtk_ddp_comp_stop(struct mtk_ddp_comp *comp)
 {
 	if (comp->funcs && comp->funcs->stop)
 		comp->funcs->stop(comp->dev);
+}
+
+static inline bool mtk_ddp_comp_is_cmd_mode(struct mtk_ddp_comp *comp)
+{
+	if (comp->funcs && comp->funcs->is_cmd_mode)
+		return comp->funcs->is_cmd_mode(comp->dev);
+	return false;
+}
+
+static inline void mtk_ddp_comp_wait_idle(struct mtk_ddp_comp *comp)
+{
+	if (comp->funcs && comp->funcs->wait_idle)
+		comp->funcs->wait_idle(comp->dev);
+}
+
+static inline void mtk_ddp_comp_trigger(struct mtk_ddp_comp *comp)
+{
+	if (comp->funcs && comp->funcs->trigger)
+		comp->funcs->trigger(comp->dev);
 }
 
 static inline void mtk_ddp_comp_register_vblank_cb(struct mtk_ddp_comp *comp,

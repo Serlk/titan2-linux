@@ -153,6 +153,8 @@
 #define LONG_PACKET			2
 #define BTA				BIT(2)
 #define HSTX				BIT(3)
+/* packet whose payload is the pixel data coming from the display pipeline */
+#define FRAME_PACKET			BIT(0)
 #define DATA_ID				GENMASK(15, 8)
 #define DATA_0				GENMASK(23, 16)
 #define DATA_1				GENMASK(31, 24)
@@ -598,6 +600,17 @@ static void mtk_dsi_stop(struct mtk_dsi *dsi)
 	writel(0, dsi->regs + DSI_START);
 }
 
+/*
+ * Command mode: the panel keeps the picture in its own memory and the
+ * host sends a frame only when software asks for one.
+ */
+static bool mtk_dsi_is_cmd_mode(struct mtk_dsi *dsi)
+{
+	return !(dsi->mode_flags & MIPI_DSI_MODE_VIDEO);
+}
+
+static void mtk_dsi_wait_for_idle(struct mtk_dsi *dsi);
+
 static void mtk_dsi_set_cmd_mode(struct mtk_dsi *dsi)
 {
 	writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
@@ -771,7 +784,10 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 */
 	mtk_dsi_stop(dsi);
 
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	if (mtk_dsi_is_cmd_mode(dsi))
+		mtk_dsi_wait_for_idle(dsi);
+	else
+		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -794,7 +810,19 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 		return;
 
 	mtk_dsi_set_mode(dsi);
-	mtk_dsi_start(dsi);
+
+	if (mtk_dsi_is_cmd_mode(dsi)) {
+		/*
+		 * The panel is initialized by now: let the transfer of each
+		 * frame wait for the tearing effect signal of the panel, and
+		 * keep the clock lane in LP between transfers. Frames are
+		 * started by the CRTC, see mtk_dsi_ddp_trigger().
+		 */
+		mtk_dsi_mask(dsi, DSI_TXRX_CTRL, EXT_TE_EN | HSTX_CKLP_EN,
+			     EXT_TE_EN | HSTX_CKLP_EN);
+	} else {
+		mtk_dsi_start(dsi);
+	}
 
 	dsi->enabled = true;
 }
@@ -912,6 +940,50 @@ void mtk_dsi_ddp_stop(struct device *dev)
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 
 	mtk_dsi_poweroff(dsi);
+}
+
+bool mtk_dsi_ddp_is_cmd_mode(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	return mtk_dsi_is_cmd_mode(dsi);
+}
+
+/* Wait until the previous frame (or command) has been sent */
+void mtk_dsi_ddp_wait_idle(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	if (dsi->enabled)
+		mtk_dsi_wait_for_idle(dsi);
+}
+
+/*
+ * Send one frame to a command mode panel: a DCS write_memory_start long
+ * packet whose payload is the output of the display pipeline. The mutex
+ * of the CRTC must have been enabled before. With EXT_TE_EN the transfer
+ * starts on the next tearing effect edge of the panel.
+ */
+void mtk_dsi_ddp_trigger(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 reg_cmdq_off = dsi->driver_data->reg_cmdq_off;
+
+	if (!dsi->enabled || !mtk_dsi_is_cmd_mode(dsi))
+		return;
+
+	mtk_dsi_wait_for_idle(dsi);
+
+	/* commands sent in between have overwritten the queue */
+	writel(FIELD_PREP(CONFIG, HSTX | FRAME_PACKET) |
+	       FIELD_PREP(DATA_ID, MIPI_DSI_DCS_LONG_WRITE) |
+	       FIELD_PREP(DATA_0, MIPI_DCS_WRITE_MEMORY_START),
+	       dsi->regs + reg_cmdq_off);
+	mtk_dsi_mask(dsi, DSI_CMDQ_SIZE, CMDQ_SIZE, 1);
+	if (dsi->driver_data->cmdq_long_packet_ctl)
+		mtk_dsi_mask(dsi, DSI_CMDQ_SIZE, CMDQ_SIZE_SEL, CMDQ_SIZE_SEL);
+
+	mtk_dsi_start(dsi);
 }
 
 static int mtk_dsi_encoder_init(struct drm_device *drm, struct mtk_dsi *dsi)
