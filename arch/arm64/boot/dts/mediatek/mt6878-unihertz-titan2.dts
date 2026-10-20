@@ -12,9 +12,11 @@
 /dts-v1/;
 #include "mt6878.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6375-adc.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/spmi/spmi.h>
+#include <dt-bindings/usb/pd.h>
 
 / {
 	model = "Unihertz Titan 2";
@@ -343,12 +345,53 @@
 		#interrupt-cells = <1>;
 		status = "disabled";
 
+		mt6375_adc: adc {
+			compatible = "mediatek,mt6375-adc";
+			#io-channel-cells = <1>;
+		};
+
 		mt6375_chg: charger {
 			compatible = "mediatek,mt6375-chg";
-			interrupts = <0>, <1>, <8>, <11>, <9>;
+			interrupts = <0>, <1>, <8>, <11>, <9>, <31>;
 			interrupt-names = "pwr_rdy", "detach", "vbus_ov",
-					  "chg_tout", "chg_batov";
+					  "chg_tout", "chg_batov", "bc12_dn";
+			io-channels = <&mt6375_adc MT6375_ADC_CHGVIN>,
+				      <&mt6375_adc MT6375_ADC_IBUS>;
+			io-channel-names = "vbus", "ibus";
 			monitored-battery = <&battery>;
+		};
+
+		/*
+		 * Type-C port. Sink only: the
+		 * driver refuses to source VBUS (the OTG boost of the
+		 * charger is not described at all) or VCONN. The only sink
+		 * PDO is 5 V; the stock one is 5 V / 2 A as well, the stock
+		 * PD charging algorithm raises it to 9 V later, which is not
+		 * done here. Disabled until the port is checked on the
+		 * device, step by step.
+		 */
+		tcpc {
+			compatible = "mediatek,mt6375-tcpc";
+			interrupts = <120>;
+			interrupt-names = "pd_evt";
+			status = "disabled";
+
+			connector {
+				compatible = "usb-c-connector";
+				label = "USB-C";
+				data-role = "device";
+				power-role = "sink";
+				self-powered;
+				sink-pdos = <PDO_FIXED(5000, 2000,
+						       PDO_FIXED_USB_COMM)>;
+				op-sink-microwatt = <10000000>;
+
+				port {
+					typec_hs: endpoint {
+						remote-endpoint = <&ssusb_hs>;
+					};
+				};
+			};
 		};
 	};
 };
@@ -559,10 +602,14 @@
 };
 
 /*
- * USB device mode only for now. Type-C role detection (TCPC in the MT6375
- * charger) is not described yet; the PHY forces the device role and VBUS
+ * USB device mode only for now: the PHY forces the device role and VBUS
  * valid (mediatek,software-role-switch), as the stock kernel does through
  * mediatek,force-vbus.
+ *
+ * The role switch for the MT6375 Type-C port is described but inert while
+ * dr_mode is "peripheral"; with dr_mode = "otg" the port manager drives
+ * it, and "no role" falls back to the device role (no VBUS supply is
+ * described, so a host role would not power the bus either).
  *
  * The SSUSB power domain is not referenced: the SCPSYS controller is still
  * disabled, and the domain is left on by the boot chain (the preloader
@@ -572,7 +619,15 @@
 	dr_mode = "peripheral";
 	maximum-speed = "high-speed";
 	vusb33-supply = <&mt6369_vusb>;
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
 	status = "okay";
+
+	port {
+		ssusb_hs: endpoint {
+			remote-endpoint = <&typec_hs>;
+		};
+	};
 };
 
 &u2port {

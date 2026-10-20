@@ -18,12 +18,16 @@
  *    above the charge voltage, and is switched off when it cannot be read;
  *  - charge voltage and current requests are clamped to the battery limits;
  *  - BC1.2 detection, OTG boost, PE/AICC and the charger watchdog are not
- *    used (the result of the boot loader BC1.2 run is only read back).
+ *    used. The detector needs the USB PHY to hand D+/D- over to the
+ *    charger (the BSP PHY "BC11" switch, which mainline PHY drivers do not
+ *    have), so the result of the boot loader BC1.2 run is only read back,
+ *    and only until the cable is first removed.
  */
 
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/devm-helpers.h>
+#include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/minmax.h>
@@ -130,6 +134,8 @@ struct mt6375_chg {
 	struct power_supply *bat;
 	struct delayed_work monitor;
 	struct mutex lock;
+	struct iio_channel *vbus_adc;
+	struct iio_channel *ibus_adc;
 
 	bool configured;
 	u32 cv_max_uv;
@@ -137,6 +143,9 @@ struct mt6375_chg {
 	int temp_min;		/* deci-degC */
 	int temp_max;		/* deci-degC */
 	int behaviour;
+
+	/* BC12_STAT belongs to the present attach (boot loader run or event) */
+	bool bc12_valid;
 
 	bool temp_blocked;
 	bool ov_blocked;
@@ -362,11 +371,26 @@ static int mt6375_get_charge_type(struct mt6375_chg *chg, int *type)
 	return 0;
 }
 
-/* Only read back what the boot loader BC1.2 run found; never re-run it */
+/*
+ * Only read back what a BC1.2 run found; the driver never starts one. A
+ * result is used only while the attach it was taken on lasts.
+ */
 static int mt6375_get_usb_type(struct mt6375_chg *chg, int *type)
 {
 	unsigned int port;
-	int ret;
+	int online, ret;
+
+	ret = mt6375_get_online(chg, &online);
+	if (ret)
+		return ret;
+
+	if (!online)
+		WRITE_ONCE(chg->bc12_valid, false);
+
+	if (!READ_ONCE(chg->bc12_valid)) {
+		*type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+		return 0;
+	}
 
 	ret = mt6375_read_field(chg, MT6375_REG_BC12_STAT,
 				MT6375_PORT_STAT_MASK, &port);
@@ -390,6 +414,15 @@ static int mt6375_get_usb_type(struct mt6375_chg *chg, int *type)
 	}
 
 	return 0;
+}
+
+/* VBUS in uV and input current in uA from the MT6375 ADC */
+static int mt6375_read_adc(struct iio_channel *chan, int *val)
+{
+	if (!chan)
+		return -ENODATA;
+
+	return iio_read_channel_processed_scale(chan, val, 1000);
 }
 
 static int mt6375_set_chg_en(struct mt6375_chg *chg, bool on,
@@ -562,6 +595,10 @@ static int mt6375_chg_get_property(struct power_supply *psy,
 		return mt6375_get_charge_type(chg, &val->intval);
 	case POWER_SUPPLY_PROP_USB_TYPE:
 		return mt6375_get_usb_type(chg, &val->intval);
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		return mt6375_read_adc(chg->vbus_adc, &val->intval);
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		return mt6375_read_adc(chg->ibus_adc, &val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		return mt6375_get_ichg(chg, &val->intval);
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
@@ -657,6 +694,8 @@ static const enum power_supply_property mt6375_chg_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_USB_TYPE,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
@@ -689,6 +728,7 @@ static void mt6375_dump_state(struct mt6375_chg *chg, const char *when)
 {
 	unsigned int top, wdt, comp, tmr, eoc, stat, port;
 	int cv, ichg, aicr, mivr, ieoc, online;
+	int vbus = -1000, ibus = -1000;
 
 	if (regmap_read(chg->regmap, MT6375_REG_CHG_TOP1, &top) ||
 	    regmap_read(chg->regmap, MT6375_REG_CHG_WDT, &wdt) ||
@@ -704,12 +744,17 @@ static void mt6375_dump_state(struct mt6375_chg *chg, const char *when)
 		return;
 	}
 
+	/* -1 when there is no ADC */
+	mt6375_read_adc(chg->vbus_adc, &vbus);
+	mt6375_read_adc(chg->ibus_adc, &ibus);
+
 	dev_info(chg->dev,
-		 "%s: online %d top1 0x%02x cv %d ichg %d aicr %d mivr %d ieoc %d (eoc 0x%02x) tmr 0x%02x wdt 0x%02x comp 0x%02x stat %lu port %lu\n",
+		 "%s: online %d top1 0x%02x cv %d ichg %d aicr %d mivr %d ieoc %d (eoc 0x%02x) tmr 0x%02x wdt 0x%02x comp 0x%02x stat %lu port %lu vbus %d ibus %d\n",
 		 when, online, top, cv / 1000, ichg / 1000, aicr / 1000,
 		 mivr / 1000, ieoc / 1000, eoc, tmr, wdt, comp,
 		 FIELD_GET(MT6375_IC_STAT_MASK, stat),
-		 FIELD_GET(MT6375_PORT_STAT_MASK, port));
+		 FIELD_GET(MT6375_PORT_STAT_MASK, port), vbus / 1000,
+		 ibus / 1000);
 }
 
 static int mt6375_get_limits(struct mt6375_chg *chg, u32 *ieoc_ua)
@@ -778,9 +823,26 @@ static int mt6375_init_charger(struct mt6375_chg *chg, u32 ieoc_ua)
 static irqreturn_t mt6375_chg_irq(int irq, void *data)
 {
 	struct mt6375_chg *chg = data;
+	int online;
+
+	/* a new attach invalidates the BC1.2 result of the previous one */
+	if (mt6375_get_online(chg, &online) || !online)
+		WRITE_ONCE(chg->bc12_valid, false);
 
 	power_supply_changed(chg->psy);
-	mod_delayed_work(system_freezable_wq, &chg->monitor, 0);
+	/* Without battery limits the charger is never written */
+	if (chg->configured)
+		mod_delayed_work(system_freezable_wq, &chg->monitor, 0);
+	return IRQ_HANDLED;
+}
+
+/* Only reached if something else (the boot loader) ran the detector */
+static irqreturn_t mt6375_chg_bc12_irq(int irq, void *data)
+{
+	struct mt6375_chg *chg = data;
+
+	WRITE_ONCE(chg->bc12_valid, true);
+	power_supply_changed(chg->psy);
 	return IRQ_HANDLED;
 }
 
@@ -803,6 +865,7 @@ static void mt6375_request_irqs(struct mt6375_chg *chg)
 		{ "vbus_ov", mt6375_chg_fault_irq },
 		{ "chg_tout", mt6375_chg_fault_irq },
 		{ "chg_batov", mt6375_chg_fault_irq },
+		{ "bc12_dn", mt6375_chg_bc12_irq },
 	};
 	struct platform_device *pdev = to_platform_device(chg->dev);
 	int i, irq, ret;
@@ -850,6 +913,26 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	chg->vbus_adc = devm_iio_channel_get(dev, "vbus");
+	if (IS_ERR(chg->vbus_adc)) {
+		if (PTR_ERR(chg->vbus_adc) != -ENODEV)
+			return dev_err_probe(dev, PTR_ERR(chg->vbus_adc),
+					     "failed to get vbus ADC\n");
+		chg->vbus_adc = NULL;
+	}
+
+	chg->ibus_adc = devm_iio_channel_get(dev, "ibus");
+	if (IS_ERR(chg->ibus_adc)) {
+		if (PTR_ERR(chg->ibus_adc) != -ENODEV)
+			return dev_err_probe(dev, PTR_ERR(chg->ibus_adc),
+					     "failed to get ibus ADC\n");
+		chg->ibus_adc = NULL;
+	}
+
+	/* The boot loader BC1.2 result is about the cable present now */
+	if (!mt6375_get_online(chg, &ret) && ret)
+		chg->bc12_valid = true;
+
 	mt6375_dump_state(chg, "boot");
 
 	cfg.fwnode = dev_fwnode(dev);
@@ -869,6 +952,8 @@ static int mt6375_chg_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_warn(dev, "no usable monitored-battery (%d): reporting only, charger left as the boot loader set it\n",
 			 ret);
+		/* events only refresh the reported state here */
+		mt6375_request_irqs(chg);
 		return 0;
 	}
 

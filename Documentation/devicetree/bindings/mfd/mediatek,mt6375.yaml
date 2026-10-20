@@ -33,6 +33,25 @@ properties:
     description:
       The event number, 8 * (register - 0x1d0) + bit.
 
+  adc:
+    type: object
+    additionalProperties: false
+    description: |
+      The ADC: one-shot conversions of the charger and Type-C port voltages
+      and currents and the die temperature. The channel numbers are in
+      include/dt-bindings/iio/adc/mediatek,mt6375-adc.h.
+
+    properties:
+      compatible:
+        const: mediatek,mt6375-adc
+
+      "#io-channel-cells":
+        const: 1
+
+    required:
+      - compatible
+      - "#io-channel-cells"
+
   charger:
     type: object
     additionalProperties: false
@@ -44,13 +63,23 @@ properties:
 
       interrupts:
         minItems: 1
-        maxItems: 5
+        maxItems: 6
 
       interrupt-names:
         minItems: 1
-        maxItems: 5
+        maxItems: 6
         items:
-          enum: [ pwr_rdy, detach, vbus_ov, chg_tout, chg_batov ]
+          enum: [ pwr_rdy, detach, vbus_ov, chg_tout, chg_batov, bc12_dn ]
+
+      io-channels:
+        items:
+          - description: VBUS at the charger input
+          - description: charger input current
+
+      io-channel-names:
+        items:
+          - const: vbus
+          - const: ibus
 
       monitored-battery:
         description: |
@@ -62,6 +91,32 @@ properties:
 
     required:
       - compatible
+
+  tcpc:
+    type: object
+    additionalProperties: false
+    description: The USB Type-C/Power Delivery port controller.
+
+    properties:
+      compatible:
+        const: mediatek,mt6375-tcpc
+
+      interrupts:
+        maxItems: 1
+
+      interrupt-names:
+        const: pd_evt
+
+      connector:
+        type: object
+        $ref: /schemas/connector/usb-connector.yaml#
+        unevaluatedProperties: false
+
+    required:
+      - compatible
+      - interrupts
+      - interrupt-names
+      - connector
 
 required:
   - compatible
@@ -75,6 +130,7 @@ additionalProperties: false
 examples:
   - |
     #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/usb/pd.h>
 
     i2c {
         #address-cells = <1>;
@@ -87,11 +143,33 @@ examples:
             interrupt-controller;
             #interrupt-cells = <1>;
 
+            mt6375_adc: adc {
+                compatible = "mediatek,mt6375-adc";
+                #io-channel-cells = <1>;
+            };
+
             charger {
                 compatible = "mediatek,mt6375-chg";
-                interrupts = <0>, <1>, <8>, <11>, <9>;
+                interrupts = <0>, <1>, <8>, <11>, <9>, <31>;
                 interrupt-names = "pwr_rdy", "detach", "vbus_ov",
-                                  "chg_tout", "chg_batov";
+                                  "chg_tout", "chg_batov", "bc12_dn";
+                io-channels = <&mt6375_adc 1>, <&mt6375_adc 5>;
+                io-channel-names = "vbus", "ibus";
+            };
+
+            tcpc {
+                compatible = "mediatek,mt6375-tcpc";
+                interrupts = <120>;
+                interrupt-names = "pd_evt";
+
+                connector {
+                    compatible = "usb-c-connector";
+                    data-role = "device";
+                    power-role = "sink";
+                    self-powered;
+                    sink-pdos = <PDO_FIXED(5000, 2000, PDO_FIXED_USB_COMM)>;
+                    op-sink-microwatt = <10000000>;
+                };
             };
         };
     };

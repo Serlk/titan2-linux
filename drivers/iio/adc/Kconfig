@@ -1200,6 +1200,18 @@ config MEDIATEK_MT6370_ADC
 	  This driver can also be built as a module. If so, the module
 	  will be called "mt6370-adc".
 
+config MEDIATEK_MT6375_ADC
+	tristate "MediaTek MT6375 ADC driver"
+	depends on MFD_MT6375
+	help
+	  Say yes here to enable the ADC of the MediaTek MT6375 SubPMIC:
+	  one-shot conversions of the charger input and Type-C port voltage
+	  and current, the battery and system voltage, the battery current
+	  and the die temperature.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called "mt6375-adc".
+
 config MEDIATEK_MT6577_AUXADC
 	tristate "MediaTek AUXADC driver"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
