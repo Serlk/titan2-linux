@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/mediatek,mt6878-clock.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek Functional Clock Controller for MT6878
+
+maintainers:
+  - Igor Belwon <igor.belwon@mentallysanemainliners.org>
+
+description: |
+  The clock architecture in MediaTek SoCs is structured like below:
+  PLLs -->
+          dividers -->
+                      muxes
+                           -->
+                              clock gate
+
+  The device nodes provide clock gate control in different IP blocks.
+  The clock IDs are defined in
+  include/dt-bindings/clock/mediatek,mt6878-clock.h.
+
+properties:
+  compatible:
+    oneOf:
+      - items:
+          - enum:
+              - mediatek,mt6878-camsys-main
+              - mediatek,mt6878-camsys-mraw
+              - mediatek,mt6878-camsys-rawa
+              - mediatek,mt6878-camsys-rawb
+              - mediatek,mt6878-camsys-vcore
+              - mediatek,mt6878-camsys-yuva
+              - mediatek,mt6878-camsys-yuvb
+              - mediatek,mt6878-ccusys
+              - mediatek,mt6878-imgsys
+              - mediatek,mt6878-imgsys-traw
+              - mediatek,mt6878-imgsys-vcore
+              - mediatek,mt6878-imgsys-wpe1
+              - mediatek,mt6878-imgsys-wpe2
+              - mediatek,mt6878-imgsys1-dip-nr1
+              - mediatek,mt6878-imgsys1-dip-nr2
+              - mediatek,mt6878-imgsys1-dip-top
+              - mediatek,mt6878-imp_iic_wrap-cs
+              - mediatek,mt6878-imp_iic_wrap-es
+              - mediatek,mt6878-imp_iic_wrap-ess
+              - mediatek,mt6878-imp_iic_wrap-ws
+              - mediatek,mt6878-infracfg-ao
+              - mediatek,mt6878-mdpsys
+              - mediatek,mt6878-mminfra-config
+              - mediatek,mt6878-pericfg-ao
+              - mediatek,mt6878-scp-cfg
+              - mediatek,mt6878-vdecsys
+              - mediatek,mt6878-vencsys
+          - const: syscon
+      - items:
+          - enum:
+              - mediatek,mt6878-ufscfg-ao
+              - mediatek,mt6878-ufscfg-pdn
+          - const: syscon
+          - const: simple-mfd
+
+  reg:
+    maxItems: 1
+
+  '#clock-cells':
+    const: 1
+
+  power-domains:
+    maxItems: 1
+
+  mediatek,hardware-voter:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the hardware voter (HWV) syscon, through which the gates of
+      this block are switched. See mediatek,mt8196-clock.yaml.
+
+  reset-controller:
+    type: object
+    description: UFS reset lines, a ti,syscon-reset child.
+
+required:
+  - compatible
+  - reg
+  - '#clock-cells'
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-mminfra-config
+    then:
+      required:
+        - mediatek,hardware-voter
+    else:
+      properties:
+        mediatek,hardware-voter: false
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@1e800000 {
+        compatible = "mediatek,mt6878-mminfra-config", "syscon";
+        reg = <0x1e800000 0x1000>;
+        mediatek,hardware-voter = <&hwv>;
+        #clock-cells = <1>;
+    };
