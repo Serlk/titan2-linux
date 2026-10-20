@@ -25,6 +25,7 @@ properties:
     enum:
       - mediatek,mt6735-power-controller
       - mediatek,mt6795-power-controller
+      - mediatek,mt6878-power-controller
       - mediatek,mt6893-power-controller
       - mediatek,mt8167-power-controller
       - mediatek,mt8173-power-controller
@@ -56,6 +57,13 @@ properties:
       For example, this may hold phandles to INFRACFG and SMI.
     minItems: 1
     maxItems: 3
+
+  mediatek,hardware-voter:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the Hardware Voter (HWV) syscon, for controllers in which
+      some of the power domains are switched through votes to the HWV rather
+      than by direct access to their PWR_CON register.
 
 patternProperties:
   "^power-domain@[0-9a-f]+$":
@@ -102,6 +110,7 @@ $defs:
         description: |
           Power domain index. Valid values are defined in:
               "include/dt-bindings/power/mt6795-power.h" - for MT8167 type power domain.
+              "include/dt-bindings/power/mediatek,mt6878-power.h" - for MT6878 type power domain.
               "include/dt-bindings/power/mediatek,mt6893-power.h" - for MT6893 type power domain.
               "include/dt-bindings/power/mt8167-power.h" - for MT8167 type power domain.
               "include/dt-bindings/power/mt8173-power.h" - for MT8173 type power domain.
@@ -173,12 +182,26 @@ allOf:
         compatible:
           contains:
             enum:
+              - mediatek,mt6878-power-controller
               - mediatek,mt8365-power-controller
     then:
       properties:
         access-controllers:
           minItems: 3
           maxItems: 3
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-power-controller
+    then:
+      required:
+        - access-controllers
+        - mediatek,hardware-voter
+    else:
+      properties:
+        mediatek,hardware-voter: false
 
 additionalProperties: false
 
