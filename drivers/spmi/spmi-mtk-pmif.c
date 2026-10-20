@@ -52,6 +52,7 @@ struct pmif_data {
 	u32	soc_chan;
 	u8	spmi_ver;
 	u32	num_spmi_buses;
+	bool	clks_always_on;
 };
 
 struct pmif_bus {
@@ -630,6 +631,14 @@ static const struct pmif_data mt6873_pmif_arb = {
 	.soc_chan = 2,
 };
 
+static const struct pmif_data mt6878_pmif_arb = {
+	.regs = mt8195_regs,
+	.spmimst_regs = mt8195_spmi_regs,
+	.soc_chan = 2,
+	.spmi_ver = 2,
+	.clks_always_on = true,
+};
+
 static const struct pmif_data mt8195_pmif_arb = {
 	.regs = mt8195_regs,
 	.spmimst_regs = mt8195_spmi_regs,
@@ -722,7 +731,12 @@ static int mtk_spmi_bus_probe(struct platform_device *pdev,
 	if (IS_ERR(pbus->spmimst_base))
 		return PTR_ERR(pbus->spmimst_base);
 
-	pbus->nclks = ARRAY_SIZE(pmif_clock_names);
+	/*
+	 * On some SoCs the PMIF and SPMI master clocks live in the always-on
+	 * domain, are managed by the power management firmware and are not
+	 * exposed to the OS at all.
+	 */
+	pbus->nclks = pdata->clks_always_on ? 0 : ARRAY_SIZE(pmif_clock_names);
 	for (i = 0; i < pbus->nclks; i++) {
 		pbus->clks[i].id = pmif_clock_names[i];
 		pbus->clks[i].clk = of_clk_get_by_name(node, pbus->clks[i].id);
@@ -838,6 +852,9 @@ static const struct of_device_id mtk_spmi_match_table[] = {
 	{
 		.compatible = "mediatek,mt6873-spmi",
 		.data = &mt6873_pmif_arb,
+	}, {
+		.compatible = "mediatek,mt6878-spmi",
+		.data = &mt6878_pmif_arb,
 	}, {
 		.compatible = "mediatek,mt8195-spmi",
 		.data = &mt8195_pmif_arb,
