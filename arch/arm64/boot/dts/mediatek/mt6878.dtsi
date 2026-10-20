@@ -423,6 +423,7 @@
 			ranges;
 			mediatek,syscon-wakeup = <&pericfg_ao 0x214 105>;
 			wakeup-source;
+			status = "disabled";
 
 			usb_host: xhci0@11200000 {
 				compatible = "mediatek,mtk-xhci";
