@@ -9,9 +9,14 @@ title: MediaTek MFlexGraphics Power and Frequency Controller
 maintainers:
   - Nicolas Frattaroli <nicolas.frattaroli@collabora.com>
 
-description:
+description: |
   A special-purpose embedded MCU to control power and frequency of GPU devices
   using MediaTek Flexible Graphics integration hardware.
+
+  On the MT6878, the boot firmware loads and starts the MCU in the MFG0 power
+  domain, and the MCU drives the GPU supplies, PLLs and power domains itself.
+  The operating system only sends it requests through the mailbox, and does
+  not control any of its clocks or supplies.
 
 properties:
   $nodename:
@@ -19,15 +24,18 @@ properties:
 
   compatible:
     enum:
+      - mediatek,mt6878-gpufreq
       - mediatek,mt8196-gpufreq
 
   reg:
+    minItems: 1
     items:
       - description: GPR memory area
       - description: RPC memory area
       - description: SoC variant ID register
 
   reg-names:
+    minItems: 1
     items:
       - const: gpr
       - const: rpc
@@ -48,6 +56,7 @@ properties:
       - const: stack1
 
   mboxes:
+    minItems: 1
     items:
       - description: FastDVFS events
       - description: frequency control
@@ -58,6 +67,7 @@ properties:
       - description: FastDVFS control
 
   mbox-names:
+    minItems: 1
     items:
       - const: fast-dvfs-event
       - const: gpufreq
@@ -70,6 +80,13 @@ properties:
   memory-region:
     items:
       - description: phandle to the GPUEB shared memory
+
+  mediatek,scpsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the SCPSYS syscon holding the power control register of the
+      MFG0 domain the MCU runs in, to check that it is up before the MCU SRAM
+      is accessed.
 
   "#clock-cells":
     const: 1
@@ -90,13 +107,50 @@ required:
   - compatible
   - reg
   - reg-names
-  - clocks
-  - clock-names
   - mboxes
   - mbox-names
-  - memory-region
   - "#clock-cells"
   - "#power-domain-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6878-gpufreq
+    then:
+      description:
+        The shared memory is a carveout the bootloader creates, which has no
+        phandle. Without memory-region, the reserved-memory node compatible
+        with "mediatek,me_GPUEB_SHARED" is used.
+      properties:
+        reg:
+          maxItems: 1
+        reg-names:
+          maxItems: 1
+        clocks: false
+        clock-names: false
+        mboxes:
+          maxItems: 1
+        mbox-names:
+          maxItems: 1
+      required:
+        - mediatek,scpsys
+    else:
+      properties:
+        reg:
+          minItems: 3
+        reg-names:
+          minItems: 3
+        mboxes:
+          minItems: 7
+        mbox-names:
+          minItems: 7
+        mediatek,scpsys: false
+      required:
+        - clocks
+        - clock-names
+        - memory-region
 
 additionalProperties: false
 
@@ -127,4 +181,17 @@ examples:
 
         shader-present {
         };
+    };
+
+  - |
+    power-controller@13c3fd1c {
+        compatible = "mediatek,mt6878-gpufreq";
+        reg = <0x13c3fd1c 0x64>;
+        reg-names = "gpr";
+        mboxes = <&gpueb_mbox 1>;
+        mbox-names = "gpufreq";
+        mediatek,scpsys = <&scpsys>;
+        #clock-cells = <1>;
+        #nvmem-cell-cells = <0>;
+        #power-domain-cells = <0>;
     };

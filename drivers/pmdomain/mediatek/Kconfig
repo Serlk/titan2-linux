@@ -33,12 +33,13 @@ config MTK_MFG_PM_DOMAIN
 	depends on OF
 	depends on COMMON_CLK
 	select MAILBOX
+	select MFD_SYSCON
 	select PM_GENERIC_DOMAINS
 	imply MTK_GPUEB_MBOX
 	help
 	  Say y or m here to enable the power domains driver for MediaTek
 	  MFlexGraphics. This driver allows for power and frequency control of
-	  GPUs on MediaTek SoCs such as the MT8196 or MT6991.
+	  GPUs on MediaTek SoCs such as the MT6878, MT8196 or MT6991.
 
 	  This driver is required for the Mali GPU to work at all on MT8196 and
 	  MT6991.
