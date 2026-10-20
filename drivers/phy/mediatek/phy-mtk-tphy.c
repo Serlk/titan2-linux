@@ -347,6 +347,7 @@ struct mtk_phy_instance {
 	int pre_emphasis;
 	int sw_get_retries;
 	bool bc12_en;
+	bool fixed_role;
 	bool type_force_mode;
 	bool software_role_switch;
 };
@@ -877,6 +878,7 @@ static void u2_phy_role_switch_work(struct work_struct *work)
 
 		instance->sw_get_retries += 1;
 		schedule_delayed_work(&instance->dr_work, msecs_to_jiffies(500));
+		return;
 	}
 
 	role = usb_role_switch_get_role(instance->role_switch);
@@ -897,6 +899,8 @@ static int u2_phy_software_role_switch_init(struct mtk_phy_instance *instance)
 	int mode;
 
 	instance->sw_get_retries = 0;
+	instance->fixed_role = false;
+	INIT_DELAYED_WORK(&instance->dr_work, u2_phy_role_switch_work);
 
 	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(&instance->phy->dev),
 					     0,
@@ -927,8 +931,6 @@ static int u2_phy_software_role_switch_init(struct mtk_phy_instance *instance)
 	else
 		u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
 
-	INIT_DELAYED_WORK(&instance->dr_work, u2_phy_role_switch_work);
-
 	return 0;
 }
 
@@ -942,8 +944,17 @@ static void u2_phy_instance_init(struct mtk_tphy *tphy,
 
 	if (instance->software_role_switch) {
 		ret = u2_phy_software_role_switch_init(instance);
-		if (ret)
-			dev_warn(&instance->phy->dev, "failed to initialize role switching\n");
+		if (ret) {
+			/*
+			 * No dual-role controller behind the PHY, e.g. one
+			 * with dr_mode = "peripheral": keep the forced device
+			 * role instead of polling for a role switch.
+			 */
+			dev_info(&instance->phy->dev,
+				 "no role switch, forcing device role\n");
+			u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
+			instance->fixed_role = true;
+		}
 	}
 
 	/* switch to USB function, and enable usb pll */
@@ -1012,7 +1023,7 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 			| P2C_FORCE_SESSEND);
 		mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_IDPULLUP | P2C_RG_BVALID);
 
-		if (!instance->role_switch)
+		if (!instance->fixed_role)
 			schedule_delayed_work(&instance->dr_work, msecs_to_jiffies(100));
 	}
 
@@ -1039,7 +1050,7 @@ static void u2_phy_instance_power_off(struct mtk_tphy *tphy,
 		mtk_phy_clear_bits(com + U3D_U2PHYDCR0, P2C_RG_SIF_U2PLL_FORCE_ON);
 	}
 
-	if (instance->role_switch)
+	if (instance->software_role_switch && !instance->fixed_role)
 		cancel_delayed_work_sync(&instance->dr_work);
 
 	dev_dbg(tphy->dev, "%s(%d)\n", __func__, index);
