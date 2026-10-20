@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, GPU bring-up: Mali-G615 MC2 with panthor, through the GPUEB.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * Kept as a separate board file until the GPUEB has been seen answering on
+ * the device. The GPUEB is started by the boot firmware (BL31 prints
+ * "gpueb: INIT: end"), so nothing here powers it; the GPU registers are
+ * only touched once the GPUEB has switched the GPU on.
+ */
+
+#include "mt6878-unihertz-titan2.dts"
+
+&gpueb_mbox {
+	status = "okay";
+};
+
+&gpufreq {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
