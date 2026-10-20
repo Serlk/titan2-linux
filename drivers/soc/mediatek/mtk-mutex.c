@@ -60,6 +60,7 @@
 #define MT6878_MUTEX_MOD_DISP_POSTMASK0		14
 #define MT6878_MUTEX_MOD_DISP_DITHER0		15
 #define MT6878_MUTEX_MOD_DISP_DSC0		23
+#define MT6878_MUTEX_MOD_DISP_DSI0		25
 #define MT6878_MUTEX_MOD_DISP_PWM0		28
 
 #define MT8186_MUTEX_MOD_DISP_OVL0		0
@@ -369,6 +370,8 @@ struct mtk_mutex_data {
 	const u16 mutex_mod1_reg;
 	const u16 mutex_sof_reg;
 	const bool no_clk;
+	/* outputs with a mutex_mod entry have a module bit as well */
+	const bool output_in_mod;
 };
 
 struct mtk_mutex_ctx {
@@ -474,6 +477,7 @@ static const u8 mt6878_mutex_mod[DDP_COMPONENT_ID_MAX] = {
 	[DDP_COMPONENT_COLOR0] = MT6878_MUTEX_MOD_DISP_COLOR0,
 	[DDP_COMPONENT_DITHER0] = MT6878_MUTEX_MOD_DISP_DITHER0,
 	[DDP_COMPONENT_DSC0] = MT6878_MUTEX_MOD_DISP_DSC0,
+	[DDP_COMPONENT_DSI0] = MT6878_MUTEX_MOD_DISP_DSI0,
 	[DDP_COMPONENT_GAMMA] = MT6878_MUTEX_MOD_DISP_GAMMA0,
 	[DDP_COMPONENT_OVL_2L0] = MT6878_MUTEX_MOD_DISP_OVL0_2L,
 	[DDP_COMPONENT_OVL_2L1] = MT6878_MUTEX_MOD_DISP_OVL1_2L,
@@ -831,6 +835,7 @@ static const struct mtk_mutex_data mt6878_mutex_driver_data = {
 	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
 	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
+	.output_in_mod = true,
 };
 
 static const struct mtk_mutex_data mt8186_mutex_driver_data = {
@@ -932,14 +937,27 @@ void mtk_mutex_unprepare(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_unprepare);
 
+static void mtk_mutex_update_mod(struct mtk_mutex_ctx *mtx, unsigned int mutex_id,
+				 enum mtk_ddp_comp_id id, bool set)
+{
+	unsigned int offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod[id], mutex_id);
+	unsigned int mod_id = mtx->data->mutex_mod[id] % 32;
+	unsigned int reg;
+
+	reg = readl_relaxed(mtx->regs + offset);
+	if (set)
+		reg |= BIT(mod_id);
+	else
+		reg &= ~BIT(mod_id);
+	writel_relaxed(reg, mtx->regs + offset);
+}
+
 void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 			enum mtk_ddp_comp_id id)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
-	unsigned int reg;
-	unsigned int sof_id, mod_id;
-	unsigned int offset;
+	unsigned int sof_id;
 
 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
 
@@ -969,17 +987,15 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
 		sof_id = MUTEX_SOF_DP_INTF1;
 		break;
 	default:
-		offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod[id], mutex->id);
-		mod_id = mtx->data->mutex_mod[id] % 32;
-		reg = readl_relaxed(mtx->regs + offset);
-		reg |= BIT(mod_id);
-		writel_relaxed(reg, mtx->regs + offset);
+		mtk_mutex_update_mod(mtx, mutex->id, id, true);
 		return;
 	}
 
 	writel_relaxed(mtx->data->mutex_sof[sof_id],
 		       mtx->regs +
 		       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
+	if (mtx->data->output_in_mod && mtx->data->mutex_mod[id])
+		mtk_mutex_update_mod(mtx, mutex->id, id, true);
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_add_comp);
 
@@ -988,9 +1004,6 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
-	unsigned int reg;
-	unsigned int mod_id;
-	unsigned int offset;
 
 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
 
@@ -1007,13 +1020,11 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
 			       mtx->regs +
 			       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg,
 						  mutex->id));
+		if (mtx->data->output_in_mod && mtx->data->mutex_mod[id])
+			mtk_mutex_update_mod(mtx, mutex->id, id, false);
 		break;
 	default:
-		offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod[id], mutex->id);
-		mod_id = mtx->data->mutex_mod[id] % 32;
-		reg = readl_relaxed(mtx->regs + offset);
-		reg &= ~BIT(mod_id);
-		writel_relaxed(reg, mtx->regs + offset);
+		mtk_mutex_update_mod(mtx, mutex->id, id, false);
 		break;
 	}
 }
