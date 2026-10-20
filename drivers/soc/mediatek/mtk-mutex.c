@@ -49,6 +49,19 @@
 
 #define INT_MUTEX				BIT(1)
 
+#define MT6878_MUTEX_MOD_DISP_OVL0_2L		0
+#define MT6878_MUTEX_MOD_DISP_OVL1_2L		1
+#define MT6878_MUTEX_MOD_DISP_OVL2_2L		2
+#define MT6878_MUTEX_MOD_DISP_OVL3_2L		3
+#define MT6878_MUTEX_MOD_DISP_COLOR0		9
+#define MT6878_MUTEX_MOD_DISP_CCORR0		10
+#define MT6878_MUTEX_MOD_DISP_AAL0		12
+#define MT6878_MUTEX_MOD_DISP_GAMMA0		13
+#define MT6878_MUTEX_MOD_DISP_POSTMASK0		14
+#define MT6878_MUTEX_MOD_DISP_DITHER0		15
+#define MT6878_MUTEX_MOD_DISP_DSC0		23
+#define MT6878_MUTEX_MOD_DISP_PWM0		28
+
 #define MT8186_MUTEX_MOD_DISP_OVL0		0
 #define MT8186_MUTEX_MOD_DISP_OVL0_2L		1
 #define MT8186_MUTEX_MOD_DISP_RDMA0		2
@@ -455,6 +468,20 @@ static const u8 mt8183_mutex_table_mod[MUTEX_MOD_IDX_MAX] = {
 	[MUTEX_MOD_IDX_MDP_CCORR0] = MT8183_MUTEX_MOD_MDP_CCORR0,
 };
 
+static const u8 mt6878_mutex_mod[DDP_COMPONENT_ID_MAX] = {
+	[DDP_COMPONENT_AAL0] = MT6878_MUTEX_MOD_DISP_AAL0,
+	[DDP_COMPONENT_CCORR] = MT6878_MUTEX_MOD_DISP_CCORR0,
+	[DDP_COMPONENT_COLOR0] = MT6878_MUTEX_MOD_DISP_COLOR0,
+	[DDP_COMPONENT_DITHER0] = MT6878_MUTEX_MOD_DISP_DITHER0,
+	[DDP_COMPONENT_DSC0] = MT6878_MUTEX_MOD_DISP_DSC0,
+	[DDP_COMPONENT_GAMMA] = MT6878_MUTEX_MOD_DISP_GAMMA0,
+	[DDP_COMPONENT_OVL_2L0] = MT6878_MUTEX_MOD_DISP_OVL0_2L,
+	[DDP_COMPONENT_OVL_2L1] = MT6878_MUTEX_MOD_DISP_OVL1_2L,
+	[DDP_COMPONENT_OVL_2L2] = MT6878_MUTEX_MOD_DISP_OVL2_2L,
+	[DDP_COMPONENT_POSTMASK0] = MT6878_MUTEX_MOD_DISP_POSTMASK0,
+	[DDP_COMPONENT_PWM0] = MT6878_MUTEX_MOD_DISP_PWM0,
+};
+
 static const u8 mt8186_mutex_mod[DDP_COMPONENT_ID_MAX] = {
 	[DDP_COMPONENT_AAL0] = MT8186_MUTEX_MOD_DISP_AAL0,
 	[DDP_COMPONENT_CCORR] = MT8186_MUTEX_MOD_DISP_CCORR0,
@@ -692,6 +719,16 @@ static const u16 mt8183_mutex_sof[DDP_MUTEX_SOF_MAX] = {
 	[MUTEX_SOF_DPI0] = MT8183_MUTEX_SOF_DPI0 | MT8183_MUTEX_EOF_DPI0,
 };
 
+/*
+ * The only DSI panel known on MT6878 devices runs in command mode: its
+ * frames are started by software, so the mutex is used in single mode
+ * (as the MediaTek downstream driver does for command mode panels).
+ */
+static const u16 mt6878_mutex_sof[MUTEX_SOF_DSI3 + 1] = {
+	[MUTEX_SOF_SINGLE_MODE] = MUTEX_SOF_SINGLE_MODE,
+	[MUTEX_SOF_DSI0] = MUTEX_SOF_SINGLE_MODE,
+};
+
 static const u16 mt8186_mutex_sof[MUTEX_SOF_DSI3 + 1] = {
 	[MUTEX_SOF_SINGLE_MODE] = MUTEX_SOF_SINGLE_MODE,
 	[MUTEX_SOF_DSI0] = MT8186_MUTEX_SOF_DSI0 | MT8186_MUTEX_EOF_DSI0,
@@ -786,6 +823,14 @@ static const struct mtk_mutex_data mt8186_mdp_mutex_driver_data = {
 	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 	.mutex_table_mod = mt8186_mdp_mutex_table_mod,
+};
+
+static const struct mtk_mutex_data mt6878_mutex_driver_data = {
+	.mutex_mod = mt6878_mutex_mod,
+	.mutex_sof = mt6878_mutex_sof,
+	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
+	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
+	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 };
 
 static const struct mtk_mutex_data mt8186_mutex_driver_data = {
@@ -1134,6 +1179,7 @@ static const struct of_device_id mutex_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-mutex", .data = &mt2701_mutex_driver_data },
 	{ .compatible = "mediatek,mt2712-disp-mutex", .data = &mt2712_mutex_driver_data },
 	{ .compatible = "mediatek,mt6795-disp-mutex", .data = &mt6795_mutex_driver_data },
+	{ .compatible = "mediatek,mt6878-disp-mutex", .data = &mt6878_mutex_driver_data },
 	{ .compatible = "mediatek,mt8167-disp-mutex", .data = &mt8167_mutex_driver_data },
 	{ .compatible = "mediatek,mt8173-disp-mutex", .data = &mt8173_mutex_driver_data },
 	{ .compatible = "mediatek,mt8183-disp-mutex", .data = &mt8183_mutex_driver_data },
