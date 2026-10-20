@@ -78,6 +78,19 @@
 	 * which is what we want.
 	 * reg is only there for dtc (unit address); LK does not read it.
 	 */
+	/*
+	 * ADSP: LK sizes the ADSP carveouts (adsp_shared_reserved) from this
+	 * node; without it it asks for an empty carveout and stops. Values as in
+	 * the stock device tree; no mainline binding uses this compatible.
+	 */
+	scp-audio-mbox {
+		compatible = "mediatek,scp-audio-mbox";
+		adsp-rsv-logger-a = <0x180000>;
+		adsp-rsv-ipidma-a = <0x200000>;
+		adsp-rsv-audio = <0x5c0000>;
+		adsp-rsv-xhci = <0x80000>;
+	};
+
 	apusys-rv@190e1000 {
 		compatible = "mediatek,mt6878-apusys_rv";
 		reg = <0x0 0x190e1000 0x0 0x1000>;
