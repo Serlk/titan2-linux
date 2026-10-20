@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/unihertz,titan2-main-panel.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Unihertz Titan 2 main display panel
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The main display of the Unihertz Titan 2 smartphone, a 1440x1440 LCD
+  driven over a 4-lane MIPI DSI link in command mode. The panel has its own
+  frame memory and a tearing-effect output. It is powered through four
+  switches, enabled in the order pm, vci, lcm, lcd.
+
+allOf:
+  - $ref: panel-common.yaml#
+
+properties:
+  compatible:
+    const: unihertz,titan2-main-panel
+
+  reg:
+    maxItems: 1
+
+  pm-supply:
+    description: Main power switch of the panel module
+
+  vci-supply:
+    description: Analog supply of the panel controller
+
+  lcm-supply:
+    description: Second power switch of the panel module
+
+  lcd-supply:
+    description: Third power switch of the panel module
+
+  touch-reset-gpios:
+    maxItems: 1
+    description:
+      Reset of the touch controller on the panel, pulsed when the panel is
+      powered up
+
+required:
+  - compatible
+  - reg
+  - reset-gpios
+  - pm-supply
+  - vci-supply
+  - lcm-supply
+  - lcd-supply
+  - port
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "unihertz,titan2-main-panel";
+            reg = <0>;
+
+            reset-gpios = <&pio 90 GPIO_ACTIVE_LOW>;
+            touch-reset-gpios = <&pio 6 GPIO_ACTIVE_LOW>;
+            pm-supply = <&panel_pm>;
+            vci-supply = <&panel_vci>;
+            lcm-supply = <&panel_lcm>;
+            lcd-supply = <&panel_lcd>;
+            backlight = <&backlight>;
+
+            port {
+                panel_in: endpoint {
+                    remote-endpoint = <&dsi0_out>;
+                };
+            };
+        };
+    };
+
+...
