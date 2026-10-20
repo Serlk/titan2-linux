@@ -5,17 +5,31 @@
  *
  * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  *
- * Work in progress, not for flashing: the DSI PHY has no driver yet and
- * mtk_dsi has no command mode support, so the pipeline does not come up.
+ * Handover from LK: the DSI PHY keeps the PLL LK left running, DSI0 keeps
+ * LK's D-PHY timings and lane state, the panel driver takes the panel over
+ * without a reset, and frames go through the pipeline LK programmed
+ * (OVL0_2L ... DSI0, mutex 0). Until mediatek-drm has bound and sent its
+ * first frame, nothing on the display path is written: if it never binds,
+ * the panel keeps LK's picture from its own frame memory.
+ *
  * Builds on the -pd variant (power controller on). The panel power
- * switches are plain GPIOs, kept on from boot (regulator-boot-on): the
- * panel driver takes them over when it probes. The backlight stays as LK
- * left it (disp_pwm0 has no mainline driver for MT6878 yet).
+ * switches are plain GPIOs: always on here, so that the panel stays lit
+ * whether or not its driver ever probes; display off is DCS sleep in.
  */
 
 #include "mt6878-unihertz-titan2-pd.dts"
 
 / {
+	chosen {
+		/*
+		 * Scanout buffers come from CMA below 4 GiB (no IOMMU yet: LK
+		 * leaves the display larb ports in bypass). 1440x1440 XRGB8888
+		 * is 8.3 MB a buffer; the default 32 MB is too small for fbdev
+		 * plus a double buffered client.
+		 */
+		bootargs = "clk_ignore_unused pd_ignore_unused cma=128M";
+	};
+
 	/* panel power switches, in the stock power-up order */
 	panel_pm: regulator-panel-pm {
 		compatible = "regulator-fixed";
@@ -23,6 +37,7 @@
 		gpio = <&pio 149 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
+		regulator-always-on;
 	};
 
 	panel_vci: regulator-panel-vci {
@@ -31,6 +46,7 @@
 		gpio = <&pio 40 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
+		regulator-always-on;
 	};
 
 	panel_lcm: regulator-panel-lcm {
@@ -39,6 +55,7 @@
 		gpio = <&pio 38 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
+		regulator-always-on;
 	};
 
 	panel_lcd: regulator-panel-lcd {
@@ -47,6 +64,7 @@
 		gpio = <&pio 32 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
+		regulator-always-on;
 	};
 };
 
@@ -90,6 +108,7 @@
 		vci-supply = <&panel_vci>;
 		lcm-supply = <&panel_lcm>;
 		lcd-supply = <&panel_lcd>;
+		backlight = <&backlight>;
 
 		port {
 			panel_in: endpoint {
