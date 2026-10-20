@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
+ * Copyright (c) 2021 MediaTek Inc.
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * MediaTek SPMI PMICs (MT6363, MT6369) core driver
  *
  * The PMIC is a slave on the SPMI bus; its interrupts are grouped in a few
@@ -7,6 +10,9 @@
  * Request Capable Slave (RCS) message. A top status register says which
  * block has pending interrupts, each block has one enable and one status
  * (write 1 to clear) register for every 8 interrupts.
+ *
+ * Based on the MediaTek downstream driver (drivers/mfd/mtk-spmi-pmic.c,
+ * Copyright (c) 2021 MediaTek Inc.).
  */
 
 #include <linux/bits.h>

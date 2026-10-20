@@ -2,6 +2,8 @@
 /*
  * Frame trigger for a boot framebuffer on a MediaTek command-mode DSI panel
  *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * A DSI panel in command mode keeps the picture in its own frame memory and
  * only shows new framebuffer contents after the display pipeline has been
  * started for one frame. The bootloader sets the pipeline up (OVL -> ... ->

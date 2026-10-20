@@ -1,5 +1,9 @@
-/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
+ * Copyright (c) 2023 MediaTek Inc.
+ * Author: Chuan-wen Chen <chuan-wen.chen@mediatek.com>
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * Power domain indices of the MediaTek MT6878 SCPSYS power controller.
  *
  * The numbering follows the MediaTek downstream kernel, so that device

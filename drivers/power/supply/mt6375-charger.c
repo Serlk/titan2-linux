@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
+ * Copyright (c) 2021 MediaTek Inc.
+ * Author: ShuFan Lee <shufan_lee@richtek.com>
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * MediaTek MT6375 switching charger
  *
  * Register fields follow the GPL MediaTek BSP driver

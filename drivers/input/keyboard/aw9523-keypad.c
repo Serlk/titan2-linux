@@ -2,6 +2,12 @@
 /*
  * Keyboard matrix scanned through an Awinic AW9523B I/O expander
  *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * Matrix wiring, reset timing and key map are derived from the GPL module
+ * aw9523_key.ko shipped with Titan 2 V01.00.14; the AW9523B registers are
+ * those of the Awinic datasheet.
+ *
  * The AW9523B has 16 I/O lines in two 8-bit ports. Some lines sense the
  * matrix rows (inputs, pulled up on the board), the others drive the
  * columns. While idle every column is driven low and a level change on any

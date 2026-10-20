@@ -2,6 +2,8 @@
 /*
  * Titan 2, second bring-up stage: the SCPSYS power controller on.
  *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * Kept as a separate board file until the power controller has been seen
  * probing on the device. Both changes go together: simplefb holds the
  * display domain (and its mm-infra parent) that LK left on, so the panel

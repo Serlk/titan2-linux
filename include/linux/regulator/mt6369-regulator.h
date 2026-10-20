@@ -1,6 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
+ * Copyright (c) 2021 MediaTek Inc.
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * MediaTek MT6369 PMIC regulator registers
+ *
+ * Register addresses from the MediaTek downstream kernel.
  */
 
 #ifndef __LINUX_REGULATOR_MT6369_H

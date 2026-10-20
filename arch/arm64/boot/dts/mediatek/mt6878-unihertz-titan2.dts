@@ -1,6 +1,8 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 /*
  * Unihertz Titan 2 (MediaTek MT6878 / Dimensity 7300)
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  *
  * Booted by the stock LK from slot B; LK fills /chosen, memory and the
  * reserved-memory carveouts at boot. Values below are from the DT the
@@ -119,7 +121,7 @@
 	};
 
 	/*
-	 * Li-ion pack. The charge voltage is the
+	 * Li-ion pack (titan2-docs: docs/hardware). The charge voltage is the
 	 * stock one: mtk_charger battery_cv 4.45 V, the MT6375 CV field reads
 	 * 0x37 (4450 mV) in stock runtime logs. The current is a first-stage
 	 * cap, below the stock 1.2 A (SDP) / 2.05 A (DCP); termination and
@@ -162,7 +164,7 @@
 };
 
 /*
- * Input devices from the stock DT. The keyboard and the
+ * Input devices from the stock DT (titan2-docs: docs/hardware). The keyboard and the
  * touchscreen take their supplies from the MT6369 on SPMI; a board without
  * SPMI has to disable them together with it.
  */
@@ -325,7 +327,7 @@
 };
 
 /*
- * Charging. Neither bus is checked on mainline
+ * Charging (titan2-docs: docs/hardware). Neither bus is checked on mainline
  * yet, so both devices start disabled. The fuel gauge is read-only; enable
  * it first, then the charger, which only charges while the gauge reports a
  * battery temperature inside operating-range-celsius.

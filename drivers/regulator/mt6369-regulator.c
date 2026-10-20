@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //
+// Copyright (c) 2021 MediaTek Inc.
+// Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+//
 // MediaTek MT6369 SPMI PMIC regulators
 //
 // Register layout and voltage tables from the MediaTek downstream driver

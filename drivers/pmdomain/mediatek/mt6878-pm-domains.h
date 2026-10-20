@@ -1,4 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (c) 2023 MediaTek Inc.
+ * Author: Chuan-wen Chen <chuan-wen.chen@mediatek.com>
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
 
 #ifndef __SOC_MEDIATEK_MT6878_PM_DOMAINS_H
 #define __SOC_MEDIATEK_MT6878_PM_DOMAINS_H

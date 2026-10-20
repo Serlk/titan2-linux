@@ -1,5 +1,7 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 /*
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
  * Nodes the stock Titan 2 boot loader (LK, V01.00.13/14) looks for in our
  * DTB before it starts the kernel, when it loads the companion firmware
  * (SCP, VCP, APU, ...). Without them it stops with an assert. The
