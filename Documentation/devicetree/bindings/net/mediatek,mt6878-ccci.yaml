@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/mediatek,mt6878-ccci.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek SoC-integrated modem (CCCI)
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The modem built into MediaTek smartphone SoCs talks to the application
+  processor through CCCI (Cross Core Communication Interface): control
+  channels over the CCIF mailbox and its SRAM, network data over DPMAIF.
+
+  The bootloader loads and authenticates the modem firmware, reserves the
+  modem and AP/modem shared memory and writes where it left the modem
+  arguments into the "ccci,modem_info_v2" property of this node. The stock
+  MediaTek bootloader finds the node by its path, "/soc/mddriver".
+
+properties:
+  $nodename:
+    pattern: "^mddriver@[0-9a-f]+$"
+
+  compatible:
+    const: mediatek,mt6878-ccci
+
+  reg:
+    items:
+      - description: modem side registers
+      - description: CCIF0, AP side
+      - description: CCIF0, modem side
+
+  reg-names:
+    items:
+      - const: md
+      - const: ccif-ap
+      - const: ccif-md
+
+  interrupts:
+    items:
+      - description: modem watchdog
+      - description: CCIF0 channel interrupt
+      - description: CCIF0 exception/wakeup interrupt
+
+  interrupt-names:
+    items:
+      - const: wdt
+      - const: ccif0
+      - const: ccif1
+
+  clocks:
+    maxItems: 6
+
+  clock-names:
+    items:
+      - const: ccif-ap
+      - const: ccif-md
+      - const: ccif1-ap
+      - const: ccif1-md
+      - const: ccif4-md
+      - const: ccif5-md
+
+  mediatek,ccif-sram-size:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Size in bytes of the CCIF channel data SRAM.
+    default: 512
+
+  ccci,modem_info_v2:
+    $ref: /schemas/types.yaml#/definitions/uint8-array
+    description:
+      Written by the bootloader. Location, size and format version of
+      the table of modem arguments, little-endian.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6878-clock.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    mddriver@d180000 {
+        compatible = "mediatek,mt6878-ccci";
+        reg = <0x0d180000 0x2000>,
+              <0x10209000 0x1000>,
+              <0x1020a000 0x1000>;
+        reg-names = "md", "ccif-ap", "ccif-md";
+        interrupts = <GIC_SPI 491 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH>;
+        interrupt-names = "wdt", "ccif0", "ccif1";
+        clocks = <&infracfg_ao CLK_IFRAO_CCIF_AP>,
+                 <&infracfg_ao CLK_IFRAO_CCIF_MD>,
+                 <&infracfg_ao CLK_IFRAO_CCIF1_AP>,
+                 <&infracfg_ao CLK_IFRAO_CCIF1_MD>,
+                 <&infracfg_ao CLK_IFRAO_CCIF4_MD>,
+                 <&infracfg_ao CLK_IFRAO_CCIF5_MD>;
+        clock-names = "ccif-ap", "ccif-md", "ccif1-ap",
+                      "ccif1-md", "ccif4-md", "ccif5-md";
+    };
