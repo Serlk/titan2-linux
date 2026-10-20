@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/bluetooth/mediatek,mt6878-bt.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 CONNSYS Bluetooth
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The Bluetooth core (BGF) of the connectivity subsystem (CONNSYS) of
+  MediaTek MT6878. It is powered through CONNINFRA, its firmware is loaded
+  into the CONNSYS EMI by the boot loader, and HCI packets are exchanged
+  through rings in the same EMI with software interrupts both ways.
+
+allOf:
+  - $ref: bluetooth-controller.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6878-bt
+
+  reg:
+    items:
+      - description: BGF registers
+      - description: CONN_INFRA registers, shared with CONNINFRA and Wi-Fi
+
+  reg-names:
+    items:
+      - const: bgf
+      - const: conninfra
+
+  interrupts:
+    items:
+      - description: BGF to AP software interrupt
+      - description: CONN to AP interrupt (BGF bus timeout)
+
+  interrupt-names:
+    items:
+      - const: bgf2ap
+      - const: conn2ap
+
+  mediatek,conninfra:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: CONNINFRA node powering CONNSYS
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - mediatek,conninfra
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    bluetooth@18800000 {
+        compatible = "mediatek,mt6878-bt";
+        reg = <0x18800000 0x30000>, <0x18000000 0x100000>;
+        reg-names = "bgf", "conninfra";
+        interrupts = <GIC_SPI 693 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 132 IRQ_TYPE_LEVEL_HIGH>;
+        interrupt-names = "bgf2ap", "conn2ap";
+        mediatek,conninfra = <&consys>;
+        local-bd-address = [00 00 00 00 00 00];
+    };
