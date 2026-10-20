@@ -24,18 +24,27 @@
  *    (bootloader overlays such as the "orange state" warning);
  *  - after each simpledrm update (drm_sysfb flush notifier) it waits until
  *    the previous frame has finished and starts one frame: mutex enable,
- *    then DSI START 0 -> 1.
+ *    then DSI START 0 -> 1;
+ *  - when simpledrm disables its CRTC (DPMS off, fbdev blank) it switches
+ *    the backlight off and sends the panel the standard DCS commands
+ *    set_display_off and enter_sleep_mode, and exit_sleep_mode and
+ *    set_display_on when the CRTC is enabled again. The commands go through
+ *    the DSI command queue, as the bootloader sends them, after which the
+ *    queue is restored to write_memory_start.
  *
- * Timings, PLLs and the panel are never touched. Power domains and clocks
- * are taken from DT if given (they are already on from the bootloader).
+ * Timings, PLLs and panel supplies are never touched. Power domains and
+ * clocks are taken from DT if given (they are already on from the
+ * bootloader).
  *
  * This is a stop-gap for boards without a mediatek-drm driver; once the real
  * display driver exists it must not be used together with this one.
  */
 
+#include <linux/backlight.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -47,6 +56,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/property.h>
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
@@ -59,13 +69,33 @@
 #define DSI_START		0x000
 #define DSI_START_BIT		BIT(0)
 #define DSI_INTSTA		0x00c
+#define DSI_CMD_DONE		BIT(1)
 #define DSI_BUSY		BIT(31)
 #define DSI_MODE_CTRL		0x014
+#define DSI_TXRX_CTRL		0x018
+#define DSI_EXT_TE_EN		BIT(9)
 #define DSI_CMDQ_SIZE		0x060
 #define DSI_CMDQ_SIZE_MASK	GENMASK(7, 0)
 #define DSI_CMDQ(n)		(0xd00 + 4 * (n))
 /* DCS long write (0x39) of write_memory_start (0x2c), as queued by LK */
 #define DSI_CMDQ_WMS		0x002c3909
+/*
+ * Command queue entry for a DCS short write without parameter (data type
+ * 0x05), sent in low power mode: CONFIG 0 (short packet, no BTA, no HS).
+ */
+#define DSI_CMDQ_DCS_SHORT(cmd)	((u32)(cmd) << 16 | 0x05 << 8)
+
+#define DCS_POLL_US		20
+#define DCS_TIMEOUT_US		50000
+
+/*
+ * MIPI DCS, the only commands sent: the off/on sequence of the GPL v2
+ * module panel-A61QWERTY46.ko shipped with Titan 2 V01.00.14
+ */
+#define DCS_ENTER_SLEEP_MODE	0x10
+#define DCS_EXIT_SLEEP_MODE	0x11
+#define DCS_SET_DISPLAY_OFF	0x28
+#define DCS_SET_DISPLAY_ON	0x29
 
 /* DISP mutex */
 #define MUTEX_EN(n)		(0x020 + 0x20 * (n))
@@ -107,10 +137,15 @@ struct mtk_cmdfb_kick {
 	unsigned long refresh_jiffies;
 
 	atomic_t pending;
+	bool want_on;		/* CRTC state, written by the notifier */
+	bool panel_on;		/* what the panel was last told, work only */
+	struct device_node *bl_np;
+	struct backlight_device *bl;
 	bool stopped;
 	unsigned int failures;
 	unsigned long frames;
 	unsigned long timeouts;
+	unsigned long dcs_errors;
 };
 
 static bool mtk_cmdfb_kick_idle(struct mtk_cmdfb_kick *k)
@@ -137,18 +172,153 @@ static void mtk_cmdfb_kick_stop(struct mtk_cmdfb_kick *k, const char *why)
 		readl(k->mutex + MUTEX_EN(k->data->mutex_id)));
 }
 
+static int mtk_cmdfb_kick_wait_idle(struct mtk_cmdfb_kick *k)
+{
+	bool idle;
+
+	return read_poll_timeout(mtk_cmdfb_kick_idle, idle, idle, KICK_POLL_US,
+				 KICK_TIMEOUT_US, false, k);
+}
+
+static void mtk_cmdfb_kick_start_frame(struct mtk_cmdfb_kick *k)
+{
+	writel(MUTEX_EN_BIT, k->mutex + MUTEX_EN(k->data->mutex_id));
+	writel(0, k->dsi + DSI_START);
+	writel(DSI_START_BIT, k->dsi + DSI_START);
+	k->frames++;
+}
+
+/*
+ * Send one parameterless DCS command in low power mode through the command
+ * queue, as LK does, then put the queue back to write_memory_start. The DSI
+ * must be idle. External TE is switched off for the command: the panel
+ * does not drive TE while asleep, and with EXT_TE_EN the DSI would wait for
+ * it (the factory driver only sets EXT_TE_EN after the panel init commands).
+ */
+static int mtk_cmdfb_kick_dcs(struct mtk_cmdfb_kick *k, u8 cmd)
+{
+	u32 cmdq_size, cmdq0, txrx, sta;
+	int ret;
+
+	switch (cmd) {
+	case DCS_ENTER_SLEEP_MODE:
+	case DCS_EXIT_SLEEP_MODE:
+	case DCS_SET_DISPLAY_OFF:
+	case DCS_SET_DISPLAY_ON:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (!mtk_cmdfb_kick_idle(k) || !mtk_cmdfb_kick_dsi_ok(k))
+		return -EBUSY;
+
+	cmdq_size = readl(k->dsi + DSI_CMDQ_SIZE);
+	cmdq0 = readl(k->dsi + DSI_CMDQ(0));
+	txrx = readl(k->dsi + DSI_TXRX_CTRL);
+
+	/* CMD_DONE is cleared by writing 0, as mtk_dsi does */
+	writel(readl(k->dsi + DSI_INTSTA) & ~DSI_CMD_DONE, k->dsi + DSI_INTSTA);
+	if (readl(k->dsi + DSI_INTSTA) & DSI_CMD_DONE)
+		return -EIO;
+
+	if (txrx & DSI_EXT_TE_EN)
+		writel(txrx & ~DSI_EXT_TE_EN, k->dsi + DSI_TXRX_CTRL);
+	writel(DSI_CMDQ_DCS_SHORT(cmd), k->dsi + DSI_CMDQ(0));
+	writel((cmdq_size & ~DSI_CMDQ_SIZE_MASK) | 1, k->dsi + DSI_CMDQ_SIZE);
+	writel(0, k->dsi + DSI_START);
+	writel(DSI_START_BIT, k->dsi + DSI_START);
+
+	ret = readl_poll_timeout(k->dsi + DSI_INTSTA, sta,
+				 (sta & DSI_CMD_DONE) && !(sta & DSI_BUSY),
+				 DCS_POLL_US, DCS_TIMEOUT_US);
+
+	writel(cmdq0, k->dsi + DSI_CMDQ(0));
+	writel(cmdq_size, k->dsi + DSI_CMDQ_SIZE);
+	writel(txrx, k->dsi + DSI_TXRX_CTRL);
+	writel(readl(k->dsi + DSI_INTSTA) & ~DSI_CMD_DONE, k->dsi + DSI_INTSTA);
+
+	if (ret) {
+		k->dcs_errors++;
+		dev_err(k->dev, "DCS %#04x not sent: INTSTA %#x\n", cmd, sta);
+	} else {
+		dev_dbg(k->dev, "DCS %#04x sent\n", cmd);
+	}
+
+	return ret;
+}
+
+static struct backlight_device *mtk_cmdfb_kick_backlight(struct mtk_cmdfb_kick *k)
+{
+	/* looked up late: the backlight must not hold back the frame trigger */
+	if (!k->bl && k->bl_np)
+		k->bl = of_find_backlight_by_node(k->bl_np);
+
+	return k->bl;
+}
+
+/* Stock panel off sequence without the supplies: 28, 50 ms, 10, 150 ms. */
+static int mtk_cmdfb_kick_panel_off(struct mtk_cmdfb_kick *k)
+{
+	int ret;
+
+	backlight_disable(mtk_cmdfb_kick_backlight(k));
+
+	ret = mtk_cmdfb_kick_dcs(k, DCS_SET_DISPLAY_OFF);
+	if (ret)
+		return ret;
+	msleep(50);
+	ret = mtk_cmdfb_kick_dcs(k, DCS_ENTER_SLEEP_MODE);
+	if (ret)
+		return ret;
+	msleep(150);
+
+	k->panel_on = false;
+	dev_info(k->dev, "panel off (display off, sleep in)\n");
+
+	return 0;
+}
+
+/*
+ * exit_sleep_mode, 120 ms, set_display_on (the stock init sends display on
+ * right before sleep out, the panel keeps its frame memory in sleep), then
+ * one frame from the framebuffer and the backlight once it is through.
+ */
+static int mtk_cmdfb_kick_panel_on(struct mtk_cmdfb_kick *k)
+{
+	int ret;
+
+	ret = mtk_cmdfb_kick_dcs(k, DCS_EXIT_SLEEP_MODE);
+	if (ret)
+		return ret;
+	msleep(120);
+	ret = mtk_cmdfb_kick_dcs(k, DCS_SET_DISPLAY_ON);
+	if (ret)
+		return ret;
+
+	k->panel_on = true;
+	atomic_set(&k->pending, 0);
+	mtk_cmdfb_kick_start_frame(k);
+	if (mtk_cmdfb_kick_wait_idle(k))
+		dev_warn(k->dev, "first frame after sleep out not finished\n");
+
+	backlight_enable(mtk_cmdfb_kick_backlight(k));
+	dev_info(k->dev, "panel on (sleep out, display on)\n");
+
+	return 0;
+}
+
 static void mtk_cmdfb_kick_work(struct work_struct *work)
 {
 	struct mtk_cmdfb_kick *k = container_of(work, struct mtk_cmdfb_kick, work);
-	bool idle;
+	bool want_on;
 	int ret;
 
 	if (k->stopped)
 		return;
 
 	/* never start a frame on top of one that is still being sent */
-	ret = read_poll_timeout(mtk_cmdfb_kick_idle, idle, idle, KICK_POLL_US,
-				KICK_TIMEOUT_US, false, k);
+	ret = mtk_cmdfb_kick_wait_idle(k);
 	if (ret) {
 		k->timeouts++;
 		if (++k->failures >= KICK_MAX_FAILURES)
@@ -161,18 +331,31 @@ static void mtk_cmdfb_kick_work(struct work_struct *work)
 	}
 	k->failures = 0;
 
-	if (!atomic_xchg(&k->pending, 0))
-		return;
-
 	if (!mtk_cmdfb_kick_dsi_ok(k)) {
 		mtk_cmdfb_kick_stop(k, "DSI no longer in LK's command mode state");
 		return;
 	}
 
-	writel(MUTEX_EN_BIT, k->mutex + MUTEX_EN(k->data->mutex_id));
-	writel(0, k->dsi + DSI_START);
-	writel(DSI_START_BIT, k->dsi + DSI_START);
-	k->frames++;
+	want_on = READ_ONCE(k->want_on);
+	if (want_on != k->panel_on) {
+		ret = want_on ? mtk_cmdfb_kick_panel_on(k) : mtk_cmdfb_kick_panel_off(k);
+		if (ret) {
+			/* leave the light on rather than a lit but dead screen */
+			if (want_on)
+				backlight_enable(mtk_cmdfb_kick_backlight(k));
+			mtk_cmdfb_kick_stop(k, "panel power state change failed");
+			return;
+		}
+	}
+
+	/* a sleeping panel gets no frames; they are sent after sleep out */
+	if (!k->panel_on)
+		return;
+
+	if (!atomic_xchg(&k->pending, 0))
+		return;
+
+	mtk_cmdfb_kick_start_frame(k);
 }
 
 static void mtk_cmdfb_kick_request(struct mtk_cmdfb_kick *k)
@@ -188,6 +371,18 @@ static int mtk_cmdfb_kick_notify(struct notifier_block *nb, unsigned long action
 
 	if (event->dev->dev->of_node != k->fb_np)
 		return NOTIFY_DONE;
+
+	switch (action) {
+	case DRM_SYSFB_EVENT_CRTC_ENABLE:
+	case DRM_SYSFB_EVENT_CRTC_DISABLE:
+		WRITE_ONCE(k->want_on, action == DRM_SYSFB_EVENT_CRTC_ENABLE);
+		queue_work(system_dfl_wq, &k->work);
+		return NOTIFY_OK;
+	case DRM_SYSFB_EVENT_FLUSH:
+		break;
+	default:
+		return NOTIFY_DONE;
+	}
 
 	/*
 	 * The framebuffer is mapped write-combined; make the writes visible to
@@ -231,8 +426,9 @@ static int mtk_cmdfb_kick_check(struct mtk_cmdfb_kick *k, const struct resource 
 	src_con = readl(k->ovl + OVL_SRC_CON);
 
 	dev_info(k->dev,
-		 "LK state: DSI MODE %#x CMDQ_SIZE %#x CMDQ0 %#x; MUTEX%u EN %#x MOD %#x; OVL SRC_CON %#x\n",
-		 mode, cmdq_size, cmdq0, mutex_id, mutex_en, mutex_mod, src_con);
+		 "LK state: DSI MODE %#x CMDQ_SIZE %#x CMDQ0 %#x TXRX %#x; MUTEX%u EN %#x MOD %#x; OVL SRC_CON %#x\n",
+		 mode, cmdq_size, cmdq0, readl(k->dsi + DSI_TXRX_CTRL), mutex_id, mutex_en,
+		 mutex_mod, src_con);
 
 	if (mode != 0) {
 		dev_err(k->dev, "DSI not in command mode (MODE_CTRL %#x)\n", mode);
@@ -308,10 +504,28 @@ static ssize_t stopped_show(struct device *dev, struct device_attribute *attr, c
 }
 static DEVICE_ATTR_RO(stopped);
 
+static ssize_t panel_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct mtk_cmdfb_kick *k = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%s\n", READ_ONCE(k->panel_on) ? "on" : "off");
+}
+static DEVICE_ATTR_RO(panel);
+
+static ssize_t dcs_errors_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct mtk_cmdfb_kick *k = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%lu\n", k->dcs_errors);
+}
+static DEVICE_ATTR_RO(dcs_errors);
+
 static struct attribute *mtk_cmdfb_kick_attrs[] = {
 	&dev_attr_frames.attr,
 	&dev_attr_timeouts.attr,
 	&dev_attr_stopped.attr,
+	&dev_attr_panel.attr,
+	&dev_attr_dcs_errors.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(mtk_cmdfb_kick);
@@ -337,6 +551,15 @@ static void mtk_cmdfb_kick_put_fb(void *data)
 	of_node_put(data);
 }
 
+static void mtk_cmdfb_kick_put_bl(void *data)
+{
+	struct mtk_cmdfb_kick *k = data;
+
+	if (k->bl)
+		put_device(&k->bl->dev);
+	of_node_put(k->bl_np);
+}
+
 static int mtk_cmdfb_kick_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -353,12 +576,20 @@ static int mtk_cmdfb_kick_probe(struct platform_device *pdev)
 	k->data = device_get_match_data(dev);
 	INIT_WORK(&k->work, mtk_cmdfb_kick_work);
 	INIT_DELAYED_WORK(&k->refresh, mtk_cmdfb_kick_refresh);
+	/* LK leaves the panel on */
+	k->want_on = true;
+	k->panel_on = true;
 	platform_set_drvdata(pdev, k);
 
 	k->fb_np = of_parse_phandle(dev->of_node, "mediatek,framebuffer", 0);
 	if (!k->fb_np)
 		return dev_err_probe(dev, -EINVAL, "no mediatek,framebuffer\n");
 	ret = devm_add_action_or_reset(dev, mtk_cmdfb_kick_put_fb, k->fb_np);
+	if (ret)
+		return ret;
+
+	k->bl_np = of_parse_phandle(dev->of_node, "backlight", 0);
+	ret = devm_add_action_or_reset(dev, mtk_cmdfb_kick_put_bl, k);
 	if (ret)
 		return ret;
 
@@ -425,6 +656,18 @@ static int mtk_cmdfb_kick_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/* no DSI access from the work while the system is going down */
+static int mtk_cmdfb_kick_suspend(struct device *dev)
+{
+	struct mtk_cmdfb_kick *k = dev_get_drvdata(dev);
+
+	flush_work(&k->work);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mtk_cmdfb_kick_pm_ops, mtk_cmdfb_kick_suspend, NULL);
+
 static const struct mtk_cmdfb_kick_data mt6878_data = {
 	.mutex_id = 0,
 	.ovl_layers = 2,	/* OVL0 is a 2-layer OVL */
@@ -442,6 +685,7 @@ static struct platform_driver mtk_cmdfb_kick_driver = {
 		.name = "mtk-cmdfb-kick",
 		.of_match_table = mtk_cmdfb_kick_of_match,
 		.dev_groups = mtk_cmdfb_kick_groups,
+		.pm = pm_sleep_ptr(&mtk_cmdfb_kick_pm_ops),
 	},
 };
 module_platform_driver(mtk_cmdfb_kick_driver);
