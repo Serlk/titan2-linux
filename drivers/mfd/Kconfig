@@ -1164,6 +1164,18 @@ config MFD_MT6397
 	  accessing the device; additional drivers must be enabled in order
 	  to use the functionality of the device.
 
+config MFD_MT6685
+	tristate "MediaTek MT6685 clock buffer and RTC chip"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on SPMI
+	select REGMAP_SPMI
+	help
+	  Say yes here to enable the core driver of the MediaTek MT6685, an
+	  SPMI companion chip with 26 MHz clock buffers and an RTC. It
+	  provides the register map; the functions described in the device
+	  tree (RTC) need their own drivers.
+
 config MFD_MTK_SPMI_PMIC
 	tristate "MediaTek SPMI PMICs"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
