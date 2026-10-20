@@ -1278,6 +1278,16 @@ config DRM_PANEL_TRULY_NT35597_WQXGA
 	  Say Y here if you want to enable support for Truly NT35597 WQXGA Dual DSI
 	  Video Mode panel
 
+config DRM_PANEL_UNIHERTZ_TITAN2_MAIN
+	tristate "Unihertz Titan 2 main display panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the main display
+	  panel of the Unihertz Titan 2: a 1440x1440 LCD driven over a
+	  4-lane MIPI DSI link in command mode.
+
 config DRM_PANEL_VISIONOX_G2647FB105
 	tristate "Visionox G2647FB105"
 	depends on OF
