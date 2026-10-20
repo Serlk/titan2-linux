@@ -32,7 +32,8 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 		return -EAGAIN;
 
 	if (cmd == MCU_CMD(PATCH_SEM_CONTROL) ||
-	    cmd == MCU_CMD(PATCH_FINISH_REQ)) {
+	    cmd == MCU_CMD(PATCH_FINISH_REQ) ||
+	    cmd == MCU_CMD(FW_IMAGE_START)) {
 		skb_pull(skb, sizeof(*rxd) - 4);
 		ret = *skb->data;
 	} else if (cmd == MCU_EXT_CMD(THERMAL_CTRL)) {
@@ -632,11 +633,45 @@ int mt7921_mcu_fw_log_2_host(struct mt792x_dev *dev, u8 ctrl)
 				 &data, sizeof(data), false);
 }
 
+/*
+ * The SoC variant (MT6878 CONNSYS) gets its firmware from the boot loader,
+ * which copies the ROM patch and RAM images into EMI. The driver only asks
+ * the ROM code to start it (INIT_CMD_ID_FW_IMAGE_START in MediaTek's
+ * driver, sent with zero override and address) and waits for the WM CPU
+ * to report ready, as mt792x_load_firmware() does after the download.
+ */
+static int mt7921_mcu_fw_image_start(struct mt792x_dev *dev)
+{
+	struct {
+		__le32 override;
+		__le32 addr;
+	} req = {};
+	int ret;
+
+	ret = mt76_mcu_send_msg(&dev->mt76, MCU_CMD(FW_IMAGE_START), &req,
+				sizeof(req), true);
+	if (ret) {
+		dev_err(dev->mt76.dev, "FW_IMAGE_START failed: %d\n", ret);
+		return ret < 0 ? ret : -EIO;
+	}
+
+	if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC2_FW_N9_RDY,
+			    MT_TOP_MISC2_FW_N9_RDY, 1500)) {
+		dev_err(dev->mt76.dev, "Timeout for initializing firmware\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
 int mt7921_run_firmware(struct mt792x_dev *dev)
 {
 	int err;
 
-	err = mt792x_load_firmware(dev);
+	if (dev->soc_axi)
+		err = mt7921_mcu_fw_image_start(dev);
+	else
+		err = mt792x_load_firmware(dev);
 	if (err)
 		return err;
 
@@ -644,9 +679,12 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
 	if (err)
 		return err;
 
-	err = mt7921_load_clc(dev, mt792x_ram_name(dev));
-	if (err)
-		return err;
+	/* TODO: CLC (country list) for the SoC variant, it has no RAM file */
+	if (!dev->soc_axi) {
+		err = mt7921_load_clc(dev, mt792x_ram_name(dev));
+		if (err)
+			return err;
+	}
 	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
 
 	return mt7921_mcu_fw_log_2_host(dev, 1);

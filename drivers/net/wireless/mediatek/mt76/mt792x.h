@@ -259,6 +259,8 @@ struct mt792x_dev {
 	bool hif_idle:1;
 	bool hif_resumed:1;
 	bool regd_change:1;
+	/* MT6878 CONNSYS (SOC7_0) on AXI: firmware preloaded by the boot loader */
+	bool soc_axi:1;
 	wait_queue_head_t wait;
 
 	struct work_struct init_work;

@@ -203,6 +203,21 @@ static void mt792x_dma_prefetch(struct mt792x_dev *dev)
 		mt7927_dma_prefetch_setup(dev);
 	} else if (is_mt7925(&dev->mt76)) {
 		mt7925_dma_prefetch_setup(dev);
+	} else if (dev->soc_axi) {
+		/*
+		 * MT6878 CONNSYS (SOC7_0): rx rings 0-3, tx rings 0-2, 15
+		 * (MCU WM) and 16 (FWDL), depth 4 each, as MediaTek's
+		 * driver programs them (rings for the modem path left out).
+		 */
+		mt76_wr(dev, MT_WFDMA0_RX_RING0_EXT_CTRL, PREFETCH(0x0000, 0x4));
+		mt76_wr(dev, MT_WFDMA0_RX_RING1_EXT_CTRL, PREFETCH(0x0040, 0x4));
+		mt76_wr(dev, MT_WFDMA0_RX_RING2_EXT_CTRL, PREFETCH(0x0080, 0x4));
+		mt76_wr(dev, MT_WFDMA0_RX_RING3_EXT_CTRL, PREFETCH(0x00c0, 0x4));
+		mt76_wr(dev, MT_WFDMA0_TX_RING0_EXT_CTRL, PREFETCH(0x0100, 0x4));
+		mt76_wr(dev, MT_WFDMA0_TX_RING1_EXT_CTRL, PREFETCH(0x0140, 0x4));
+		mt76_wr(dev, MT_WFDMA0_TX_RING2_EXT_CTRL, PREFETCH(0x0180, 0x4));
+		mt76_wr(dev, MT_WFDMA0_TX_RING15_EXT_CTRL, PREFETCH(0x01c0, 0x4));
+		mt76_wr(dev, MT_WFDMA0_TX_RING16_EXT_CTRL, PREFETCH(0x0200, 0x4));
 	} else if (is_mt7902(&dev->mt76)) {
 		/* rx ring */
 		mt76_wr(dev, MT_WFDMA0_RX_RING0_EXT_CTRL, PREFETCH(0x0000, 0x4));
@@ -270,6 +285,9 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 		mt7927_wfdma_setup(dev);
 	else if (is_mt7925(&dev->mt76))
 		mt7925_wfdma_setup(dev);
+	else if (dev->soc_axi)
+		/* 36-bit DMA addresses, the AXI bus reaches all of DRAM */
+		mt76_set(dev, MT_WFDMA0_GLO_CFG, MT_WFDMA0_GLO_CFG_ADDR_EXT_EN);
 
 	mt76_set(dev, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT);
 

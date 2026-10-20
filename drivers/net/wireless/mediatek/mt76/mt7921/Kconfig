@@ -35,3 +35,17 @@ config MT7921U
 	  This adds support for MT7921U 802.11ax 2x2:2SS wireless devices.
 
 	  To compile this driver as a module, choose M here.
+
+config MT7921_SOC
+	tristate "MediaTek MT7921 (MT6878 CONNSYS) AXI support"
+	select MT7921_COMMON
+	depends on MAC80211
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on MTK_CONNINFRA
+	help
+	  This adds support for the MT7921 Wi-Fi core built into the
+	  connectivity subsystem (CONNSYS) of the MediaTek MT6878 SoC,
+	  attached over AXI. The firmware is loaded by the boot loader.
+
+	  To compile this driver as a module, choose M here.
