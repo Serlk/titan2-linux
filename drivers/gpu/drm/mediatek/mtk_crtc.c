@@ -562,14 +562,13 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
 /*
  * Command mode: nothing is scanned out until a frame is requested, so the
  * new configuration is written right away, while the output is idle, and
- * one frame is sent. The frame done interrupt of the first component then
- * completes the page flip.
+ * one frame is sent. The output reports the end of the frame as the vblank
+ * of the CRTC, which completes the page flip.
  */
 static void mtk_crtc_cmd_mode_frame(struct mtk_crtc *mtk_crtc)
 {
 	struct mtk_ddp_comp *output = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
 
-	mtk_ddp_comp_wait_idle(output);
 	mtk_crtc_ddp_config(&mtk_crtc->base, NULL);
 
 	mtk_mutex_enable(mtk_crtc->mutex);
@@ -588,6 +587,13 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	unsigned long flags;
 
 	mutex_lock(&mtk_crtc->hw_lock);
+
+	/*
+	 * Command mode: let the frame in flight end first, its end must not
+	 * complete the page flip of this update.
+	 */
+	if (mtk_crtc->cmd_mode && mtk_crtc->enabled)
+		mtk_ddp_comp_wait_idle(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
 
 	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
 	mtk_crtc->config_updating = true;
@@ -693,6 +699,10 @@ static int mtk_crtc_enable_vblank(struct drm_crtc *crtc)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+
+	/* in command mode the output reports the end of each frame */
+	if (mtk_crtc->cmd_mode)
+		return 0;
 
 	mtk_ddp_comp_enable_vblank(comp);
 
@@ -843,6 +853,18 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	if (!mtk_crtc->enabled)
 		return;
 
+	/*
+	 * Command mode: the panel keeps showing the last frame until it is
+	 * put to sleep; there is no point in sending an empty one. Wait for
+	 * the frame in flight, the layers are switched off below.
+	 */
+	if (mtk_crtc->cmd_mode) {
+		mutex_lock(&mtk_crtc->hw_lock);
+		mtk_ddp_comp_wait_idle(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
+		mutex_unlock(&mtk_crtc->hw_lock);
+		goto hw_fini;
+	}
+
 	/* Set all pending plane state to disabled */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
 		struct drm_plane *plane = &mtk_crtc->planes[i];
@@ -865,6 +887,7 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	/* Wait for planes to be disabled */
 	drm_crtc_wait_one_vblank(crtc);
 
+hw_fini:
 	drm_crtc_vblank_off(crtc);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
 	mtk_ddp_comp_power_off(comp);
