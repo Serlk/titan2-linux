@@ -47,8 +47,14 @@ mtk_drm_mode_fb_create(struct drm_device *dev,
 		       const struct drm_format_info *info,
 		       const struct drm_mode_fb_cmd2 *cmd)
 {
+	struct mtk_drm_private *priv = dev->dev_private;
+
 	if (info->num_planes != 1)
 		return ERR_PTR(-EINVAL);
+
+	/* front buffer rendering (fbdev, DIRTYFB) has to send frames */
+	if (priv->data->fb_dirty)
+		return drm_gem_fb_create_with_dirty(dev, file, info, cmd);
 
 	return drm_gem_fb_create(dev, file, info, cmd);
 }
@@ -123,8 +129,9 @@ static unsigned int mt8167_mtk_ddp_main[] = {
 };
 
 /*
- * The picture quality engines of MT6878 are not supported yet: the main
- * path bypasses them through the mmsys crossbars.
+ * The picture quality engines of MT6878 are not supported yet: frames go
+ * through them as the boot loader set them up (see mtk-mmsys), and only
+ * the overlay and the output are driven.
  */
 static const unsigned int mt6878_mtk_ddp_main[] = {
 	DDP_COMPONENT_OVL_2L0,
@@ -278,6 +285,7 @@ static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
 	.main_path = mt6878_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt6878_mtk_ddp_main),
 	.mmsys_dev_num = 1,
+	.fb_dirty = true,
 };
 
 static const struct mtk_mmsys_driver_data mt8173_mmsys_driver_data = {

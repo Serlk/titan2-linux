@@ -44,6 +44,11 @@ struct mtk_mmsys_driver_data {
 	unsigned int num_conn_routes;
 
 	bool shadow_register;
+	/*
+	 * The display keeps its own frame memory (command mode panel): a
+	 * frame is sent only on request, framebuffers need a dirty callback.
+	 */
+	bool fb_dirty;
 	unsigned int mmsys_id;
 	unsigned int mmsys_dev_num;
 
