@@ -47,6 +47,8 @@ struct mtk_disp_pwm {
 	struct clk *clk_mm;
 	void __iomem *base;
 	bool enabled;
+	/* output duty cycle = requested duty cycle * duty_scale / 100 */
+	u32 duty_scale;
 };
 
 static inline struct mtk_disp_pwm *to_mtk_disp_pwm(struct pwm_chip *chip)
@@ -117,7 +119,7 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	rate = clk_get_rate(mdp->clk_main);
 	clk_div = mul_u64_u64_div_u64(state->period, rate, NSEC_PER_SEC) >>
 			  PWM_PERIOD_BIT_WIDTH;
-	if (clk_div > PWM_CLKDIV_MAX) {
+	if (!rate || clk_div > PWM_CLKDIV_MAX) {
 		if (!mdp->enabled) {
 			clk_disable_unprepare(mdp->clk_mm);
 			clk_disable_unprepare(mdp->clk_main);
@@ -131,6 +133,8 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		period--;
 
 	high_width = mul_u64_u64_div_u64(state->duty_cycle, rate, div);
+	if (mdp->duty_scale < 100)
+		high_width = high_width * mdp->duty_scale / 100;
 	value = period | (high_width << PWM_HIGH_WIDTH_SHIFT);
 
 	if (mdp->data->bls_debug && !mdp->data->has_commit) {
@@ -202,6 +206,11 @@ static int mtk_disp_pwm_get_state(struct pwm_chip *chip,
 					 mdp->data->bls_debug_mask);
 
 	rate = clk_get_rate(mdp->clk_main);
+	if (!rate) {
+		clk_disable_unprepare(mdp->clk_mm);
+		clk_disable_unprepare(mdp->clk_main);
+		return -EINVAL;
+	}
 	con0 = readl(mdp->base + mdp->data->con0);
 	con1 = readl(mdp->base + mdp->data->con1);
 	pwm_en = readl(mdp->base + DISP_PWM_EN);
@@ -214,8 +223,11 @@ static int mtk_disp_pwm_get_state(struct pwm_chip *chip,
 	 */
 	state->period = DIV64_U64_ROUND_UP(period * (clk_div + 1) * NSEC_PER_SEC, rate);
 	high_width = FIELD_GET(PWM_HIGH_WIDTH_MASK, con1);
+	if (mdp->duty_scale < 100)
+		high_width = DIV_ROUND_UP_ULL(high_width * 100, mdp->duty_scale);
 	state->duty_cycle = DIV64_U64_ROUND_UP(high_width * (clk_div + 1) * NSEC_PER_SEC,
 					       rate);
+	state->duty_cycle = min(state->duty_cycle, state->period);
 	state->polarity = PWM_POLARITY_NORMAL;
 	clk_disable_unprepare(mdp->clk_mm);
 	clk_disable_unprepare(mdp->clk_main);
@@ -227,6 +239,17 @@ static const struct pwm_ops mtk_disp_pwm_ops = {
 	.apply = mtk_disp_pwm_apply,
 	.get_state = mtk_disp_pwm_get_state,
 };
+
+static void mtk_disp_pwm_put_clks(void *data)
+{
+	struct mtk_disp_pwm *mdp = data;
+
+	if (mdp->enabled) {
+		clk_disable_unprepare(mdp->clk_mm);
+		clk_disable_unprepare(mdp->clk_main);
+		mdp->enabled = false;
+	}
+}
 
 static int mtk_disp_pwm_probe(struct platform_device *pdev)
 {
@@ -254,6 +277,38 @@ static int mtk_disp_pwm_probe(struct platform_device *pdev)
 	if (IS_ERR(mdp->clk_mm))
 		return dev_err_probe(&pdev->dev, PTR_ERR(mdp->clk_mm),
 				     "Failed to get mm clock\n");
+
+	mdp->duty_scale = 100;
+	of_property_read_u32(pdev->dev.of_node, "mediatek,duty-cycle-scale-percent",
+			     &mdp->duty_scale);
+	if (!mdp->duty_scale || mdp->duty_scale > 100)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "invalid mediatek,duty-cycle-scale-percent %u\n",
+				     mdp->duty_scale);
+
+	/*
+	 * The bootloader may have left the PWM running (a backlight that is
+	 * on). Take the clocks for it, as apply() does when it enables the
+	 * PWM, so that the first disable request really switches it off and
+	 * the clocks stay balanced.
+	 */
+	ret = clk_prepare_enable(mdp->clk_main);
+	if (ret < 0)
+		return dev_err_probe(&pdev->dev, ret, "Can't enable mdp->clk_main\n");
+	ret = clk_prepare_enable(mdp->clk_mm);
+	if (ret < 0) {
+		clk_disable_unprepare(mdp->clk_main);
+		return dev_err_probe(&pdev->dev, ret, "Can't enable mdp->clk_mm\n");
+	}
+	mdp->enabled = readl(mdp->base + DISP_PWM_EN) & mdp->data->enable_mask;
+	if (!mdp->enabled) {
+		clk_disable_unprepare(mdp->clk_mm);
+		clk_disable_unprepare(mdp->clk_main);
+	}
+
+	ret = devm_add_action_or_reset(&pdev->dev, mtk_disp_pwm_put_clks, mdp);
+	if (ret)
+		return ret;
 
 	chip->ops = &mtk_disp_pwm_ops;
 
@@ -294,9 +349,20 @@ static const struct mtk_pwm_data mt8183_pwm_data = {
 	.bls_debug_mask = 0x3,
 };
 
+static const struct mtk_pwm_data mt6878_pwm_data = {
+	.enable_mask = BIT(0),
+	.con0 = 0x18,
+	.con0_sel = 0x0,
+	.con1 = 0x1c,
+	.has_commit = true,
+	.commit = 0xc,
+	.commit_mask = 0x1,
+};
+
 static const struct of_device_id mtk_disp_pwm_of_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-pwm", .data = &mt2701_pwm_data},
 	{ .compatible = "mediatek,mt6595-disp-pwm", .data = &mt8173_pwm_data},
+	{ .compatible = "mediatek,mt6878-disp-pwm", .data = &mt6878_pwm_data},
 	{ .compatible = "mediatek,mt8173-disp-pwm", .data = &mt8173_pwm_data},
 	{ .compatible = "mediatek,mt8183-disp-pwm", .data = &mt8183_pwm_data},
 	{ }
