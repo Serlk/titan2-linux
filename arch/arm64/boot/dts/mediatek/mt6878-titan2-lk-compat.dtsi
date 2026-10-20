@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Nodes the stock Titan 2 boot loader (LK, V01.00.13/14) looks for in our
+ * DTB before it starts the kernel, when it loads the companion firmware
+ * (SCP, VCP, APU, ...). Without them it stops with an assert. The
+ * requirements are described in titan2-docs: docs/lk-boot-requirements.md;
+ * titan2-tools: scripts/lk-fdt-check.py checks a built DTB against them.
+ * They were found from LK's boot log and from the device tree it hands to
+ * the stock kernel; the property values are those of that device tree.
+ *
+ * Included at the end of mt6878-unihertz-titan2.dts:
+ *     #include "mt6878-titan2-lk-compat.dtsi"
+ *
+ * None of the compatibles below is bound by a mainline Linux driver
+ * ("mediatek,scp" is only a phandle property name in vcodec there), so
+ * status = "okay" on scp/vcp has no effect on Linux.
+ *
+ * The other nodes LK needs (emicen, emiisu, soc-dbg-error-flag, wifi,
+ * chosen/bootargs, memory, reserved-memory) are in the board file.
+ */
+
+/ {
+	/*
+	 * SCP: LK needs a node with compatible "mediatek,scp" and
+	 * status = "okay"; otherwise it stops with an assertion.
+	 * It loads the SCP firmware from the scp_<slot> partition, reserves
+	 * "SCP-reserved" (0x2300000) and "reserve-memory-scp_share" (both show
+	 * up in /reserved-memory as with the stock kernel) and starts the SCP;
+	 * it writes nothing into the DT.
+	 * The properties are copied unchanged from the stock device tree
+	 * (scp@1c400000), so that the SCP starts with the same memory layout as
+	 * under Android; keep them as a set. With only compatible and status LK
+	 * also goes on, but the SCP then gets an empty memory table, which has
+	 * never been tried.
+	 */
+	scp {
+		compatible = "mediatek,scp";
+		status = "okay";
+		scp-sram-size = <0x100000>;
+		secure-dump = "enable";
+		secure-dump-size = <0xe28000>;
+		scp-protect = "enable";
+		scp-mem-tbl = <0x00 0x00 0x00
+			       0x01 0xca700 0x00
+			       0x02 0x100000 0x00
+			       0x03 0x180000 0x00
+			       0x05 0xa000 0x00
+			       0x07 0x1a000 0x00
+			       0x08 0x10000 0x00
+			       0x09 0x1000 0x00
+			       0x0a 0x2000 0x00
+			       0x0b 0x100 0x00
+			       0x0c 0x100 0x00
+			       0x13 0x200 0x00>;
+		memorydump = <0x100000 0xc4000 0x3c00 0x400 0xc60000>;
+	};
+
+	/*
+	 * VCP: LK needs a node with compatible "mediatek,vcp" and
+	 * status = "okay"; otherwise it stops with an assertion.
+	 * It loads the VCP firmware only when vcp-support is non-zero (then
+	 * vcp-sram-size and vcp-dram-size must be set as well, or it stops).
+	 * With vcp-support = 0 the video coprocessor stays off, which suits
+	 * mainline.
+	 * (Stock: vcp-support = <1>, vcp-sram-size = <0x40000>,
+	 *  vcp-dram-size = <0x800000>.)
+	 */
+	vcp {
+		compatible = "mediatek,vcp";
+		status = "okay";
+		vcp-support = <0>;
+	};
+
+	/*
+	 * APU: LK looks for /apusys-rv@190e1000 (or /soc/apusys-rv@190e1000,
+	 * /apusys_rv, /soc/apusys_rv) and stops if there is none, or if it has
+	 * no status. With a status other than "okay" it does not load the APU,
+	 * which is what we want.
+	 * reg is only there for dtc (unit address); LK does not read it.
+	 */
+	apusys-rv@190e1000 {
+		compatible = "mediatek,mt6878-apusys_rv";
+		reg = <0x0 0x190e1000 0x0 0x1000>;
+		status = "disabled";
+	};
+
+	/*
+	 * Firmware LK loads without needing anything here (details in
+	 * titan2-docs: docs/lk-boot-requirements.md):
+	 *  - CCU: loaded only with a "mediatek,ccu_rproc" node marked secured;
+	 *  - SPM: without a "mediatek,sleep" node LK only logs it;
+	 *  - APU and ADSP images, DPM: nothing read from the DT;
+	 *  - modem: /mddriver or /soc/mddriver is optional; with ref-args
+	 *    containing "md_disable" LK does not start the modem (not used);
+	 *  - GPUEB: /soc/gpueb is optional (gpueb-diagnosis-mode);
+	 *  - CONNSYS: loaded only when /consys, /gps and /wifi (at the root or
+	 *    under /soc) are all present, and LK then rewrites the compatible
+	 *    of /consys. The default board has only /wifi (LK needs it for its
+	 *    reserved memory), so CONNSYS is skipped; the -wifi board adds the
+	 *    other two.
+	 */
+};

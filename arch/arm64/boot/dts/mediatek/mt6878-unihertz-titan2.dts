@@ -525,3 +525,5 @@
 &usbphy {
 	status = "okay";
 };
+
+#include "mt6878-titan2-lk-compat.dtsi"
