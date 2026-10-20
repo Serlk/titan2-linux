@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/awinic,aw9523b-keypad.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Awinic AW9523B I/O expander as a keyboard matrix scanner
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The AW9523B is a 16-line I2C I/O expander. In this mode all of its lines
+  belong to a keyboard matrix; the row lines are sensed (they need pull-ups)
+  and the column lines are driven low one at a time while scanning. A change
+  on any row line raises the expander interrupt.
+
+allOf:
+  - $ref: input.yaml#
+  - $ref: matrix-keymap.yaml#
+
+properties:
+  compatible:
+    const: awinic,aw9523b-keypad
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+
+  vio-supply: true
+
+  awinic,row-lines:
+    description:
+      Expander lines sensing the matrix rows, in row order. Lines 0-7 are
+      port 0, lines 8-15 port 1.
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 1
+    maxItems: 15
+    items:
+      maximum: 15
+
+  awinic,column-lines:
+    description: Expander lines driving the matrix columns, in column order.
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 1
+    maxItems: 15
+    items:
+      maximum: 15
+
+  debounce-delay-ms:
+    description: Delay from the interrupt to the first scan.
+    default: 1
+
+  col-scan-delay-us:
+    description: Settling delay after selecting a column.
+    default: 0
+
+  poll-interval:
+    description: Scan interval while any key is held, in milliseconds.
+    default: 5
+
+  label: true
+  linux,keymap: true
+  autorepeat: true
+  wakeup-source: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - awinic,row-lines
+  - awinic,column-lines
+  - linux,keymap
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/input/input.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        keyboard@58 {
+            compatible = "awinic,aw9523b-keypad";
+            reg = <0x58>;
+            interrupts-extended = <&pio 12 IRQ_TYPE_LEVEL_LOW>;
+            reset-gpios = <&pio 53 GPIO_ACTIVE_LOW>;
+            awinic,row-lines = <0 1 2 3 4 5 6 7 8>;
+            awinic,column-lines = <9 10 11 12 13 14 15>;
+            linux,keymap = <MATRIX_KEY(0, 0, KEY_Y)
+                            MATRIX_KEY(0, 1, KEY_T)>;
+            wakeup-source;
+        };
+    };
