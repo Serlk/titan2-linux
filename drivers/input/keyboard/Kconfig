@@ -157,6 +157,18 @@ config KEYBOARD_ATKBD_RDI_KEYCODES
 	  right-hand column will be interpreted as the key shown in the
 	  left-hand column.
 
+config KEYBOARD_AW9523
+	tristate "Awinic AW9523B keyboard matrix"
+	depends on I2C
+	select INPUT_MATRIXKMAP
+	select REGMAP_I2C
+	help
+	  Say Y here if your board has a keyboard matrix scanned through an
+	  Awinic AW9523B 16-line I/O expander, as on the Unihertz Titan 2.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called aw9523-keypad.
+
 config KEYBOARD_QT1050
 	tristate "Microchip AT42QT1050 Touch Sensor Chip"
 	depends on I2C
