@@ -822,6 +822,53 @@
 		};
 
 		/*
+		 * Mali-G615 MC2. Powered and clocked through the GPUEB
+		 * (gpufreq below); needs arm/mali/arch11.8/mali_csffw.bin.
+		 */
+		gpu: gpu@13000000 {
+			compatible = "mediatek,mt6878-mali", "arm,mali-valhall-csf";
+			reg = <0x13000000 0x480000>;
+			interrupts = <GIC_SPI 271 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 269 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "job", "mmu", "gpu";
+			clocks = <&gpufreq 0>, <&gpufreq 1>;
+			clock-names = "core", "stacks";
+			power-domains = <&gpufreq>;
+			#cooling-cells = <2>;
+			status = "disabled";
+		};
+
+		/*
+		 * GPUEB, the GPU power and frequency MCU. The boot firmware
+		 * loads and starts it in MFG0; it owns the GPU supplies, PLLs
+		 * and MFG1+ power domains. Its shared memory is the LK-made
+		 * "mediatek,me_GPUEB_SHARED" carveout.
+		 */
+		gpufreq: power-controller@13c3fd1c {
+			compatible = "mediatek,mt6878-gpufreq";
+			reg = <0x13c3fd1c 0x64>;
+			reg-names = "gpr";
+			mboxes = <&gpueb_mbox 1>;
+			mbox-names = "gpufreq";
+			mediatek,scpsys = <&scpsys>;
+			#clock-cells = <1>;
+			#nvmem-cell-cells = <0>;
+			#power-domain-cells = <0>;
+			status = "disabled";
+		};
+
+		gpueb_mbox: mailbox@13c3fd80 {
+			compatible = "mediatek,mt6878-gpueb-mbox";
+			reg = <0x13c3fd80 0x280>,
+			      <0x13c62000 0x7c>;
+			reg-names = "data", "ctl";
+			interrupts = <GIC_SPI 273 IRQ_TYPE_LEVEL_HIGH 0>;
+			#mbox-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * The GPU PLL controllers sit in the MFG block, which the GPU
 		 * microcontroller (GPUEB) powers on and off on its own. Reading
 		 * them while MFG is down stalls the bus, so keep them disabled
