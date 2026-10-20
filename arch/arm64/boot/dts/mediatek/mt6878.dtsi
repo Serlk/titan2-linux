@@ -344,8 +344,9 @@
 			compatible = "mediatek,mt6878-ccci";
 			reg = <0x0d180000 0x2000>,
 			      <0x10209000 0x1000>,
-			      <0x1020a000 0x1000>;
-			reg-names = "md", "ccif-ap", "ccif-md";
+			      <0x1020a000 0x1000>,
+			      <0x1020e000 0x1000>;
+			reg-names = "md", "ccif-ap", "ccif-md", "infra";
 			interrupts = <GIC_SPI 491 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 228 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH 0>;
@@ -359,6 +360,9 @@
 			clock-names = "ccif-ap", "ccif-md", "ccif1-ap",
 				      "ccif1-md", "ccif4-md", "ccif5-md";
 			mediatek,ccif-sram-size = <0x200>;
+			mediatek,ccif-reset-bit = <26>;
+			mediatek,scpsys = <&scpsys>;
+			mediatek,topckgen = <&topckgen>;
 			status = "disabled";
 		};
 
