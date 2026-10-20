@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, CPU idle and suspend-to-idle bring-up.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * The idle states in mt6878.dtsi are the stock ones (same PSCI suspend
+ * parameters and latencies, platform-coordinated mode, as the stock
+ * firmware has no OS-initiated mode). They all stop the arch timer: the
+ * system timer is the broadcast device that lets every CPU enter them at
+ * once, so that the firmware can power MCUSYS down and, for the s2idle
+ * state, hand the system over to the SPM. That has not been checked on the
+ * device yet, hence a separate board file.
+ *
+ * The fuel gauge only reads registers; it is on here to measure the
+ * battery current (current_now) while idle and around suspend.
+ */
+
+#include "mt6878-unihertz-titan2.dts"
+
+&systimer {
+	status = "okay";
+};
+
+&{/soc@0/i2c@11d71000/fuel-gauge@55} {
+	status = "okay";
+};
