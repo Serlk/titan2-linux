@@ -73,6 +73,7 @@ struct scpsys_domain {
 struct scpsys {
 	struct device *dev;
 	struct regmap *base;
+	struct regmap *hwv_base;
 	const struct scpsys_soc_data *soc_data;
 	u8 bus_prot_index[BUS_PROT_BLOCK_COUNT];
 	struct regmap **bus_prot;
@@ -107,7 +108,7 @@ static bool scpsys_hwv_domain_is_disable_done(struct scpsys_domain *pd)
 	u32 val[2];
 	u32 mask = BIT(hwv->setclr_bit);
 
-	regmap_multi_reg_read(pd->scpsys->base, regs, val, 2);
+	regmap_multi_reg_read(pd->scpsys->hwv_base, regs, val, 2);
 
 	/* Disable is done when the bit is set in DONE, cleared in CLR_STA */
 	return (val[0] & mask) && !(val[1] & mask);
@@ -120,7 +121,7 @@ static bool scpsys_hwv_domain_is_enable_done(struct scpsys_domain *pd)
 	u32 val[3];
 	u32 mask = BIT(hwv->setclr_bit);
 
-	regmap_multi_reg_read(pd->scpsys->base, regs, val, 3);
+	regmap_multi_reg_read(pd->scpsys->hwv_base, regs, val, 3);
 
 	/* Enable is done when the bit is set in DONE and EN, cleared in SET_STA */
 	return (val[0] & mask) && (val[1] & mask) && !(val[2] & mask);
@@ -364,7 +365,7 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
 		goto err_disable_clks;
 
 	/* Make sure the HW Voter is idle and able to accept commands */
-	ret = regmap_read_poll_timeout_atomic(scpsys->base, hwv->done, val,
+	ret = regmap_read_poll_timeout_atomic(scpsys->hwv_base, hwv->done, val,
 					      val & BIT(hwv->setclr_bit),
 					      MTK_HWV_POLL_DELAY_US,
 					      MTK_HWV_POLL_TIMEOUT);
@@ -377,13 +378,13 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
 	 * Instruct the HWV to power on the MTCMOS (power domain): after that,
 	 * the same bit will be unset immediately by the hardware.
 	 */
-	regmap_write(scpsys->base, hwv->set, BIT(hwv->setclr_bit));
+	regmap_write(scpsys->hwv_base, hwv->set, BIT(hwv->setclr_bit));
 
 	/*
 	 * Wait until the HWV sets the bit again, signalling that its internal
 	 * state machine was started and it now processing the vote command.
 	 */
-	ret = regmap_read_poll_timeout_atomic(scpsys->base, hwv->set, val,
+	ret = regmap_read_poll_timeout_atomic(scpsys->hwv_base, hwv->set, val,
 					      val & BIT(hwv->setclr_bit),
 					      MTK_HWV_PREPARE_DELAY_US,
 					      MTK_HWV_PREPARE_TIMEOUT);
@@ -438,7 +439,7 @@ static int scpsys_hwv_power_off_internal(struct scpsys_domain *pd)
 		goto err_infra;
 
 	/* Make sure the HW Voter is idle and able to accept commands */
-	ret = regmap_read_poll_timeout_atomic(scpsys->base, hwv->done, val,
+	ret = regmap_read_poll_timeout_atomic(scpsys->hwv_base, hwv->done, val,
 					      val & BIT(hwv->setclr_bit),
 					      MTK_HWV_POLL_DELAY_US,
 					      MTK_HWV_POLL_TIMEOUT);
@@ -450,13 +451,13 @@ static int scpsys_hwv_power_off_internal(struct scpsys_domain *pd)
 	 * Instruct the HWV to power off the MTCMOS (power domain): differently
 	 * from poweron, the bit will be kept set.
 	 */
-	regmap_write(scpsys->base, hwv->clr, BIT(hwv->setclr_bit));
+	regmap_write(scpsys->hwv_base, hwv->clr, BIT(hwv->setclr_bit));
 
 	/*
 	 * Wait until the HWV clears the bit, signalling that its internal
 	 * state machine was started and it now processing the clear command.
 	 */
-	ret = regmap_read_poll_timeout_atomic(scpsys->base, hwv->clr, val,
+	ret = regmap_read_poll_timeout_atomic(scpsys->hwv_base, hwv->clr, val,
 					      !(val & BIT(hwv->setclr_bit)),
 					      MTK_HWV_PREPARE_DELAY_US,
 					      MTK_HWV_PREPARE_TIMEOUT);
@@ -798,7 +799,19 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 		domain_data = &scpsys->soc_data->domains_data[id];
 		hwv_domain_data = NULL;
 
-		if (domain_data->sta_mask == 0) {
+		/*
+		 * Some controllers have both direct control and HW Voter
+		 * domains in the same index space: an id that has no direct
+		 * control data may be a HWV domain.
+		 */
+		if (domain_data->sta_mask == 0 &&
+		    id < scpsys->soc_data->num_hwv_domains &&
+		    scpsys->soc_data->hwv_domains_data[id].name) {
+			domain_data = NULL;
+			hwv_domain_data = &scpsys->soc_data->hwv_domains_data[id];
+		}
+
+		if (domain_data && domain_data->sta_mask == 0) {
 			dev_err(scpsys->dev, "%pOF: undefined domain id %d\n", node, id);
 			return ERR_PTR(-EINVAL);
 		}
@@ -897,15 +910,20 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	else
 		pd->genpd.name = node->name;
 
-	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_DIRECT_CTL) {
+	if (!pd->hwv_data) {
 		pd->genpd.power_off = scpsys_power_off;
 		pd->genpd.power_on = scpsys_power_on;
 	} else {
 		pd->genpd.power_off = scpsys_hwv_power_off;
 		pd->genpd.power_on = scpsys_hwv_power_on;
 
-		/* HW-Voter code can be invoked in atomic context */
-		pd->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
+		/*
+		 * HW-Voter code can be invoked in atomic context, but not in
+		 * a mixed controller: there the HWV domains are parents of
+		 * direct control ones and take clocks that need to sleep.
+		 */
+		if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER)
+			pd->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
 	}
 
 	/*
@@ -917,7 +935,7 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
 		bool domain_is_on;
 
-		if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER)
+		if (pd->hwv_data)
 			domain_is_on = scpsys_hwv_domain_is_enable_done(pd);
 		else
 			domain_is_on = scpsys_domain_is_on(pd);
@@ -1020,11 +1038,11 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 	 */
 	ret = pm_genpd_remove(&pd->genpd);
 	if (ret < 0)
-		dev_err(pd->scpsys->dev,
+		dev_err(scpsys->dev,
 			"failed to remove domain '%s' : %d - state may be inconsistent\n",
 			pd->genpd.name, ret);
 
-	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER) {
+	if (pd->hwv_data) {
 		if (scpsys_hwv_domain_is_enable_done(pd))
 			scpsys_hwv_power_off_internal(pd);
 	} else {
@@ -1275,7 +1293,8 @@ static int scpsys_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	num_domains = soc->num_domains + soc->num_hwv_domains;
+	/* In a mixed controller both kinds of domains share the index space */
+	num_domains = max(soc->num_domains, soc->num_hwv_domains);
 
 	scpsys = devm_kzalloc(dev, struct_size(scpsys, domains, num_domains), GFP_KERNEL);
 	if (!scpsys)
@@ -1297,6 +1316,19 @@ static int scpsys_probe(struct platform_device *pdev)
 	if (IS_ERR(scpsys->base)) {
 		dev_err(dev, "no regmap available\n");
 		return PTR_ERR(scpsys->base);
+	}
+
+	/*
+	 * HWV controllers live in the HWV register space; a direct control
+	 * controller that also has HWV domains points to the voter instead.
+	 */
+	if (soc->type == SCPSYS_MTCMOS_TYPE_DIRECT_CTL && soc->num_hwv_domains) {
+		scpsys->hwv_base = syscon_regmap_lookup_by_phandle(np, "mediatek,hardware-voter");
+		if (IS_ERR(scpsys->hwv_base))
+			return dev_err_probe(dev, PTR_ERR(scpsys->hwv_base),
+					     "no hardware voter regmap available\n");
+	} else {
+		scpsys->hwv_base = scpsys->base;
 	}
 
 	if (of_find_property(np, "access-controllers", NULL))

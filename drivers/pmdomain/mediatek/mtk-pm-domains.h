@@ -201,6 +201,20 @@ struct scpsys_hwv_domain_data {
 	u16 caps;
 };
 
+/**
+ * struct scpsys_soc_data - power controller data
+ * @domains_data:        Direct control power domains
+ * @num_domains:         Number of entries in @domains_data
+ * @hwv_domains_data:    HW Voter power domains
+ * @num_hwv_domains:     Number of entries in @hwv_domains_data
+ * @bus_prot_blocks:     Bus protection blocks, in access-controllers order
+ * @num_bus_prot_blocks: Number of entries in @bus_prot_blocks
+ * @type:                Type of the controller
+ *
+ * A SCPSYS_MTCMOS_TYPE_DIRECT_CTL controller may also carry HWV domains:
+ * both tables then share the same index space, and an index is a HWV
+ * domain when it has no direct control data (zero sta_mask).
+ */
 struct scpsys_soc_data {
 	const struct scpsys_domain_data *domains_data;
 	int num_domains;
