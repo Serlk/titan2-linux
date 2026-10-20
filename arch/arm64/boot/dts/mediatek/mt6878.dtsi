@@ -406,6 +406,42 @@
 			#clock-cells = <1>;
 		};
 
+		afe: audio-controller@11050000 {
+			compatible = "mediatek,mt6878-afe";
+			reg = <0x11050000 0x9000>;
+			interrupts = <GIC_SPI 392 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&spm MT6878_POWER_DOMAIN_AUDIO>;
+			clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>,
+				 <&topckgen CLK_TOP_AUD_1_SEL>,
+				 <&topckgen CLK_TOP_AUD_2_SEL>,
+				 <&topckgen CLK_TOP_AUD_ENGEN1_SEL>,
+				 <&topckgen CLK_TOP_AUD_ENGEN2_SEL>,
+				 <&topckgen CLK_TOP_AUDIO_H_SEL>,
+				 <&topckgen CLK_TOP_APLL1>,
+				 <&topckgen CLK_TOP_APLL2>,
+				 <&topckgen CLK_TOP_APLL1_D4>,
+				 <&topckgen CLK_TOP_APLL2_D4>,
+				 <&topckgen CLK_TOP_TCK_26M_MX9>,
+				 <&pericfg_ao CLK_PERAOP_AUDIO0>,
+				 <&pericfg_ao CLK_PERAOP_AUDIO1>,
+				 <&pericfg_ao CLK_PERAOP_AUDIO2>;
+			clock-names = "top_aud_intbus",
+				      "top_aud_1",
+				      "top_aud_2",
+				      "top_aud_eng1",
+				      "top_aud_eng2",
+				      "top_aud_h",
+				      "apll1",
+				      "apll2",
+				      "apll1_d4",
+				      "apll2_d4",
+				      "clk26m",
+				      "peri_aud_slv",
+				      "peri_aud_mst",
+				      "peri_aud_intbus";
+			status = "disabled";
+		};
+
 		ssusb: usb0@11201000 {
 			compatible = "mediatek,mtu3";
 			reg = <0x11201000 0x2e00>,
