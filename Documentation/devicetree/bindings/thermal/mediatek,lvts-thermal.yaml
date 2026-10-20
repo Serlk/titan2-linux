@@ -18,6 +18,8 @@ description: |
 properties:
   compatible:
     enum:
+      - mediatek,mt6878-lvts-ap
+      - mediatek,mt6878-lvts-mcu
       - mediatek,mt7987-lvts-ap
       - mediatek,mt7988-lvts-ap
       - mediatek,mt8186-lvts
@@ -94,12 +96,31 @@ allOf:
         nvmem-cell-names:
           minItems: 2
 
+  # On MT6878 the boot firmware sets the controllers up and arms the
+  # hardware thermal reset; Linux only reads the sensors, by polling.
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - mediatek,mt6878-lvts-ap
+              - mediatek,mt6878-lvts-mcu
+    then:
+      properties:
+        nvmem-cells:
+          minItems: 2
+
+        nvmem-cell-names:
+          minItems: 2
+    else:
+      required:
+        - interrupts
+        - clocks
+        - resets
+
 required:
   - compatible
   - reg
-  - interrupts
-  - clocks
-  - resets
   - nvmem-cells
   - nvmem-cell-names
 
