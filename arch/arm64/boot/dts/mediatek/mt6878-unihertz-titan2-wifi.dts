@@ -9,9 +9,20 @@
  * loads the CONNSYS firmware. With this node present it reads the hwid-node GPIOs,
  * rewrites "compatible" with the A-die it finds (MT6637 on this board, as
  * in the stock DT) and programs the PMIF for that A-die, as it does under
- * Android. It loads the CONNSYS firmware only when /gps and /wifi carry
- * their EMI properties too; they are not described yet, so that part is
- * still skipped.
+ * Android.
+ *
+ * With /consys, /gps and /wifi all present LK also loads the CONNSYS
+ * firmware: it takes the EMI sizes from these nodes
+ * (stock values below), carves the CONNSYS EMI, the GNSS EMI, the WFDMA
+ * pool and the CONNSYS<->SCP window out of DRAM below 0x90000000 (they
+ * show up in /reserved-memory as consys_emi_reserved,
+ * shared-dma-pool_wifi-reserve-memory and consys_scp_emi_reserved), writes
+ * "emi-addr" into /consys and /gps and "memory-region" into /wifi, copies
+ * the BT, GNSS and Wi-Fi ROM images from the connsys_* partitions into
+ * the read-only part of the CONNSYS EMI, sets the EMI MPU and tells ATF
+ * the addresses. A zero or missing size makes LK skip all of that; a size
+ * that does not fit makes mblock panic, so keep the stock values
+ * (scripts/lk-fdt-check.py checks them).
  */
 
 #include "mt6878-unihertz-titan2-pd.dts"
@@ -34,6 +45,27 @@
 	};
 };
 
+&mt6369 {
+	regulators {
+		/*
+		 * Wi-Fi/BT (vcn33-1) and Wi-Fi (vcn33-2) front end, GNSS LNA
+		 * (vant18). MediaTek's GPL connectivity driver only switches
+		 * them, at the level the PMIC comes up with; no voltage is set here either.
+		 */
+		mt6369_vcn33_1: vcn33-1 {
+			regulator-name = "mt6369_vcn33_1";
+		};
+
+		mt6369_vcn33_2: vcn33-2 {
+			regulator-name = "mt6369_vcn33_2";
+		};
+
+		mt6369_vant18: vant18 {
+			regulator-name = "mt6369_vant18";
+		};
+	};
+};
+
 &pio {
 	/* D-die <-> A-die interface (stock: GPIO_MODE21[31:16], GPIO_MODE22[26:0]) */
 	consys_pins_active: consys-active-pins {
@@ -51,6 +83,33 @@
 				 <PINMUX_GPIO182__FUNC_CONN_WF_CTRL4>;
 			/* stock: IOCFG_RT DRV_CFG0 fields = 3'b001 */
 			drive-strength = <4>;
+		};
+	};
+
+	/*
+	 * A-die bring-up: as "active", but CONN_WF_CTRL2 (GPIO180) is a GPIO
+	 * driven low (26 MHz co-clock; high for 52 MHz) while the A-die
+	 * leaves reset (stock connsys_a_die_switch_to_gpio_mode).
+	 */
+	consys_pins_adie_cfg: consys-adie-cfg-pins {
+		pins-conn {
+			pinmux = <PINMUX_GPIO172__FUNC_CONN_TOP_CLK>,
+				 <PINMUX_GPIO173__FUNC_CONN_TOP_DATA>,
+				 <PINMUX_GPIO174__FUNC_CONN_BT_CLK>,
+				 <PINMUX_GPIO175__FUNC_CONN_BT_DATA>,
+				 <PINMUX_GPIO176__FUNC_CONN_HRST_B>,
+				 <PINMUX_GPIO177__FUNC_CONN_WB_PTA>,
+				 <PINMUX_GPIO178__FUNC_CONN_WF_CTRL0>,
+				 <PINMUX_GPIO179__FUNC_CONN_WF_CTRL1>,
+				 <PINMUX_GPIO181__FUNC_CONN_WF_CTRL3>,
+				 <PINMUX_GPIO182__FUNC_CONN_WF_CTRL4>;
+			drive-strength = <4>;
+		};
+
+		pins-wf-ctrl2 {
+			pinmux = <PINMUX_GPIO180__FUNC_GPIO180>;
+			drive-strength = <4>;
+			output-low;
 		};
 	};
 
@@ -76,16 +135,28 @@
 	 * LK replaces "compatible" with mediatek,mt6878-{6637,6631,6631-6686}-consys;
 	 * the value here is what it writes on this board.
 	 */
-	consys@18000000 {
+	consys: consys@18000000 {
 		compatible = "mediatek,mt6878-6637-consys";
-		reg = <0x18000000 0x100000>;
+		reg = <0x18000000 0x100000>,
+		      <0x18400000 0x200000>,
+		      <0x1c00d000 0x100>;
+		reg-names = "conninfra", "wfsys", "srclken-rc";
 		power-domains = <&spm MT6878_POWER_DOMAIN_CONN>;
 		vcn13-supply = <&mt6363_vcn13>;
 		vrfio18-supply = <&mt6363_vrfio18>;
-		pinctrl-names = "idle", "active";
+		vcn33-1-supply = <&mt6369_vcn33_1>;
+		vcn33-2-supply = <&mt6369_vcn33_2>;
+		vant18-supply = <&mt6369_vant18>;
+		pinctrl-names = "idle", "active", "adie-cfg";
 		pinctrl-0 = <&consys_pins_idle>;
 		pinctrl-1 = <&consys_pins_active>;
+		pinctrl-2 = <&consys_pins_adie_cfg>;
 		mediatek,topckgen = <&topckgen>;
+		/*
+		 * Co-clock frequency: 26 MHz unless mediatek,co-clock-52mhz.
+		 * Stock reads it from MT6685 DCXO_DIGCLK_ELR (0x7f4) bit 0;
+		 * TODO: confirm on the device (stock dmesg prints the schematic).
+		 */
 
 		/*
 		 * Read by LK only (stock values): A-die detection. GPIO 92,
@@ -95,6 +166,70 @@
 		hwid-node = <92 132 131>;
 		adie-sku = <1 1 0 0 2 2 1 0>;
 
+		/*
+		 * Read by LK only (stock values): CONNSYS EMI layout. The
+		 * read-only part holds the BT, GNSS and Wi-Fi ROM images
+		 * one after another, the read-write part the firmware data;
+		 * the GNSS EMI, the WFDMA pool and the SCP window follow the
+		 * CONNSYS EMI. LK adds "emi-addr" (two cells) here.
+		 */
+		emi-size = <0xc00000>;
+		ro-bt-emi-size = <0x2e0000>;
+		ro-gps-emi-size = <0xa0000>;
+		ro-wifi-emi-size = <0x300000>;
+		ro-emi-size = <0x680000>;
+		rw-emi-size = <0x480000>;
+		emi-alignment = <0x100000>;
+		emi-max-addr = <0x90000000>;
+
 		status = "disabled";
 	};
+};
+
+/ {
+	/*
+	 * Data nodes for LK's CONNSYS firmware loader only (stock values): the
+	 * GNSS EMI follows the CONNSYS EMI, LK writes its "emi-addr" here;
+	 * scp-shm-size is the CONNSYS<->SCP window after the WFDMA pool
+	 * (1..0x100000, otherwise LK skips the firmware load) and
+	 * scp-remap-offset must be its offset from the CONNSYS EMI base
+	 * (0xc00000 + 0x100000 + 0x1400000), otherwise LK skips the SCP
+	 * remap. No driver binds to them.
+	 */
+	gps {
+		emi-size = <0x100000>;
+		emi-alignment = <0x100000>;
+		emi-max-addr = <0xc0000000>;
+	};
+
+	connscp {
+		scp-shm-size = <0x20000>;
+		scp-remap-offset = <0x2100000>;
+		scp-remap-size = <0x20000>;
+	};
+};
+
+/*
+ * Wi-Fi (CONNAC2 "SOC7_0", the MT7921 core on AXI). LK looks for /soc/wifi,
+ * then /wifi: the node stays at the root as in the stock DT. LK adds a
+ * phandle to the WFDMA pool (shared-dma-pool_wifi-reserve-memory) as
+ * "memory-region". The register window is the whole CONNSYS from the AP
+ * side, 0x1800_0000..0x186f_ffff, as in MediaTek's GPL gen4m wlan driver: CONN_INFRA
+ * at +0, WFSYS at +0x400000.
+ */
+&{/wifi@18400000} {
+	compatible = "mediatek,mt6878-wifi";
+	reg = <0 0x18000000 0 0x700000>;
+	/* WFDMA, WF2AP software interrupt (CCIF) */
+	interrupts = <GIC_SPI 484 IRQ_TYPE_LEVEL_HIGH 0>,
+		     <GIC_SPI 692 IRQ_TYPE_LEVEL_HIGH 0>;
+	interrupt-names = "wfdma", "sw";
+	mediatek,conninfra = <&consys>;
+
+	/* read by LK only (stock values): size and placement of the WFDMA pool */
+	emi-size = <0x1400000>;
+	emi-alignment = <0x1000000>;
+	emi-max-addr = <0xc0000000>;
+
+	status = "disabled";
 };
