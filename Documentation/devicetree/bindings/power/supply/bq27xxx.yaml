@@ -50,6 +50,7 @@ properties:
       - ti,bq28z610
       - ti,bq34z100
       - ti,bq78z100
+      - sinowealth,sh366100
 
   reg:
     maxItems: 1
@@ -95,6 +96,7 @@ allOf:
               - ti,bq28z610
               - ti,bq34z100
               - ti,bq78z100
+              - sinowealth,sh366100
     then:
       properties:
         interrupts: false
