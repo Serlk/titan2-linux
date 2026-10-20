@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/power/mediatek,mt6878-power.h>
 #include <dt-bindings/reset/ti-syscon.h>
 #include "mt6878-pinfunc.h"
 
@@ -306,6 +307,11 @@
 			hw-voter-regmap = <&hwv>;
 		};
 
+		infracfg_ao: syscon@10001000 {
+			compatible = "mediatek,mt6878-infracfg-ao", "syscon";
+			reg = <0x10001000 0x1000>;
+		};
+
 		pio: pinctrl {
 			compatible = "mediatek,mt6878-pinctrl";
 			reg = <0x10005000 0x1000>,
@@ -354,6 +360,11 @@
 			#clock-cells = <1>;
 
 			mediatek,hardware-voter = <&hwv>;
+		};
+
+		nemicfg_ao: syscon@10270000 {
+			compatible = "mediatek,mt6878-nemicfg-ao", "syscon";
+			reg = <0x10270000 0x1000>;
 		};
 
 		hwv: syscon@10320000 {
@@ -738,6 +749,97 @@
 					};
 				};
 			};
+		};
+
+		scpsys: syscon@1c001000 {
+			compatible = "mediatek,mt6878-scpsys", "syscon", "simple-mfd";
+			reg = <0x1c001000 0x1000>;
+
+			/*
+			 * Not described on purpose:
+			 * - MD: owned by the modem; Linux must never switch it.
+			 * - MFG0: switched by the GPU microcontroller (GPUEB).
+			 * - APU: switched by the APU firmware.
+			 * - CAM and ISP trees: need the camera/ISP vcore supply.
+			 */
+			spm: power-controller {
+				compatible = "mediatek,mt6878-power-controller";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+				access-controllers = <&infracfg_ao>, <&vlpcfg>, <&nemicfg_ao>;
+				mediatek,hardware-voter = <&hwv>;
+				status = "disabled";
+
+				power-domain@MT6878_POWER_DOMAIN_CONN {
+					reg = <MT6878_POWER_DOMAIN_CONN>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_AUDIO {
+					reg = <MT6878_POWER_DOMAIN_AUDIO>;
+					clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>;
+					clock-names = "audio";
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_CSI_RX {
+					reg = <MT6878_POWER_DOMAIN_CSI_RX>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_SSR {
+					reg = <MT6878_POWER_DOMAIN_SSR>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_SSUSB {
+					reg = <MT6878_POWER_DOMAIN_SSUSB>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6878_POWER_DOMAIN_MM_INFRA {
+					reg = <MT6878_POWER_DOMAIN_MM_INFRA>;
+					clocks = <&topckgen CLK_TOP_MMINFRA_SEL>;
+					clock-names = "mm_infra";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					power-domain@MT6878_POWER_DOMAIN_DISP {
+						reg = <MT6878_POWER_DOMAIN_DISP>;
+						clocks = <&topckgen CLK_TOP_DISP0_SEL>;
+						clock-names = "disp";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6878_POWER_DOMAIN_VEN0 {
+						reg = <MT6878_POWER_DOMAIN_VEN0>;
+						clocks = <&topckgen CLK_TOP_VENC_SEL>;
+						clock-names = "ven";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6878_POWER_DOMAIN_VDE0 {
+						reg = <MT6878_POWER_DOMAIN_VDE0>;
+						clocks = <&topckgen CLK_TOP_VDEC_SEL>;
+						clock-names = "vde";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6878_POWER_DOMAIN_MM_PROC_DORMANT {
+						reg = <MT6878_POWER_DOMAIN_MM_PROC_DORMANT>;
+						clocks = <&topckgen CLK_TOP_MMUP_SEL>;
+						clock-names = "mmup";
+						#power-domain-cells = <0>;
+					};
+				};
+			};
+		};
+
+		vlpcfg: syscon@1c00c000 {
+			compatible = "mediatek,mt6878-vlpcfg", "syscon";
+			reg = <0x1c00c000 0x1000>;
 		};
 
 		watchdog: watchdog@1c00a000 {
