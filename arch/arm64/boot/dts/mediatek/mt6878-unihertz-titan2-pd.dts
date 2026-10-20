@@ -18,3 +18,8 @@
 &{/chosen/simplefb@fe04f000} {
 	power-domains = <&spm MT6878_POWER_DOMAIN_DISP>;
 };
+
+/* LK leaves SSUSB on; with the controller probed, hold it from the device */
+&ssusb {
+	power-domains = <&spm MT6878_POWER_DOMAIN_SSUSB>;
+};
