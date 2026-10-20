@@ -95,6 +95,7 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 	struct pwm_bl_data *pb = bl_get_data(bl);
 	int brightness = backlight_get_brightness(bl);
 	struct pwm_state state;
+	int ret;
 
 	if (pb->notify)
 		brightness = pb->notify(pb->dev, brightness);
@@ -103,7 +104,7 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		pwm_get_state(pb->pwm, &state);
 		state.duty_cycle = compute_duty_cycle(pb, brightness, &state);
 		state.enabled = true;
-		pwm_apply_might_sleep(pb->pwm, &state);
+		ret = pwm_apply_might_sleep(pb->pwm, &state);
 
 		pwm_backlight_power_on(pb);
 	} else {
@@ -120,8 +121,15 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		 * inactive output.
 		 */
 		state.enabled = !pb->power_supply && !pb->enable_gpio;
-		pwm_apply_might_sleep(pb->pwm, &state);
+		ret = pwm_apply_might_sleep(pb->pwm, &state);
 	}
+
+	dev_dbg(pb->dev, "brightness %d (power %d, state %#x): %s %llu/%llu ns\n",
+		brightness, bl->props.power, bl->props.state,
+		state.enabled ? "on" : "off", state.duty_cycle, state.period);
+	if (ret)
+		dev_err_ratelimited(pb->dev, "failed to apply the PWM state: %pe\n",
+				    ERR_PTR(ret));
 
 	if (pb->notify_after)
 		pb->notify_after(pb->dev, brightness);
