@@ -57,6 +57,28 @@
 		reg = <0x0 0x40000000 0x3 0x0>;
 	};
 
+	/*
+	 * The stock LK adds ~47 mblock-* carveouts here itself (ATF, TEE, modem,
+	 * pstore, framebuffer, ...); static entries would overlap them. Start
+	 * from an empty node instead of the SoC's static list.
+	 */
+	/delete-node/ reserved-memory;
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	/*
+	 * Nodes the stock LK requires when it completes the device tree
+	 * (titan2-docs: docs/lk-boot-requirements.md);
+	 * without them LK asserts or panics before starting the kernel.
+	 * LK writes the Wi-Fi carveout into /wifi as memory-region.
+	 */
+	wifi@18400000 {
+		status = "disabled";
+	};
+
 	gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-0 = <&key_gpio_default>;
@@ -88,6 +110,23 @@
 			input-enable;
 			bias-pull-up;
 		};
+	};
+};
+
+&soc {
+	/* LK writes the EMI configuration into these */
+	emicen@10219000 {
+		status = "disabled";
+	};
+
+	emiisu {
+		status = "disabled";
+	};
+
+	/* LK looks this node up by this exact compatible */
+	soc-dbg-error-flag@d01a000 {
+		compatible = "mediatek, soc-dbg-error-flag";
+		status = "disabled";
 	};
 };
 
