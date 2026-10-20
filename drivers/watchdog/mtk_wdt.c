@@ -469,11 +469,21 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static bool mtk_wdt_running(struct watchdog_device *wdt_dev)
+{
+	return watchdog_active(wdt_dev) || watchdog_hw_running(wdt_dev);
+}
+
 static int mtk_wdt_suspend(struct device *dev)
 {
 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&mtk_wdt->wdt_dev))
+	/*
+	 * Also stop a watchdog that the boot firmware left running and
+	 * nobody opened: the core pings it from a kernel worker, which does
+	 * not run while the system sleeps, so it would reset the system.
+	 */
+	if (mtk_wdt_running(&mtk_wdt->wdt_dev))
 		mtk_wdt_stop(&mtk_wdt->wdt_dev);
 
 	return 0;
@@ -483,7 +493,7 @@ static int mtk_wdt_resume(struct device *dev)
 {
 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&mtk_wdt->wdt_dev)) {
+	if (mtk_wdt_running(&mtk_wdt->wdt_dev)) {
 		mtk_wdt_start(&mtk_wdt->wdt_dev);
 		mtk_wdt_ping(&mtk_wdt->wdt_dev);
 	}
