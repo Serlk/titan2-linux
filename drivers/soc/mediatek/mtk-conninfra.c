@@ -230,6 +230,8 @@
 #define   PWA_DEBUG_CKEN		BIT(3)
 #define   PWA_DEBUG_EN			BIT(2)
 #define  WF_PWA_CTRL3			(WF_REMAP0 + 0x00c)
+#define  WF_CIRQ_BASE			0x81050000
+#define  WF_CIRQ_IRQ_DBGSEL		0x0f4
 
 /* MT6637 A-die registers (RF SPI, "TOP" subsystem) */
 #define ADIE6637_CHIP_ID		0x02c
@@ -342,6 +344,7 @@ struct mtk_conninfra {
 	bool wfsys_on;
 	u32 adie_id;
 	u32 adie_efuse[4];
+	u32 adie_uid[2];		/* efuse block 0x1d0, words 2-3 */
 	u32 d_die_efuse;
 
 	spinlock_t spi_lock;		/* RF SPI semaphore holder, IRQs off */
@@ -698,6 +701,15 @@ static void mtk_conninfra_adie_efuse_6637(struct mtk_conninfra *ci)
 	}
 	if (e[1] & BIT(15))
 		mtk_conninfra_spi_copy_bits(ci, ADIE6637_RG_TOP_THADC, e[1], 26, 13, 2);
+
+	/* per-die words the MediaTek downstream driver logs as "chip info" */
+	memset(ci->adie_uid, 0, sizeof(ci->adie_uid));
+	if (mtk_conninfra_adie_efuse_read(ci, 0x1d0)) {
+		mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_EFUSE_RDATA(2),
+				       &ci->adie_uid[0]);
+		mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_EFUSE_RDATA(3),
+				       &ci->adie_uid[1]);
+	}
 }
 
 /* MT6637 default value updates ("PART2" of the stock sequence) */
@@ -1485,6 +1497,16 @@ static int __mtk_conninfra_wfsys_on(struct mtk_conninfra *ci)
 	wf_rmw(ci, WF_PWA_CTRL0, PWA_TIMEOUT_CLR, 0);
 	wf_rmw(ci, WF_PWA_CTRL0, PWA_TIMEOUT_THRES, 0x04f50000);
 	wf_rmw(ci, WF_PWA_CTRL3, BIT(8), BIT(8));	/* mask wfdma+umac busy */
+
+	/*
+	 * As the MediaTek downstream driver (CFG_CHECK_DRVOWN_EINT): point the remap window
+	 * at the WF CIRQ and select its EINT status for the debug bus
+	 * (IRQ_DBGSEL, 0x8105_00f4[7:0] = 0x80). The window is left there,
+	 * so the debug enable below lands in the same place as on stock.
+	 */
+	wf_wr(ci, WF_MCU_BUS_CR_AP2WF_REMAP_1, WF_CIRQ_BASE);
+	wf_rmw(ci, WF_REMAP0 + WF_CIRQ_IRQ_DBGSEL, 0xff, 0x80);
+
 	wf_rmw(ci, WF_PWA_CTRL0, PWA_DEBUG_EN | PWA_DEBUG_CKEN | PWA_DEBUG_EN_DEBUGTOP,
 	       PWA_DEBUG_EN | PWA_DEBUG_CKEN | PWA_DEBUG_EN_DEBUGTOP);
 
@@ -1601,6 +1623,17 @@ u32 mtk_conninfra_adie_id(struct mtk_conninfra *ci)
 }
 EXPORT_SYMBOL_GPL(mtk_conninfra_adie_id);
 
+int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2])
+{
+	mutex_lock(&ci->lock);
+	uid[0] = ci->adie_uid[0];
+	uid[1] = ci->adie_uid[1];
+	mutex_unlock(&ci->lock);
+
+	return uid[0] || uid[1] ? 0 : -ENODATA;
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_adie_uid);
+
 int mtk_conninfra_get_emi(struct mtk_conninfra *ci, phys_addr_t *base, u32 *size)
 {
 	if (!ci->emi_base)
@@ -1662,9 +1695,10 @@ static int mtk_conninfra_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "A-die (compatible): %s\n", ci->data->adie_name);
 	seq_printf(s, "radios: 0x%lx, hw_on %d, wake_cnt %u, wfsys_on %d\n",
 		   ci->radios, ci->hw_on, ci->wake_cnt, ci->wfsys_on);
-	seq_printf(s, "A-die chip id: 0x%08x, efuse %08x %08x %08x %08x\n",
+	seq_printf(s, "A-die chip id: 0x%08x, efuse %08x %08x %08x %08x, uid %08x %08x\n",
 		   ci->adie_id, ci->adie_efuse[0], ci->adie_efuse[1],
-		   ci->adie_efuse[2], ci->adie_efuse[3]);
+		   ci->adie_efuse[2], ci->adie_efuse[3], ci->adie_uid[0],
+		   ci->adie_uid[1]);
 	seq_printf(s, "D-die efuse: 0x%08x\n", ci->d_die_efuse);
 	seq_printf(s, "co-clock: %s, RC mode: %d\n",
 		   ci->co_clock_52m ? "52 MHz" : "26 MHz", ci->rc_mode);

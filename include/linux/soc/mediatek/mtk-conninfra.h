@@ -61,6 +61,13 @@ bool mtk_conninfra_wfsys_is_on(struct mtk_conninfra *ci);
 /* A-die chip id read over the CONNINFRA RF SPI (0 until the first radio_on) */
 u32 mtk_conninfra_adie_id(struct mtk_conninfra *ci);
 
+/*
+ * Two per-die efuse words of the A-die (the "chip info" of the MediaTek downstream
+ * driver), for a stable locally administered MAC address. -ENODATA until
+ * the first radio_on or when the efuse block is not burnt.
+ */
+int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2]);
+
 /* CONNSYS EMI region set up by the boot loader (from "emi-addr"/"emi-size") */
 int mtk_conninfra_get_emi(struct mtk_conninfra *ci, phys_addr_t *base, u32 *size);
 
@@ -108,6 +115,11 @@ static inline bool mtk_conninfra_wfsys_is_on(struct mtk_conninfra *ci)
 static inline u32 mtk_conninfra_adie_id(struct mtk_conninfra *ci)
 {
 	return 0;
+}
+
+static inline int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2])
+{
+	return -ENODEV;
 }
 
 static inline int mtk_conninfra_get_emi(struct mtk_conninfra *ci,
