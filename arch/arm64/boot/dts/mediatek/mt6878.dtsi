@@ -492,6 +492,28 @@
 			status = "disabled";
 		};
 
+		disp_pwm0: pwm@1100e000 {
+			compatible = "mediatek,mt6878-disp-pwm";
+			reg = <0x1100e000 0x1000>;
+			interrupts = <GIC_SPI 254 IRQ_TYPE_LEVEL_HIGH 0>;
+			#pwm-cells = <2>;
+			clocks = <&pericfg_ao CLK_PERAOP_DISP_PWM0>,
+				 <&topckgen CLK_TOP_DISP_PWM_SEL>;
+			clock-names = "main", "mm";
+			status = "disabled";
+		};
+
+		disp_pwm1: pwm@1100f000 {
+			compatible = "mediatek,mt6878-disp-pwm";
+			reg = <0x1100f000 0x1000>;
+			interrupts = <GIC_SPI 254 IRQ_TYPE_LEVEL_HIGH 0>;
+			#pwm-cells = <2>;
+			clocks = <&pericfg_ao CLK_PERAOP_DISP_PWM1>,
+				 <&topckgen CLK_TOP_DISP_PWM_SEL>;
+			clock-names = "main", "mm";
+			status = "disabled";
+		};
+
 		pericfg_ao: syscon@11036000 {
 			compatible = "mediatek,mt6878-pericfg-ao", "syscon";
 			reg = <0x11036000 0x1000>;

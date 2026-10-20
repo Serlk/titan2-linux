@@ -360,14 +360,22 @@ int drm_sysfb_unregister_flush_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL(drm_sysfb_unregister_flush_notifier);
 
-static void drm_sysfb_notify_flush(struct drm_device *dev, const struct drm_rect *clip)
+static void drm_sysfb_notify(struct drm_device *dev, enum drm_sysfb_event_type type,
+			     const struct drm_rect *clip)
 {
 	struct drm_sysfb_flush_event event = {
 		.dev = dev,
-		.clip = *clip,
 	};
 
-	atomic_notifier_call_chain(&drm_sysfb_flush_notifier_list, 0, &event);
+	if (clip)
+		event.clip = *clip;
+
+	atomic_notifier_call_chain(&drm_sysfb_flush_notifier_list, type, &event);
+}
+
+static void drm_sysfb_notify_flush(struct drm_device *dev, const struct drm_rect *clip)
+{
+	drm_sysfb_notify(dev, DRM_SYSFB_EVENT_FLUSH, clip);
 }
 
 static void drm_sysfb_rect_union(struct drm_rect *r, const struct drm_rect *clip)
@@ -577,6 +585,18 @@ int drm_sysfb_crtc_helper_atomic_check(struct drm_crtc *crtc, struct drm_atomic_
 	return 0;
 }
 EXPORT_SYMBOL(drm_sysfb_crtc_helper_atomic_check);
+
+void drm_sysfb_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
+{
+	drm_sysfb_notify(crtc->dev, DRM_SYSFB_EVENT_CRTC_ENABLE, NULL);
+}
+EXPORT_SYMBOL(drm_sysfb_crtc_helper_atomic_enable);
+
+void drm_sysfb_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
+{
+	drm_sysfb_notify(crtc->dev, DRM_SYSFB_EVENT_CRTC_DISABLE, NULL);
+}
+EXPORT_SYMBOL(drm_sysfb_crtc_helper_atomic_disable);
 
 void drm_sysfb_crtc_reset(struct drm_crtc *crtc)
 {

@@ -17,8 +17,12 @@ description: |
   started for one frame through the DISP mutex and the DSI START register.
 
   This node describes the registers needed to start such frames on the
-  pipeline left by the bootloader. Nothing else (timings, PLLs, panel) is
-  programmed. It is meant for bring-up until a full display driver exists
+  pipeline left by the bootloader. Nothing else (timings, PLLs, panel
+  supplies) is programmed. When the framebuffer's CRTC is disabled (DPMS
+  off, fbdev blank) the panel gets the standard DCS commands set_display_off
+  and enter_sleep_mode through the DSI command queue, and exit_sleep_mode
+  and set_display_on when it is enabled again; the backlight, if given,
+  is switched off and on with it. It is meant for bring-up until a full display driver exists
   and must not be used together with one for the same display.
 
 properties:
@@ -40,6 +44,10 @@ properties:
   mediatek,framebuffer:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: simple-framebuffer node whose memory the OVL scans out.
+
+  backlight:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Backlight of the panel, switched together with it.
 
   power-domains:
     maxItems: 1

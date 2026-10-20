@@ -132,6 +132,25 @@
 	 * First stage: 4.35 V, what LK itself programs before the kernel, until
 	 * charging has been watched on the device; the stock 4.45 V comes later.
 	 */
+	/*
+	 * Main display backlight: DISP_PWM0 drives the external LED driver, as
+	 * the stock mtk-leds node (pwms = <&disp_pwm0 0 157538>, 12 bit). The
+	 * factory kernel (GPL module leds-mtk-pwm.ko of Titan 2 V01.00.14)
+	 * never lets the duty cycle exceed
+	 * 90 %: the PWM node scales all duty cycles to 90 % (see &disp_pwm0),
+	 * so level 4095 here is the stock maximum. Levels roughly follow the
+	 * stock range (min-brightness 60 of 4095); the default 1640 is 40 %.
+	 * LK leaves the backlight on: the driver keeps LK's duty cycle.
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm0 0 157538>;
+		brightness-levels = <0 60 80 110 150 200 270 360 480 640 850
+				     1130 1640 2000 2650 3400 4095>;
+		default-brightness-level = <12>;
+		keep-boot-brightness;
+	};
+
 	battery: battery {
 		compatible = "simple-battery";
 		constant-charge-voltage-max-microvolt = <4350000>;
@@ -152,6 +171,15 @@
 		enable-active-high;
 		startup-delay-us = <20000>;
 	};
+};
+
+/*
+ * Never more than 90 % duty cycle at the LED driver, as the factory kernel
+ * (GPL module leds-mtk-pwm.ko of Titan 2 V01.00.14: duty * 90 / 100).
+ */
+&disp_pwm0 {
+	mediatek,duty-cycle-scale-percent = <90>;
+	status = "okay";
 };
 
 /*
@@ -443,6 +471,8 @@
 		      <0x1401a000 0x1000>;
 		reg-names = "mutex", "ovl", "dsi";
 		mediatek,framebuffer = <&fb_main>;
+		/* off with the panel when simpledrm disables its CRTC */
+		backlight = <&backlight>;
 	};
 };
 
@@ -626,6 +656,21 @@
 				regulator-name = "6_vbuck4";
 				regulator-always-on;
 			};
+		};
+	};
+
+	/*
+	 * MT6685 clock buffer / RTC chip. Only the RTC is described: read
+	 * time and wake-up alarm; the driver never writes the time, BBPU
+	 * power bits or the power-on alarm spare registers.
+	 */
+	mt6685: pmic@9 {
+		compatible = "mediatek,mt6685";
+		reg = <0x9 SPMI_USID>;
+
+		rtc {
+			compatible = "mediatek,mt6685-rtc";
+			interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
 		};
 	};
 };

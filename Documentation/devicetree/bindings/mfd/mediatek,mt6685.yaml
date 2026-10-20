@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/mediatek,mt6685.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6685 clock buffer and RTC chip
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The MT6685 is a companion chip on the SPMI bus of MediaTek smartphone
+  SoCs (MT6878 and others). It contains the 26 MHz clock buffers (XO) and
+  the RTC. It signals interrupts to the SPMI controller with Request
+  Capable Slave messages, so its functions take their interrupt from the
+  SPMI controller by slave ID.
+
+properties:
+  compatible:
+    const: mediatek,mt6685
+
+  reg:
+    maxItems: 1
+
+  rtc:
+    type: object
+    additionalProperties: false
+
+    properties:
+      compatible:
+        const: mediatek,mt6685-rtc
+
+      interrupts:
+        maxItems: 1
+
+    required:
+      - compatible
+      - interrupts
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        interrupt-controller;
+        #interrupt-cells = <3>;
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        pmic@9 {
+            compatible = "mediatek,mt6685";
+            reg = <0x9 SPMI_USID>;
+
+            rtc {
+                compatible = "mediatek,mt6685-rtc";
+                interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
+            };
+        };
+    };

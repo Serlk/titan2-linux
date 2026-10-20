@@ -77,13 +77,16 @@ config DRM_MTK_CMDFB_KICK
 	tristate "Frame trigger for MediaTek command-mode DSI boot framebuffers"
 	depends on DRM_SIMPLEDRM && OF
 	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on BACKLIGHT_CLASS_DEVICE || !BACKLIGHT_CLASS_DEVICE
 	help
 	  On MediaTek SoCs whose bootloader leaves a DSI panel in command
 	  mode, framebuffer writes only reach the panel after a frame has
 	  been started. This driver starts one frame after each simpledrm
 	  update, reusing the pipeline set up by the bootloader, and turns
-	  off bootloader overlay layers. Timings and the panel are left as
-	  they are.
+	  off bootloader overlay layers. When simpledrm disables its CRTC
+	  (DPMS off, fbdev blank), the panel is put to sleep with standard
+	  DCS commands and its backlight is switched off. Timings and panel
+	  supplies are left as they are.
 
 	  Do not enable together with a full MediaTek DRM driver for the
 	  same display.
