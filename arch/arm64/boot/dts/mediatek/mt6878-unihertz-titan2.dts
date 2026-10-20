@@ -101,6 +101,35 @@
 			debounce-interval = <30>;
 			wakeup-source;
 		};
+
+		/*
+		 * Programmable side key "Func2" (as the GPL v2 module gpio_key.ko
+		 * shipped with Titan 2 V01.00.14: GPIO73,
+		 * both edges, low = pressed, scan code 250, 200 us EINT debounce).
+		 * Not checked on mainline yet.
+		 */
+		key-func2 {
+			label = "Func2";
+			linux,code = <250>;
+			gpios = <&pio 73 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+			wakeup-source;
+			status = "disabled";
+		};
+	};
+
+	/*
+	 * Power switch of the keyboard touchpad (stock touch_pad,pwr-gpio,
+	 * GPIO59, high = on; the touchpad's GPL module of Titan 2 V01.00.14
+	 * waits 20 ms before reset).
+	 */
+	touchpad_vdd: regulator-touchpad-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "touchpad_vdd";
+		gpio = <&pio 59 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <20000>;
+		status = "disabled";
 	};
 };
 
@@ -112,6 +141,172 @@
 			input-enable;
 			bias-pull-up;
 		};
+	};
+};
+
+/*
+ * Input devices from the stock DT. The I2C buses are not
+ * checked on mainline yet, so everything here starts disabled; enable the
+ * device together with the supply it references.
+ */
+
+/*
+ * Main touchscreen: Synaptics DSX/RMI4 (F12); facts from the GPL module
+ * synaptics_tp.ko shipped with Titan 2 V01.00.14
+ */
+&i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* The stock DT runs this bus at 400 kHz */
+	touchscreen@67 {
+		compatible = "syna,rmi4-i2c";
+		reg = <0x67>;
+		interrupts-extended = <&pio 7 IRQ_TYPE_LEVEL_LOW>;
+		/* GPIO6 is routed as touch,reset-gpio but the factory driver never drives it */
+		vdd-supply = <&mt6369_vtp>;
+		syna,startup-delay-ms = <100>;
+		status = "disabled";
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		rmi4-f01@1 {
+			reg = <0x01>;
+		};
+
+		rmi4-f12@12 {
+			reg = <0x12>;
+			syna,sensor-type = <1>;
+		};
+	};
+};
+
+/*
+ * Keyboard touchpad: Synaptics S1403, RMI4 (F11); facts from the GPL module
+ * synaptics_1403_touch.ko shipped with Titan 2 V01.00.14
+ */
+&i2c2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	touchpad@20 {
+		compatible = "syna,rmi4-i2c";
+		reg = <0x20>;
+		interrupts-extended = <&pio 75 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&pio 4 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&touchpad_vdd>;
+		syna,reset-delay-ms = <120>;
+		status = "disabled";
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		rmi4-f01@1 {
+			reg = <0x01>;
+		};
+
+		rmi4-f11@11 {
+			reg = <0x11>;
+			syna,sensor-type = <2>;
+		};
+
+		rmi4-f12@12 {
+			reg = <0x12>;
+			syna,sensor-type = <2>;
+		};
+	};
+};
+
+/*
+ * QWERTY keyboard: matrix on an AW9523B expander; facts from the GPL module
+ * aw9523_key.ko shipped with Titan 2 V01.00.14
+ */
+&i2c6 {
+	keyboard@58 {
+		compatible = "awinic,aw9523b-keypad";
+		reg = <0x58>;
+		interrupts-extended = <&pio 12 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&pio 53 GPIO_ACTIVE_LOW>;
+		vio-supply = <&mt6369_vio28>;
+		label = "TitanKey";
+		/* Stock input_port_mask 0x1ff and output_port_mask 0xfe00 */
+		awinic,row-lines = <0 1 2 3 4 5 6 7 8>;
+		awinic,column-lines = <9 10 11 12 13 14 15>;
+		wakeup-source;
+		status = "disabled";
+
+		/*
+		 * The stock key_map[] as is: entry 7 * row + column. Duplicates and
+		 * the F1/F10/F11/F13/arrows/VOLUMEUP/STOP..FIND entries probably have
+		 * no key behind them. 251 is Fn, 253 Sym; Alt (KEY_RIGHTALT) is the
+		 * only key on row 8, the stock "Alt wakes the screen" line.
+		 */
+		linux,keymap = <
+					MATRIX_KEY(0, 0, KEY_Y)	/* 0 Y */
+					MATRIX_KEY(0, 1, KEY_T)	/* 1 T */
+					MATRIX_KEY(0, 2, KEY_G)	/* 2 G */
+					MATRIX_KEY(0, 3, KEY_H)	/* 3 H */
+					MATRIX_KEY(0, 4, KEY_SPACE)	/* 4 Space */
+					MATRIX_KEY(0, 5, KEY_B)	/* 5 B */
+					MATRIX_KEY(0, 6, KEY_F1)	/* 6 F1 */
+					MATRIX_KEY(1, 0, KEY_U)	/* 7 U */
+					MATRIX_KEY(1, 1, KEY_R)	/* 8 R */
+					MATRIX_KEY(1, 2, KEY_F)	/* 9 F */
+					MATRIX_KEY(1, 3, KEY_J)	/* 10 J */
+					MATRIX_KEY(1, 4, KEY_V)	/* 11 V */
+					MATRIX_KEY(1, 5, KEY_N)	/* 12 N */
+					MATRIX_KEY(1, 6, KEY_U)	/* 13 U */
+					MATRIX_KEY(2, 0, KEY_I)	/* 14 I */
+					MATRIX_KEY(2, 1, KEY_E)	/* 15 E */
+					MATRIX_KEY(2, 2, KEY_D)	/* 16 D */
+					MATRIX_KEY(2, 3, KEY_K)	/* 17 K */
+					MATRIX_KEY(2, 4, KEY_C)	/* 18 C */
+					MATRIX_KEY(2, 5, KEY_M)	/* 19 M */
+					MATRIX_KEY(2, 6, KEY_K)	/* 20 K */
+					MATRIX_KEY(3, 0, KEY_O)	/* 21 O */
+					MATRIX_KEY(3, 1, KEY_W)	/* 22 W */
+					MATRIX_KEY(3, 2, KEY_S)	/* 23 S */
+					MATRIX_KEY(3, 3, KEY_L)	/* 24 L */
+					MATRIX_KEY(3, 4, KEY_X)	/* 25 X */
+					MATRIX_KEY(3, 5, KEY_ENTER)	/* 26 ENTER */
+					MATRIX_KEY(3, 6, KEY_F)	/* 27 F */
+					MATRIX_KEY(4, 0, KEY_P)	/* 28 P */
+					MATRIX_KEY(4, 1, KEY_Q)	/* 29 Q */
+					MATRIX_KEY(4, 2, KEY_A)	/* 30 A */
+					MATRIX_KEY(4, 3, KEY_BACKSPACE)	/* 31 DEL */
+					MATRIX_KEY(4, 4, KEY_Z)	/* 32 Z */
+					MATRIX_KEY(4, 5, KEY_Z)	/* 33 Z */
+					MATRIX_KEY(4, 6, KEY_X)	/* 34 X */
+					MATRIX_KEY(5, 0, KEY_LEFTSHIFT)	/* 35 SHIFT-L */
+					MATRIX_KEY(5, 1, 253)	/* 36 AGUI_SYM */
+					MATRIX_KEY(5, 2, KEY_BACK)	/* 37 BACK */
+					MATRIX_KEY(5, 3, KEY_APPSELECT)	/* 38 MENU */
+					MATRIX_KEY(5, 4, KEY_F10)	/* 39 F10 */
+					MATRIX_KEY(5, 5, KEY_N)	/* 40 N */
+					MATRIX_KEY(5, 6, KEY_M)	/* 41 M */
+					MATRIX_KEY(6, 0, 251)	/* 42 FUNC3 */
+					MATRIX_KEY(6, 1, KEY_DOWN)	/* 43 Down */
+					MATRIX_KEY(6, 2, KEY_UP)	/* 44 Up */
+					MATRIX_KEY(6, 3, KEY_ENTER)	/* 45 ENTER */
+					MATRIX_KEY(6, 4, KEY_F11)	/* 46 F11 */
+					MATRIX_KEY(6, 5, KEY_F13)	/* 47 F13 */
+					MATRIX_KEY(6, 6, KEY_ALTERASE)	/* 48 ALT */
+					MATRIX_KEY(7, 0, KEY_DOT)	/* 49 . */
+					MATRIX_KEY(7, 1, KEY_LEFT)	/* 50 Left */
+					MATRIX_KEY(7, 2, KEY_RIGHT)	/* 51 Right */
+					MATRIX_KEY(7, 3, KEY_SPACE)	/* 52 Space */
+					MATRIX_KEY(7, 4, KEY_VOLUMEUP)	/* 53 Volup */
+					MATRIX_KEY(7, 5, KEY_STOP)	/* 54 KEY_STOP */
+					MATRIX_KEY(7, 6, KEY_AGAIN)	/* 55 KEY_AGAIN */
+					MATRIX_KEY(8, 0, KEY_RIGHTALT)	/* 56 SYM */
+					MATRIX_KEY(8, 1, KEY_UNDO)	/* 57 UNDO */
+					MATRIX_KEY(8, 2, KEY_FRONT)	/* 58 FRONT */
+					MATRIX_KEY(8, 3, KEY_COPY)	/* 59 COPY */
+					MATRIX_KEY(8, 4, KEY_OPEN)	/* 60 OPEN */
+					MATRIX_KEY(8, 5, KEY_PASTE)	/* 61 PASTE */
+					MATRIX_KEY(8, 6, KEY_FIND)	/* 62 FIND */
+		>;
 	};
 };
 
@@ -251,6 +446,24 @@
 			vusb {
 				regulator-name = "mt6369_vusb";
 				regulator-always-on;
+			};
+
+			/*
+			 * Keyboard expander supply (stock mt6369_vio28-supply of
+			 * aw9523b_led@58). Disabled until that device is enabled: a
+			 * described but unused rail would be switched off at late init.
+			 */
+			mt6369_vio28: vio28 {
+				regulator-name = "mt6369_vio28";
+				status = "disabled";
+			};
+
+			/* Touchscreen supply, set to 2.8 V by the factory driver */
+			mt6369_vtp: vtp {
+				regulator-name = "mt6369_vtp";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				status = "disabled";
 			};
 		};
 	};
