@@ -143,6 +143,32 @@ mtk_ccci_lk_smem_table(struct mtk_ccci *ccci, const char *name,
 	return tbl;
 }
 
+/**
+ * mtk_ccci_lk_smem() - look up a shared memory region by SMEM user
+ * @ccci: driver state
+ * @id: SMEM user
+ *
+ * Return: the region from the non-cached or the cached table (both checked
+ * to lie inside their carveouts), or NULL if LK did not set it up.
+ */
+const struct mtk_ccci_smem_region *
+mtk_ccci_lk_smem(const struct mtk_ccci *ccci, enum mtk_ccci_smem_id id)
+{
+	const struct mtk_ccci_lk *lk = &ccci->lk;
+	unsigned int i;
+
+	for (i = 0; i < lk->nc_smem_num; i++)
+		if (le32_to_cpu(lk->nc_smem[i].id) == id &&
+		    le32_to_cpu(lk->nc_smem[i].size))
+			return &lk->nc_smem[i];
+	for (i = 0; i < lk->c_smem_num; i++)
+		if (le32_to_cpu(lk->c_smem[i].id) == id &&
+		    le32_to_cpu(lk->c_smem[i].size))
+			return &lk->c_smem[i];
+
+	return NULL;
+}
+
 /* every shared memory region LK describes must lie in its carveout */
 static int mtk_ccci_lk_check_smem(struct mtk_ccci *ccci, const char *what,
 				  const struct mtk_ccci_smem_region *tbl,

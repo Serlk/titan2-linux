@@ -3,15 +3,18 @@
  * MediaTek CCCI: driver for the modem built into MediaTek smartphone SoCs
  * (MT6878: modem generation 6299, CCIF control path + DPMAIF v3 data path).
  *
- * Stage 1 only finds out what the bootloader set up and checks it:
+ * At probe the driver only finds out what the bootloader set up and
+ * checks it:
  *  - the reserved memory LK carved out for the modem and the AP/modem
  *    shared memory,
  *  - the modem arguments LK left in its tag area,
- *  - the CCIF (AP side) register window.
+ *  - the CCIF0 windows, clocks, supplies (got, never switched).
  *
- * It does not power, clock, reset or start the modem, issues no TF-A
- * calls, requests no interrupt and writes no register or shared memory.
- * The modem power domain is deliberately absent from the device tree.
+ * Probing does not power, clock, reset or start the modem, issues no
+ * TF-A calls, requests no interrupt and writes no register or shared
+ * memory. With ccif_regs=1 it reads CCIF0 to tell what state LK left the
+ * modem in. Restarting the modem the stock way is a debugfs command,
+ * refused unless power_ctrl=1 and the DT describes everything it needs.
  *
  * Copyright (C) 2015 MediaTek Inc.
  * Copyright (C) 2026 serlk
@@ -28,22 +31,6 @@
 #include <linux/seq_file.h>
 
 #include "mtk_ccci.h"
-
-/* CCIF, AP side */
-#define CCIF_CON		0x00
-#define CCIF_BUSY		0x04
-#define CCIF_RCHNUM		0x10
-#define CCIF_CHDATA		0x100
-#define CCIF_SRAM_SIZE_DEFAULT	512
-
-/*
- * Reading the CCIF registers needs the CCIF clocks, which stage 1 does
- * not take: they are on only because LK started the modem and the kernel
- * runs with clk_ignore_unused. Off by default.
- */
-static bool ccif_regs;
-module_param(ccif_regs, bool, 0444);
-MODULE_PARM_DESC(ccif_regs, "expose read-only CCIF registers in debugfs");
 
 static const char * const mtk_ccci_resv_compat[MTK_CCCI_RESV_NUM] = {
 	[MTK_CCCI_RESV_TAGS] = "mediatek,ccci_tag_mem",
@@ -108,26 +95,6 @@ static int mtk_ccci_find_resv(struct mtk_ccci *ccci)
 	return 0;
 }
 
-static int mtk_ccci_ccif_show(struct seq_file *s, void *unused)
-{
-	const struct mtk_ccci *ccci = s->private;
-	u32 off;
-
-	seq_printf(s, "con    %#010x\n", readl(ccci->ccif_ap + CCIF_CON));
-	seq_printf(s, "busy   %#010x\n", readl(ccci->ccif_ap + CCIF_BUSY));
-	seq_printf(s, "rchnum %#010x\n", readl(ccci->ccif_ap + CCIF_RCHNUM));
-
-	for (off = 0; off < ccci->ccif_sram_size; off += 16)
-		seq_printf(s, "sram+%03x %08x %08x %08x %08x\n", off,
-			   readl(ccci->ccif_ap + CCIF_CHDATA + off),
-			   readl(ccci->ccif_ap + CCIF_CHDATA + off + 4),
-			   readl(ccci->ccif_ap + CCIF_CHDATA + off + 8),
-			   readl(ccci->ccif_ap + CCIF_CHDATA + off + 12));
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(mtk_ccci_ccif);
-
 static int mtk_ccci_md_mem_show(struct seq_file *s, void *unused)
 {
 	const struct mtk_ccci *ccci = s->private;
@@ -149,7 +116,6 @@ DEFINE_SHOW_ATTRIBUTE(mtk_ccci_md_mem);
 static int mtk_ccci_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct clk_bulk_data *clks;
 	struct mtk_ccci *ccci;
 	int ret;
 
@@ -167,28 +133,30 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "no usable modem setup from LK\n");
 
-	ccci->ccif_ap = devm_platform_ioremap_resource_byname(pdev, "ccif-ap");
-	if (IS_ERR(ccci->ccif_ap))
-		return PTR_ERR(ccci->ccif_ap);
-	if (of_property_read_u32(dev->of_node, "mediatek,ccif-sram-size",
-				 &ccci->ccif_sram_size))
-		ccci->ccif_sram_size = CCIF_SRAM_SIZE_DEFAULT;
-	ccci->ccif_sram_size = min(ccci->ccif_sram_size, 0x1000U - CCIF_CHDATA);
+	ret = mtk_ccci_ccif_init(ccci);
+	if (ret)
+		return ret;
 
-	/* only checks the description; enabling comes with the power-up */
-	ret = devm_clk_bulk_get_all(dev, &clks);
-	if (ret < 0)
-		return dev_err_probe(dev, ret, "failed to get clocks\n");
+	ret = mtk_ccci_fsm_init(ccci);
+	if (ret)
+		return ret;
+
+	ret = mtk_ccci_port_init(ccci);
+	if (ret)
+		return ret;
 
 	ccci->debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	debugfs_create_file("md_mem", 0400, ccci->debugfs, ccci,
 			    &mtk_ccci_md_mem_fops);
 	mtk_ccci_lk_debugfs_init(ccci);
-	if (ccif_regs)
-		debugfs_create_file("ccif", 0400, ccci->debugfs, ccci,
-				    &mtk_ccci_ccif_fops);
+	mtk_ccci_ccif_debugfs_init(ccci);
+	mtk_ccci_fsm_debugfs_init(ccci);
+	mtk_ccci_port_debugfs_init(ccci);
 
-	dev_info(dev, "modem set up by LK, left alone (stage 1)\n");
+	/* only with ccif_regs=1: reads, logs what LK left */
+	mtk_ccci_ccif_log_state(ccci);
+
+	dev_info(dev, "modem set up by LK, left alone\n");
 	return 0;
 }
 
@@ -211,6 +179,8 @@ static struct platform_driver mtk_ccci_driver = {
 	.driver = {
 		.name = "mtk-ccci-md",
 		.of_match_table = mtk_ccci_of_match,
+		/* unbinding could power the modem off, see mtk_ccci_fsm_init() */
+		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(mtk_ccci_driver);
