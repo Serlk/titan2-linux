@@ -290,7 +290,8 @@
 #define CLK_TOP_APLL12_DIV_SO2				279
 #define CLK_TOP_APLL12_DIV_SO4				280
 #define CLK_TOP_APLL12_DIV_FMI2S			281
-#define CLK_TOP_NR_CLK					282
+#define CLK_TOP_DISP_PWM_SEL				282
+#define CLK_TOP_NR_CLK					283
 
 /* INFRA_AO_REG */
 #define CLK_IFRAO_CQ_DMA_FPC				0
@@ -354,7 +355,9 @@
 #define CLK_PERAOP_AUDIO0				28
 #define CLK_PERAOP_AUDIO1				29
 #define CLK_PERAOP_AUDIO2				30
-#define CLK_PERAO_NR_CLK				31
+#define CLK_PERAOP_DISP_PWM0				31
+#define CLK_PERAOP_DISP_PWM1				32
+#define CLK_PERAO_NR_CLK				33
 
 /* AFE */
 #define CLK_AFE_DL0_DAC_TML				0
