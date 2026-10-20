@@ -88,6 +88,7 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			clk_disable_unprepare(mdp->clk_main);
 			mdp->enabled = false;
 		}
+		dev_dbg(pwmchip_parent(chip), "disabled\n");
 		return 0;
 	}
 
@@ -122,6 +123,9 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	clk_div = mul_u64_u64_div_u64(state->period, rate, NSEC_PER_SEC) >>
 			  PWM_PERIOD_BIT_WIDTH;
 	if (!rate || clk_div > PWM_CLKDIV_MAX) {
+		dev_err_ratelimited(pwmchip_parent(chip),
+				    "can't set period %llu ns at clock rate %llu Hz\n",
+				    state->period, rate);
 		if (!mdp->enabled) {
 			clk_disable_unprepare(mdp->clk_mm);
 			clk_disable_unprepare(mdp->clk_main);
@@ -172,6 +176,12 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 				 mdp->data->enable_mask);
 	mdp->enabled = true;
 
+	dev_dbg(pwmchip_parent(chip),
+		"enabled: %llu/%llu ns at %llu Hz: clk_div %u period %u high_width %u (EN %#x CON0 %#x CON1 %#x)\n",
+		state->duty_cycle, state->period, rate, clk_div, period, high_width,
+		readl(mdp->base + DISP_PWM_EN), readl(mdp->base + mdp->data->con0),
+		readl(mdp->base + mdp->data->con1));
+
 	return 0;
 }
 
@@ -208,14 +218,17 @@ static int mtk_disp_pwm_get_state(struct pwm_chip *chip,
 					 mdp->data->bls_debug_mask);
 
 	rate = clk_get_rate(mdp->clk_main);
+	con0 = readl(mdp->base + mdp->data->con0);
+	con1 = readl(mdp->base + mdp->data->con1);
+	pwm_en = readl(mdp->base + DISP_PWM_EN);
+	dev_dbg(pwmchip_parent(chip), "EN %#x CON0 %#x CON1 %#x at %llu Hz\n",
+		pwm_en, con0, con1, rate);
 	if (!rate) {
+		dev_err_once(pwmchip_parent(chip), "the PWM clock has no rate\n");
 		clk_disable_unprepare(mdp->clk_mm);
 		clk_disable_unprepare(mdp->clk_main);
 		return -EINVAL;
 	}
-	con0 = readl(mdp->base + mdp->data->con0);
-	con1 = readl(mdp->base + mdp->data->con1);
-	pwm_en = readl(mdp->base + DISP_PWM_EN);
 	state->enabled = !!(pwm_en & mdp->data->enable_mask);
 	clk_div = FIELD_GET(PWM_CLKDIV_MASK, con0);
 	period = FIELD_GET(PWM_PERIOD_MASK, con1);
@@ -303,6 +316,9 @@ static int mtk_disp_pwm_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret, "Can't enable mdp->clk_mm\n");
 	}
 	mdp->enabled = readl(mdp->base + DISP_PWM_EN) & mdp->data->enable_mask;
+	if (!clk_get_rate(mdp->clk_main))
+		dev_warn(&pdev->dev, "the PWM clock has no rate, the PWM can't be used\n");
+	dev_dbg(&pdev->dev, "left %s by the bootloader\n", mdp->enabled ? "on" : "off");
 	if (!mdp->enabled) {
 		clk_disable_unprepare(mdp->clk_mm);
 		clk_disable_unprepare(mdp->clk_main);
