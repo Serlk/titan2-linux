@@ -291,6 +291,8 @@ static int mtk_pll_prepare_setclr(struct clk_hw *hw)
 
 	writel(BIT(pll->data->pll_en_bit), pll->en_set_addr);
 
+	__mtk_pll_tuner_enable(pll);
+
 	/* Wait 20us after enable for the PLL to stabilize */
 	udelay(20);
 
@@ -300,6 +302,8 @@ static int mtk_pll_prepare_setclr(struct clk_hw *hw)
 static void mtk_pll_unprepare_setclr(struct clk_hw *hw)
 {
 	struct mtk_clk_pll *pll = to_mtk_clk_pll(hw);
+
+	__mtk_pll_tuner_disable(pll);
 
 	writel(BIT(pll->data->pll_en_bit), pll->en_clr_addr);
 }
@@ -322,6 +326,21 @@ const struct clk_ops mtk_pll_fenc_clr_set_ops = {
 	.set_rate	= mtk_pll_set_rate,
 };
 EXPORT_SYMBOL_GPL(mtk_pll_fenc_clr_set_ops);
+
+/*
+ * PLLs that are switched on and off through a common set/clear register pair
+ * (en_set_reg / en_clr_reg) and report their state in en_reg, without a FENC
+ * status bit.
+ */
+const struct clk_ops mtk_pll_setclr_ops = {
+	.is_prepared	= mtk_pll_is_prepared,
+	.prepare	= mtk_pll_prepare_setclr,
+	.unprepare	= mtk_pll_unprepare_setclr,
+	.recalc_rate	= mtk_pll_recalc_rate,
+	.determine_rate	= mtk_pll_determine_rate,
+	.set_rate	= mtk_pll_set_rate,
+};
+EXPORT_SYMBOL_GPL(mtk_pll_setclr_ops);
 
 struct clk_hw *mtk_clk_register_pll_ops(struct mtk_clk_pll *pll,
 					const struct mtk_pll_data *data,
