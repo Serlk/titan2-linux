@@ -17,6 +17,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/soc/mediatek/infracfg.h>
 #include <linux/soc/mediatek/mtk_sip_svc.h>
+#include <linux/spinlock.h>
 
 #include "mt6735-pm-domains.h"
 #include "mt6795-pm-domains.h"
@@ -125,13 +126,39 @@ static bool scpsys_hwv_domain_is_enable_done(struct scpsys_domain *pd)
 	return (val[0] & mask) && (val[1] & mask) && !(val[2] & mask);
 }
 
+static DEFINE_SPINLOCK(scpsys_sec_infra_lock);
+static unsigned int scpsys_sec_infra_refcnt;
+
 static int scpsys_sec_infra_power_on(bool on)
 {
 	struct arm_smccc_res res;
-	unsigned long cmd = on ? 1 : 0;
+	unsigned long flags;
+	int ret = 0;
 
-	arm_smccc_smc(MTK_SIP_KERNEL_HWCCF_CONTROL, cmd, 0, 0, 0, 0, 0, 0, &res);
-	return res.a0;
+	/*
+	 * The infra power request is global: more than one power domain can
+	 * be in the middle of a power sequence that needs it, so only issue
+	 * the request for the first user and drop it with the last one.
+	 */
+	spin_lock_irqsave(&scpsys_sec_infra_lock, flags);
+
+	if (on) {
+		if (scpsys_sec_infra_refcnt++ == 0) {
+			arm_smccc_smc(MTK_SIP_KERNEL_HWCCF_CONTROL, 1, 0, 0, 0, 0, 0, 0, &res);
+			ret = res.a0;
+			if (ret)
+				scpsys_sec_infra_refcnt--;
+		}
+	} else if (!WARN_ON(!scpsys_sec_infra_refcnt)) {
+		if (--scpsys_sec_infra_refcnt == 0) {
+			arm_smccc_smc(MTK_SIP_KERNEL_HWCCF_CONTROL, 0, 0, 0, 0, 0, 0, 0, &res);
+			ret = res.a0;
+		}
+	}
+
+	spin_unlock_irqrestore(&scpsys_sec_infra_lock, flags);
+
+	return ret;
 }
 
 static int scpsys_sram_enable(struct scpsys_domain *pd)
