@@ -46,6 +46,18 @@ config TYPEC_TCPCI_MT6370
 	  This driver can also be built as a module. The module
 	  will be called "tcpci_mt6370".
 
+config TYPEC_TCPCI_MT6375
+	tristate "MediaTek MT6375 Type-C driver"
+	depends on MFD_MT6375
+	help
+	  MediaTek MT6375 is a SubPMIC that includes a switching charger, an
+	  ADC and a USB Type-C/Power Delivery port controller. This driver
+	  exposes the port controller to the TCPM framework as a sink; the
+	  port does not source VBUS or VCONN.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called "tcpci_mt6375".
+
 config TYPEC_TCPCI_MAXIM
 	tristate "Maxim TCPCI based Type-C chip driver"
 	help
