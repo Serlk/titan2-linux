@@ -381,6 +381,21 @@ config COMMON_CLK_MT6878
 	help
 	  This driver supports MediaTek MT6878 basic clocks.
 
+config COMMON_CLK_MT6878_MDPSYS
+	tristate "Clock driver for MediaTek MT6878 mdpsys"
+	depends on COMMON_CLK_MT6878
+	default COMMON_CLK_MT6878
+	help
+	  This driver supports MediaTek MT6878 MDP clocks.
+
+config COMMON_CLK_MT6878_MMSYS
+	tristate "Clock driver for MediaTek MT6878 mmsys"
+	depends on COMMON_CLK_MT6878
+	default COMMON_CLK_MT6878
+	help
+	  This driver supports MediaTek MT6878 display (mmsys) and
+	  mminfra_config clocks.
+
 config COMMON_CLK_MT7622
 	tristate "Clock driver for MediaTek MT7622"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
