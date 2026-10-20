@@ -116,13 +116,6 @@
 };
 
 &soc {
-	/*
-	 * The SoC dtsi uses a 2/1 root, but the stock LK writes /memory and the
-	 * reserved-memory carveouts with 2/2 cells, so this board's root is 2/2
-	 * and the soc ranges need a 2-cell size (child 1, parent 2, size 2).
-	 */
-	ranges = <0x0 0x0 0x0 0x0 0x20000000>;
-
 	/* LK writes the EMI configuration into these */
 	emicen@10219000 {
 		status = "disabled";
