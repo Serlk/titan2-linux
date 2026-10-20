@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/mediatek,mt6375.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6375 SubPMIC
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The MT6375 integrates a switching single cell Li-ion charger with BC1.2
+  detection, an ADC, a coulomb counter and a USB Type-C/PD port controller.
+  It answers on several I2C addresses; the node describes the PMU address
+  0x34, the others are derived from it. The device collects the events of
+  all blocks and signals them on one interrupt line.
+
+properties:
+  compatible:
+    const: mediatek,mt6375
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 1
+    description:
+      The event number, 8 * (register - 0x1d0) + bit.
+
+  charger:
+    type: object
+    additionalProperties: false
+    description: The switching charger.
+
+    properties:
+      compatible:
+        const: mediatek,mt6375-chg
+
+      interrupts:
+        minItems: 1
+        maxItems: 5
+
+      interrupt-names:
+        minItems: 1
+        maxItems: 5
+        items:
+          enum: [ pwr_rdy, detach, vbus_ov, chg_tout, chg_batov ]
+
+      monitored-battery:
+        description: |
+          Battery the charger feeds. Its constant-charge-voltage-max-microvolt
+          and constant-charge-current-max-microamp are the upper limits the
+          driver programs and accepts; without them the charger is only
+          monitored. operating-range-celsius is the charging window and
+          charge-term-current-microamp the termination current.
+
+    required:
+      - compatible
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-controller
+  - "#interrupt-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        pmic@34 {
+            compatible = "mediatek,mt6375";
+            reg = <0x34>;
+            interrupts = <15 IRQ_TYPE_LEVEL_LOW>;
+            interrupt-controller;
+            #interrupt-cells = <1>;
+
+            charger {
+                compatible = "mediatek,mt6375-chg";
+                interrupts = <0>, <1>, <8>, <11>, <9>;
+                interrupt-names = "pwr_rdy", "detach", "vbus_ov",
+                                  "chg_tout", "chg_batov";
+            };
+        };
+    };
