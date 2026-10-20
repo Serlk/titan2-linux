@@ -547,6 +547,18 @@ source "drivers/clk/x86/Kconfig"
 source "drivers/clk/xilinx/Kconfig"
 source "drivers/clk/zynqmp/Kconfig"
 
+config COMMON_CLK_DEBUGFS_HW_STATE
+	bool "Per-clock debugfs files that read the hardware state"
+	depends on DEBUG_FS
+	default y
+	help
+	  Add clk_hw_enabled, clk_hw_prepared, clk_hw_rate and clk_hw_parent
+	  to each clock's debugfs directory. Reading them calls the clock
+	  driver's .is_enabled, .is_prepared, .recalc_rate and .get_parent,
+	  that is, touches the clock controller registers; the other
+	  per-clock files only show values cached by the framework. Useful
+	  to find the clock whose register read hangs clk_summary.
+
 # Kunit test cases
 config CLK_KUNIT_TEST
 	tristate "Basic Clock Framework Kunit Tests" if !KUNIT_ALL_TESTS

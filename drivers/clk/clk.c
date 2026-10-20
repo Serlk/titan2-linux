@@ -3500,6 +3500,91 @@ static int clk_rate_get(void *data, u64 *val)
 
 DEFINE_DEBUGFS_ATTRIBUTE(clk_rate_fops, clk_rate_get, clk_rate_set, "%llu\n");
 
+#ifdef CONFIG_COMMON_CLK_DEBUGFS_HW_STATE
+/*
+ * Unlike the files above, which report what the framework has cached,
+ * these call into the clock hardware driver on every read. They let a
+ * script walk the clocks one at a time and find the one whose register
+ * access hangs the bus, which clk_summary (one read for all clocks) does
+ * not tell.
+ */
+static int clk_hw_enabled_get(void *data, u64 *val)
+{
+	struct clk_core *core = data;
+
+	/* Same readout as clk_summary, CLK_OPS_PARENT_ENABLE rules included */
+	clk_prepare_lock();
+	*val = clk_core_is_enabled(core);
+	clk_prepare_unlock();
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(clk_hw_enabled_fops, clk_hw_enabled_get, NULL, "%llu\n");
+
+static int clk_hw_prepared_get(void *data, u64 *val)
+{
+	struct clk_core *core = data;
+
+	clk_prepare_lock();
+	*val = clk_core_is_prepared(core);
+	clk_prepare_unlock();
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(clk_hw_prepared_fops, clk_hw_prepared_get, NULL, "%llu\n");
+
+static int clk_hw_rate_get(void *data, u64 *val)
+{
+	struct clk_core *core = data;
+
+	/* .recalc_rate() with the cached parent rate; the cache is left alone */
+	clk_prepare_lock();
+	*val = clk_recalc(core, core->parent ? core->parent->rate : 0);
+	clk_prepare_unlock();
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(clk_hw_rate_fops, clk_hw_rate_get, NULL, "%llu\n");
+
+static int clk_hw_parent_get(void *data, u64 *val)
+{
+	struct clk_core *core = data;
+	int ret;
+
+	clk_prepare_lock();
+	ret = clk_pm_runtime_get(core);
+	if (!ret) {
+		*val = core->ops->get_parent(core->hw);
+		clk_pm_runtime_put(core);
+	}
+	clk_prepare_unlock();
+
+	return ret;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(clk_hw_parent_fops, clk_hw_parent_get, NULL, "%llu\n");
+
+static void clk_debug_create_hw_state(struct clk_core *core, struct dentry *root)
+{
+	if (core->ops->is_enabled)
+		debugfs_create_file_unsafe("clk_hw_enabled", 0400, root, core,
+					   &clk_hw_enabled_fops);
+	if (core->ops->is_prepared)
+		debugfs_create_file_unsafe("clk_hw_prepared", 0400, root, core,
+					   &clk_hw_prepared_fops);
+	if (core->ops->recalc_rate)
+		debugfs_create_file_unsafe("clk_hw_rate", 0400, root, core,
+					   &clk_hw_rate_fops);
+	if (core->ops->get_parent)
+		debugfs_create_file_unsafe("clk_hw_parent", 0400, root, core,
+					   &clk_hw_parent_fops);
+}
+#else
+static inline void clk_debug_create_hw_state(struct clk_core *core,
+					     struct dentry *root)
+{
+}
+#endif
+
 static int clk_phase_get(void *data, u64 *val)
 {
 	struct clk_core *core = data;
@@ -3728,6 +3813,8 @@ static void clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 	if (core->num_parents > 1)
 		debugfs_create_file("clk_possible_parents", 0444, root, core,
 				    &possible_parents_fops);
+
+	clk_debug_create_hw_state(core, root);
 
 	if (core->ops->debug_init)
 		core->ops->debug_init(core->hw, core->dentry);
