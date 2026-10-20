@@ -398,6 +398,20 @@ config BT_MTKSDIO
 	  Say Y here to compile support for MediaTek Bluetooth SDIO devices
 	  into the kernel or say M to compile it as module (btmtksdio).
 
+config BT_MTKBGF
+	tristate "MediaTek MT6878 CONNSYS Bluetooth (BGF) support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	depends on MTK_CONNINFRA
+	select BT_MTK
+	help
+	  MediaTek Bluetooth driver for the BGF core of the connectivity
+	  subsystem (CONNSYS) of MediaTek MT6878 class SoCs. HCI runs over
+	  shared memory rings; the firmware is loaded by the boot loader.
+
+	  Say Y here to compile support for it into the kernel or say M to
+	  compile it as a module (btmtkbgf).
+
 config BT_MTKUART
 	tristate "MediaTek HCI UART driver"
 	depends on BT_HCIUART
