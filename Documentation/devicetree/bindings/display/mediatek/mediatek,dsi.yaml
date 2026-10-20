@@ -36,6 +36,10 @@ properties:
           - const: mediatek,mt8173-dsi
       - items:
           - enum:
+              - mediatek,mt6878-dsi
+          - const: mediatek,mt8186-dsi
+      - items:
+          - enum:
               - mediatek,mt8195-dsi
               - mediatek,mt8365-dsi
           - const: mediatek,mt8183-dsi
