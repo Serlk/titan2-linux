@@ -65,6 +65,19 @@ properties:
       - const: peri_aud_mst
       - const: peri_aud_intbus
 
+  mediatek,topckgen:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The topckgen syscon. Its audio test registers are used to calibrate
+      the phase of the MTKAIF data lines to the PMIC codec.
+
+  pinctrl-names:
+    const: default
+
+  pinctrl-0:
+    description:
+      The MTKAIF and I2S pins the board uses, in their audio function.
+
 required:
   - compatible
   - reg
