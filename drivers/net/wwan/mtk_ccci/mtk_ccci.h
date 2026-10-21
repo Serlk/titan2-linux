@@ -32,6 +32,7 @@ struct device;
 struct regmap;
 struct regulator;
 struct seq_file;
+struct mtk_ccci_dpmaif;
 struct wwan_port;
 
 /*
@@ -425,6 +426,8 @@ struct mtk_ccci {
 	unsigned int num_ports;
 	bool ports_registered;
 	struct mtk_ccci_cdev cdev_fs;	/* /dev/ccci_fs */
+
+	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */
 	struct dentry *debugfs;
 };
 
@@ -494,6 +497,12 @@ void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s);
 
 /* mtk_ccci_rpc.c */
 int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
+
+/* mtk_ccci_dpmaif.c, mtk_ccci_net.c: data path skeleton, not started */
+int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci);
+int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci);
+int mtk_ccci_net_init(struct mtk_ccci *ccci);
 
 /* mtk_ccci_fsm.c */
 int mtk_ccci_fsm_init(struct mtk_ccci *ccci);
