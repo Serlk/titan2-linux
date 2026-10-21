@@ -13,7 +13,8 @@ description: |
   The MT6363 and MT6369 are Power Management ICs connected to the SoC over
   SPMI. MT6363 is the main PMIC: it provides the buck converters and LDOs
   for the SoC, the power and home keys and an AUXADC. MT6369 is a second
-  PMIC with more LDOs (USB, SD card, connectivity, audio).
+  PMIC with more LDOs (USB, SD card, connectivity, audio) and the audio
+  codec.
 
   The PMIC is an interrupt controller for its functions: the interrupts are
   signalled to the SPMI controller as Request Capable Slave (RCS) messages.
@@ -45,6 +46,11 @@ properties:
 
   "#size-cells":
     const: 0
+
+  audio-codec:
+    type: object
+    $ref: /schemas/sound/mediatek,mt6369-sound.yaml#
+    unevaluatedProperties: false
 
   adc:
     type: object
@@ -81,6 +87,7 @@ allOf:
           const: mediatek,mt6363
     then:
       properties:
+        audio-codec: false
         regulators: false
       required:
         - "#address-cells"
@@ -139,6 +146,12 @@ examples:
             interrupts = <0x5 0 IRQ_TYPE_LEVEL_HIGH>;
             interrupt-controller;
             #interrupt-cells = <3>;
+
+            audio-codec {
+                compatible = "mediatek,mt6369-sound";
+                #sound-dai-cells = <0>;
+                mediatek,mic-type-0 = <1>;
+            };
 
             regulators {
                 compatible = "mediatek,mt6369-regulator";

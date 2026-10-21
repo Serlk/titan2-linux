@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt6369-sound.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6369 audio codec
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  The audio codec of the MT6369 SPMI PMIC: receiver, headphone and line
+  outputs, two ADCs behind preamplifiers for the analog inputs AIN0, AIN1
+  and AIN2. The audio data goes to and from the SoC audio front end (AFE)
+  over the MTKAIF interface. Must be a child node of the MT6369 PMIC.
+
+allOf:
+  - $ref: dai-common.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6369-sound
+
+  "#sound-dai-cells":
+    const: 0
+
+patternProperties:
+  "^mediatek,mic-type-[0-2]$":
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      Type of the microphone on AIN0, AIN1 and AIN2. AIN0 and AIN2 share
+      MICBIAS0, AIN1 (headset) uses MICBIAS1. Defaults to 0.
+    enum:
+      - 0 # IDLE - not connected
+      - 1 # ACC - analog mic with alternating coupling
+      - 3 # DCC - analog mic with direct coupling
+      - 4 # DCC_ECM_DIFF - electret condenser mic, differential
+      - 5 # DCC_ECM_SINGLE - electret condenser mic, single ended
+
+required:
+  - compatible
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    audio-codec {
+        compatible = "mediatek,mt6369-sound";
+        #sound-dai-cells = <0>;
+        mediatek,mic-type-0 = <1>;
+        mediatek,mic-type-1 = <1>;
+        mediatek,mic-type-2 = <1>;
+    };
