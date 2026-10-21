@@ -35,9 +35,6 @@ MODULE_PARM_DESC(wwan_ports, "create the AT/MIPC WWAN ports once the modem is re
 /* the modem accepts at most this per packet on the control queues */
 #define MTK_CCCI_PORT_MTU	3456
 
-/* ring queue of the AT and MIPC channels (vendor DATA_AT_CMD_Q) */
-#define MTK_CCCI_Q_AT		5
-
 struct mtk_ccci_port_conf {
 	const char *name;
 	u16 tx_ch;
@@ -71,11 +68,10 @@ static const struct mtk_ccci_port_conf mtk_ccci_port_confs[] = {
 static int mtk_ccci_port_send(struct mtk_ccci_port *port, struct sk_buff *skb)
 {
 	struct mtk_ccci *ccci = port->ccci;
-	struct mtk_ccci_ring *ring = &ccci->ring[port->conf->txq];
 	struct mtk_ccci_header *hdr;
 	int ret;
 
-	if (ccci->state != MTK_CCCI_FSM_READY || !ring->tx_len)
+	if (READ_ONCE(ccci->state) != MTK_CCCI_FSM_READY)
 		return -ENODEV;
 	if (skb_cow_head(skb, sizeof(*hdr)))
 		return -ENOMEM;
@@ -83,22 +79,14 @@ static int mtk_ccci_port_send(struct mtk_ccci_port *port, struct sk_buff *skb)
 	hdr = skb_push(skb, sizeof(*hdr));
 	hdr->data[0] = 0;
 	hdr->data[1] = cpu_to_le32(skb->len);
-	hdr->status = cpu_to_le32(FIELD_PREP(MTK_CCCI_H_CHANNEL,
-					     port->conf->tx_ch) |
-				  FIELD_PREP(MTK_CCCI_H_SEQ, port->tx_seq) |
-				  MTK_CCCI_H_ASSERT);
+	/* sequence number and check bit: mtk_ccci_send_skb() */
+	hdr->status = cpu_to_le32(port->conf->tx_ch);
 	hdr->reserved = 0;
 
-	/* TODO: serialise with the other ports of the queue */
-	ret = mtk_ccci_ring_write(ring, skb->data, skb->len);
-	if (ret < 0) {
+	ret = mtk_ccci_send_skb(ccci, port->conf->txq, skb);
+	if (ret)
 		skb_pull(skb, sizeof(*hdr));
-		return ret == -ENOSPC ? -EAGAIN : ret;
-	}
-	port->tx_seq = (port->tx_seq + 1) & FIELD_MAX(MTK_CCCI_H_SEQ);
-	mtk_ccci_ccif_notify(ccci, MTK_CCIF_CH_RINGQ(port->conf->txq));
-	consume_skb(skb);
-	return 0;
+	return ret;
 }
 
 static int mtk_ccci_wwan_start(struct wwan_port *wport)

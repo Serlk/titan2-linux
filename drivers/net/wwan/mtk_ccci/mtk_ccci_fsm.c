@@ -19,7 +19,9 @@
  * debugfs file "fsm". Probing never powers, clocks or calls TF-A.
  *
  * The runtime data answer to HS1 (and so HS2 and READY) is not here yet:
- * the FSM stops at HS1 and reports what the modem asked for.
+ * the FSM reads HS1, records what the modem asked for and then powers
+ * the modem off again the stock way, so that a start always ends with
+ * the modem either off or as LK left it.
  *
  * Copyright (C) 2016 MediaTek Inc.
  * Copyright (C) 2026 serlk
@@ -33,6 +35,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -40,6 +43,7 @@
 #include <linux/soc/mediatek/mtk_sip_svc.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
 
 #include "mtk_ccci.h"
 
@@ -69,6 +73,9 @@ enum {
 
 /* expected boot status of MT6878 and later ("boot-status-config" 1) */
 #define MTK_CCCI_BOOT_STATUS_OK		0x544300f1
+
+#define SPM_MD_PWR_CON		0xe00
+#define SPM_MD_PWR_ACK		BIT(30)
 
 #define TOPCKGEN_MD1_CLK_MOD	0x0
 #define TOPCKGEN_MD1_CLK_MASK	(BIT(8) | BIT(9))
@@ -101,6 +108,8 @@ static const char * const mtk_ccci_fsm_names[] = {
 	[MTK_CCCI_FSM_STARTING] = "starting",
 	[MTK_CCCI_FSM_WAIT_HS1] = "wait-hs1",
 	[MTK_CCCI_FSM_HS1] = "hs1",
+	[MTK_CCCI_FSM_WAIT_HS2] = "wait-hs2",
+	[MTK_CCCI_FSM_EXCEPTION] = "exception",
 	[MTK_CCCI_FSM_READY] = "ready",
 	[MTK_CCCI_FSM_STOPPED] = "stopped",
 	[MTK_CCCI_FSM_FAILED] = "failed",
@@ -166,8 +175,8 @@ static void mtk_ccci_fsm_check(struct mtk_ccci *ccci,
 
 	c->ok = true;
 	mtk_ccci_check_add(c, power_ctrl, "module parameter power_ctrl=1");
-	mtk_ccci_check_add(c, ccci->dev->pm_domain,
-			   "MD power domain attached (power-domains in DT)");
+	mtk_ccci_check_add(c, ccci->md_domain,
+			   "MD power domain attached (mediatek,modem-power-domain in DT)");
 	mtk_ccci_check_add(c, ccci->topckgen,
 			   "topckgen regmap (mediatek,topckgen)");
 	mtk_ccci_check_add(c, ccci->infra && ccci->ccif_rst_bit != U32_MAX,
@@ -183,6 +192,16 @@ static void mtk_ccci_fsm_check(struct mtk_ccci *ccci,
 				   mtk_ccci_supply_names[i],
 				   mtk_ccci_supply_uv[i], uv);
 	}
+}
+
+/* SPM PWR_CON of the modem: 1 = powered, 0 = off, < 0 unknown */
+static int mtk_ccci_md_pwr_ack(struct mtk_ccci *ccci)
+{
+	unsigned int val;
+
+	if (!ccci->scpsys || regmap_read(ccci->scpsys, SPM_MD_PWR_CON, &val))
+		return -ENODEV;
+	return !!(val & SPM_MD_PWR_ACK);
 }
 
 static int mtk_ccci_topckgen_md_clk(struct mtk_ccci *ccci, bool on)
@@ -223,17 +242,40 @@ static int mtk_ccci_power_off(struct mtk_ccci *ccci)
 	int ret;
 
 	/*
+	 * The modem LK started: genpd sees the domain off. Take it over
+	 * first (on a running domain this only sets bits that are set).
+	 */
+	if (!ccci->md_domain_held) {
+		ret = pm_runtime_resume_and_get(ccci->dev);
+		if (ret) {
+			dev_err(ccci->dev, "MD power domain take-over: %d\n",
+				ret);
+			return ret;
+		}
+		ccci->md_domain_held = true;
+	}
+
+	/*
 	 * The MediaTek downstream driver also blocks UFS I/O around the domain switch
 	 * (ufs_mtk_cali_hold); the mainline UFS driver has no such hook.
 	 */
+	mtk_ccci_wdt_irq_stop(ccci);
 	ret = pm_runtime_put_sync(ccci->dev);
 	if (ret < 0)
 		dev_warn(ccci->dev, "MD power domain off: %d\n", ret);
+	ccci->md_domain_held = false;
+	/* genpd does not report a failed power off: ask SPM */
+	if (ret >= 0 && mtk_ccci_md_pwr_ack(ccci) > 0) {
+		dev_err(ccci->dev, "MD power domain still on\n");
+		ret = -EIO;
+	}
 	/* required by modem generation 6299 after the domain is off */
 	mdelay(4);
 
 	mtk_ccci_sip(ccci, CCCI_SIP_MD_FLIGHT_MODE_SET, 1, 0, &res);
 	mtk_ccci_topckgen_md_clk(ccci, false);
+	if (ret >= 0)
+		ccci->lk_modem_gone = true;
 	dev_info(ccci->dev, "modem powered off\n");
 
 	return ret < 0 ? ret : 0;
@@ -255,43 +297,43 @@ static int mtk_ccci_power_on(struct mtk_ccci *ccci)
 		dev_err(ccci->dev, "MD power domain on: %d\n", ret);
 		return ret;
 	}
+	ccci->md_domain_held = true;
 
 	/* make the boot vector take effect: the modem starts */
 	mtk_ccci_sip(ccci, CCCI_SIP_MD_POWER_CONFIG,
 		     CCCI_SIP_PWR_KERNEL_BOOT_UP, 0, &res);
 	dev_info(ccci->dev, "modem released: %#lx %#lx %#lx %#lx\n", res.a0,
 		 res.a1, res.a2, res.a3);
+
+	/* as the MediaTek downstream driver: the watchdog is watched from here on */
+	ret = mtk_ccci_wdt_irq_start(ccci);
+	if (ret)
+		dev_warn(ccci->dev, "modem watchdog interrupt: %d\n", ret);
 	return 0;
 }
 
-/* poll for HS1; no CCIF interrupt is requested yet */
+/* wait for HS1: the RX worker sees the SRAM channel (interrupt or poll) */
 static int mtk_ccci_wait_hs1(struct mtk_ccci *ccci)
 {
 	struct mtk_ccci_header hdr;
-	unsigned int waited;
-	u32 rch, status;
+	unsigned long t0 = jiffies;
+	long left;
+	u32 status;
 
-	for (waited = 0; waited < MTK_CCCI_HS1_TIMEOUT_MS;
-	     waited += MTK_CCCI_POLL_MS) {
-		rch = mtk_ccci_ccif_pending(ccci);
-		if (rch & (BIT(MTK_CCIF_CH_EX_INIT) |
-			   BIT(MTK_CCIF_CH_EX_INIT_DONE))) {
-			dev_err(ccci->dev, "modem exception before HS1 (%#x)\n",
-				rch);
-			return -EIO;
-		}
-		if (rch & BIT(MTK_CCIF_CH_SRAM))
-			break;
-		msleep(MTK_CCCI_POLL_MS);
+	left = wait_event_timeout(ccci->hs_wq,
+				  READ_ONCE(ccci->hs1_pending) ||
+				  READ_ONCE(ccci->exception),
+				  msecs_to_jiffies(MTK_CCCI_HS1_TIMEOUT_MS));
+	if (READ_ONCE(ccci->exception)) {
+		dev_err(ccci->dev, "modem exception before HS1\n");
+		return -EIO;
 	}
-	if (waited >= MTK_CCCI_HS1_TIMEOUT_MS) {
-		dev_err(ccci->dev, "no HS1 in %u ms\n", waited);
+	if (!left) {
+		dev_err(ccci->dev, "no HS1 in %u ms\n", MTK_CCCI_HS1_TIMEOUT_MS);
 		return -ETIMEDOUT;
 	}
 
 	mtk_ccci_ccif_read_hs(ccci, &hdr, &ccci->hs1_query);
-	mtk_ccci_ccif_ack(ccci, BIT(MTK_CCIF_CH_SRAM));
-
 	status = le32_to_cpu(hdr.status);
 	if (FIELD_GET(MTK_CCCI_H_CHANNEL, status) != MTK_CCCI_CH_CONTROL_RX ||
 	    le32_to_cpu(hdr.data[1]) != MTK_CCCI_CTL_MD_INIT_START_BOOT ||
@@ -305,30 +347,45 @@ static int mtk_ccci_wait_hs1(struct mtk_ccci *ccci)
 			  MTK_CCCI_MD_FEATURE_PATTERN &&
 			  le32_to_cpu(ccci->hs1_query.tail_pattern) ==
 			  MTK_CCCI_MD_FEATURE_PATTERN;
-	dev_info(ccci->dev, "HS1 after %u ms, feature query %s\n", waited,
+	dev_info(ccci->dev, "HS1 after %u ms, feature query %s\n",
+		 jiffies_to_msecs(jiffies - t0),
 		 ccci->hs1_valid ? "valid" : "INVALID");
 	return 0;
 }
 
+/* stop talking to the modem; it must be off (or never touched) */
+static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
+{
+	struct arm_smccc_res res;
+
+	mtk_ccci_ccif_irq_stop(ccci);
+	mtk_ccci_hif_stop(ccci);
+	mtk_ccci_ccif_stop(ccci);
+	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_RELEASE, 0, 0, &res);
+}
+
 /*
  * The stock first start, in the stock order: CCIF taken over (while the
- * LK modem still runs), boot ROM wait, power off, power on, HS1.
+ * LK modem still runs), boot ROM wait, power off, power on, HS1. Then,
+ * as the runtime data answer does not exist yet, the modem is powered
+ * off again: the start reports -EOPNOTSUPP with the HS1 details kept.
  */
 static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 {
 	struct arm_smccc_res res;
-	bool first = ccci->state == MTK_CCCI_FSM_LK_OWNED;
+	/* until the LK modem is powered off once, start the stock first way */
+	bool first = !ccci->lk_modem_gone;
 	int ret;
 
-	/* a failed start may be retried once the modem is off again */
 	if (ccci->state != MTK_CCCI_FSM_LK_OWNED &&
 	    ccci->state != MTK_CCCI_FSM_STOPPED &&
-	    !(ccci->state == MTK_CCCI_FSM_FAILED &&
-	      !pm_runtime_active(ccci->dev)))
+	    !(ccci->state == MTK_CCCI_FSM_FAILED && !ccci->md_domain_held))
 		return -EBUSY;
 
-	ccci->state = MTK_CCCI_FSM_STARTING;
+	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_STARTING);
 	ccci->hs1_valid = false;
+	WRITE_ONCE(ccci->exception, false);
+	ccci->ex_channels = 0;
 
 	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_REQUEST, 0, 0, &res);
 
@@ -337,6 +394,10 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 		dev_err(ccci->dev, "CCIF start: %d\n", ret);
 		goto fail;
 	}
+	mtk_ccci_hif_start(ccci);
+	ret = mtk_ccci_ccif_irq_start(ccci);
+	if (ret)
+		dev_warn(ccci->dev, "no CCIF interrupts (%d), polling\n", ret);
 
 	if (first) {
 		ret = mtk_ccci_wait_brom(ccci);
@@ -351,46 +412,56 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	if (ret)
 		goto fail;
 
-	ccci->state = MTK_CCCI_FSM_WAIT_HS1;
+	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_WAIT_HS1);
 	ret = mtk_ccci_wait_hs1(ccci);
 	if (ret)
 		goto fail;
+	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_HS1);
+	mtk_ccci_query_boot_status(ccci);
 
-	/* TODO: runtime data, HS2, READY; then the ports */
-	ccci->state = MTK_CCCI_FSM_HS1;
-	return 0;
+	/*
+	 * runtime data: not implemented. Without the answer the modem
+	 * would time out waiting and assert; power it off now instead.
+	 */
+	dev_warn(ccci->dev, "runtime data: not implemented, stopping the modem at HS1\n");
+	ret = -EOPNOTSUPP;
 
 fail:
-	ccci->state = MTK_CCCI_FSM_FAILED;
-	mtk_ccci_ccif_stop(ccci);
-	mtk_ccci_query_boot_status(ccci);
-	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_RELEASE, 0, 0, &res);
+	if (ret != -EOPNOTSUPP)
+		mtk_ccci_query_boot_status(ccci);
+	if (ccci->md_domain_held)
+		mtk_ccci_power_off(ccci);
+	mtk_ccci_hif_down(ccci);
+	/* FAILED with the domain held: "stop" retries the power off */
+	WRITE_ONCE(ccci->state, ret == -EOPNOTSUPP && !ccci->md_domain_held ?
+			 MTK_CCCI_FSM_STOPPED : MTK_CCCI_FSM_FAILED);
 	return ret;
 }
 
 static int mtk_ccci_fsm_stop(struct mtk_ccci *ccci)
 {
-	struct arm_smccc_res res;
 	int ret;
 
 	switch (ccci->state) {
 	case MTK_CCCI_FSM_WAIT_HS1:
 	case MTK_CCCI_FSM_HS1:
+	case MTK_CCCI_FSM_WAIT_HS2:
 	case MTK_CCCI_FSM_READY:
+	case MTK_CCCI_FSM_EXCEPTION:
 	case MTK_CCCI_FSM_FAILED:
 		break;
 	default:
 		return -EINVAL;
 	}
-	/* FAILED before the power on: the domain reference is not held */
-	if (!pm_runtime_active(ccci->dev))
+	/* FAILED before the power on: nothing is held */
+	if (!ccci->md_domain_held)
 		return -EINVAL;
 
 	mtk_ccci_port_unregister(ccci);
 	ret = mtk_ccci_power_off(ccci);
-	mtk_ccci_ccif_stop(ccci);
-	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_RELEASE, 0, 0, &res);
-	ccci->state = MTK_CCCI_FSM_STOPPED;
+	mtk_ccci_hif_down(ccci);
+	WRITE_ONCE(ccci->state, ret ? MTK_CCCI_FSM_FAILED :
+			 MTK_CCCI_FSM_STOPPED);
 	return ret;
 }
 
@@ -442,9 +513,9 @@ static void mtk_ccci_fsm_dry_run(struct mtk_ccci *ccci)
 	for (p = c.buf; (line = strsep(&p, "\n")) && *line;)
 		dev_info(ccci->dev, "  %s\n", line);
 	dev_info(ccci->dev,
-		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; poll HS1 for %u ms\n",
-		 ccci->state == MTK_CCCI_FSM_LK_OWNED ?
-		 "; SIP CHECK_DONE poll; MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
+		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then (runtime data not implemented) MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off\n",
+		 !ccci->lk_modem_gone ?
+		 "; SIP CHECK_DONE poll; take the MD domain over, off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
 		 MTK_CCCI_HS1_TIMEOUT_MS);
 	kfree(c.buf);
 }
@@ -514,12 +585,63 @@ void mtk_ccci_fsm_debugfs_init(struct mtk_ccci *ccci)
 			    &mtk_ccci_fsm_fops);
 }
 
-static void mtk_ccci_fsm_pm_put(void *data)
+static void mtk_ccci_md_domain_detach(void *data)
 {
 	struct device *dev = data;
 
+	/* never switches the domain: genpd keeps whatever state it had */
 	pm_runtime_disable(dev);
-	pm_runtime_put_noidle(dev);
+	pm_genpd_remove_device(dev);
+}
+
+/*
+ * The MD power domain, from "mediatek,modem-power-domain" and not from
+ * "power-domains" on purpose: the bus code powers a "power-domains"
+ * domain on at bind and off at unbind or when probe fails, which would
+ * stop the modem LK started. Here the device is only added to the
+ * domain, which the power controller registers default-off (genpd sees
+ * it off while LK's modem runs). The domain is switched by the FSM
+ * alone, through runtime PM: on in the power on step, off in the power
+ * off step; the first power off adopts LK's modem (a power on of the
+ * running domain, which only sets bits that are set already) and then
+ * really switches it off. The module is pinned: with the domain held,
+ * nothing may tear the device down.
+ */
+static int mtk_ccci_md_domain_attach(struct mtk_ccci *ccci)
+{
+	struct device *dev = ccci->dev;
+	struct of_phandle_args args;
+	int ret;
+
+	ret = of_parse_phandle_with_args(dev->of_node,
+					 "mediatek,modem-power-domain",
+					 "#power-domain-cells", 0, &args);
+	if (ret == -ENOENT)
+		return 0;
+	if (ret)
+		return dev_err_probe(dev, ret, "modem power domain\n");
+	if (dev->pm_domain) {
+		of_node_put(args.np);
+		return dev_err_probe(dev, -EINVAL,
+				     "use mediatek,modem-power-domain, not power-domains\n");
+	}
+
+	ret = of_genpd_add_device(&args, dev);
+	of_node_put(args.np);
+	if (ret == -ENOENT)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "modem power domain not registered\n");
+	if (ret)
+		return dev_err_probe(dev, ret, "modem power domain\n");
+
+	pm_runtime_enable(dev);
+	ret = devm_add_action_or_reset(dev, mtk_ccci_md_domain_detach, dev);
+	if (ret)
+		return ret;
+
+	ccci->md_domain = true;
+	__module_get(THIS_MODULE);
+	return 0;
 }
 
 /**
@@ -553,23 +675,9 @@ int mtk_ccci_fsm_init(struct mtk_ccci *ccci)
 		ccci->supply[i] = reg;
 	}
 
-	/*
-	 * With a power domain in the DT, the driver core has attached (and
-	 * so powered) it before probe: on a running modem a no-op, as all
-	 * the bits it sets are already set. Hold it the way the MediaTek downstream
-	 * driver does ("match LK on") so that genpd never switches the
-	 * running modem off behind the FSM's back, and pin the module:
-	 * unbinding would detach the domain and power the modem off.
-	 */
-	if (dev->pm_domain) {
-		pm_runtime_set_active(dev);
-		pm_runtime_get_noresume(dev);
-		pm_runtime_enable(dev);
-		ret = devm_add_action_or_reset(dev, mtk_ccci_fsm_pm_put, dev);
-		if (ret)
-			return ret;
-		__module_get(THIS_MODULE);
-	}
+	ret = mtk_ccci_md_domain_attach(ccci);
+	if (ret)
+		return ret;
 
 	return 0;
 }

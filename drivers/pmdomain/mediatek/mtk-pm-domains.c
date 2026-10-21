@@ -1043,6 +1043,15 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 			"failed to remove domain '%s' : %d - state may be inconsistent\n",
 			pd->genpd.name, ret);
 
+	/*
+	 * A default-off domain that Linux never turned on is left as it was
+	 * found: what is behind it may have been started by the boot loader
+	 * (e.g. a modem) and is not ours to switch off.
+	 */
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF) &&
+	    pd->genpd.status == GENPD_STATE_OFF)
+		goto put_clocks;
+
 	if (pd->hwv_data) {
 		if (scpsys_hwv_domain_is_enable_done(pd))
 			scpsys_hwv_power_off_internal(pd);
@@ -1051,6 +1060,7 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 			scpsys_power_off_internal(pd);
 	}
 
+put_clocks:
 	clk_bulk_put(pd->num_clks, pd->clks);
 	clk_bulk_put(pd->num_subsys_clks, pd->subsys_clks);
 }

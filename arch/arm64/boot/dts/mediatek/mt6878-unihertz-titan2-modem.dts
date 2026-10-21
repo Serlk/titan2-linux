@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, modem bring-up: the CCCI driver bound, with the MD power
+ * domain, so that the modem can be restarted the stock way on request.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * On top of the power-domain stage. Nothing here switches the modem by
+ * itself: the MD domain is registered default-off (genpd never touches
+ * the modem LK started), the driver only adds itself to it, and the
+ * modem is switched only by an explicit debugfs command with the module
+ * parameter mtk_ccci.power_ctrl=1.
+ */
+
+#include "mt6878-unihertz-titan2-pd.dts"
+
+&spm {
+	power-domain@MT6878_POWER_DOMAIN_MD {
+		reg = <MT6878_POWER_DOMAIN_MD>;
+		#power-domain-cells = <0>;
+	};
+};
+
+&modem {
+	/* not "power-domains": see the binding */
+	mediatek,modem-power-domain = <&spm MT6878_POWER_DOMAIN_MD>;
+
+	/*
+	 * Pins the modem asks for over RPC (stock "gpio_usage_mapping",
+	 * second cell): SIM hot plug and interface, band detection.
+	 */
+	mediatek,md-gpio-names = "GPIO_SIM1_HOT_PLUG", "GPIO_SIM2_HOT_PLUG",
+				 "GPIO_SIM1_SCLK", "GPIO_SIM1_SRST",
+				 "GPIO_SIM1_SIO", "GPIO_SIM2_SCLK",
+				 "GPIO_SIM2_SRST", "GPIO_SIM2_SIO",
+				 "GPIO_FDD_Band_Support_Detection_1",
+				 "GPIO_FDD_Band_Support_Detection_2";
+	mediatek,md-gpio-pins = <46 47 83 84 85 86 87 88 186 187>;
+	status = "okay";
+};

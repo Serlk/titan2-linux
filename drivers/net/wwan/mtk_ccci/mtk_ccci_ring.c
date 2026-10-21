@@ -62,31 +62,32 @@ static const u32 mtk_ccci_tx_size[MTK_CCCI_RINGQ_NUM] = {
 	8 * SZ_1K, 16 * SZ_1K,
 };
 
-/**
- * mtk_ccci_rings_init() - lay out empty queues
- * @ccci: driver state, ring[] is filled in
- * @base: mapping of the CCISM_MCU region
- * @size: its size
- *
- * Return: 0, or -ENOSPC if the region is too small.
- */
-int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size)
+/* the queues the modem switches to on an exception (CCISM_MCU_EXP) */
+static const u32 mtk_ccci_exp_size[MTK_CCCI_RINGQ_NUM] = {
+	12 * SZ_1K, 32 * SZ_1K, 8 * SZ_1K, 0, 0, 0, 8 * SZ_1K,
+};
+
+static int mtk_ccci_rings_layout(struct mtk_ccci *ccci, const char *what,
+				 struct mtk_ccci_ring *ring, void __iomem *base,
+				 u32 size, const u32 *rx_size,
+				 const u32 *tx_size)
 {
 	u32 off = 0, total = 0;
 	unsigned int i;
 
 	for (i = 0; i < MTK_CCCI_RINGQ_NUM; i++)
-		total += RB_CTL_LEN + mtk_ccci_rx_size[i] + mtk_ccci_tx_size[i];
+		total += RB_CTL_LEN + rx_size[i] + tx_size[i];
 	if (total > size) {
-		dev_err(ccci->dev, "CCISM %#x too small for the queues (%#x)\n",
-			size, total);
+		dev_err(ccci->dev, "%s %#x too small for the queues (%#x)\n",
+			what, size, total);
 		return -ENOSPC;
 	}
 
-	memset_io(base, 0, total);
+	/* the MediaTek downstream driver clears the whole region */
+	memset_io(base, 0, size);
 	for (i = 0; i < MTK_CCCI_RINGQ_NUM; i++) {
-		struct mtk_ccci_ring *r = &ccci->ring[i];
-		u32 len = RB_CTL_LEN + mtk_ccci_rx_size[i] + mtk_ccci_tx_size[i];
+		struct mtk_ccci_ring *r = &ring[i];
+		u32 len = RB_CTL_LEN + rx_size[i] + tx_size[i];
 		void __iomem *q = base + off;
 
 		writel(RB_CTL_MAGIC, q);
@@ -95,8 +96,8 @@ int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size)
 		writel(RB_END_MAGIC, q + len - 4);
 
 		r->ctl = q + 8;
-		r->rx_len = mtk_ccci_rx_size[i];
-		r->tx_len = mtk_ccci_tx_size[i];
+		r->rx_len = rx_size[i];
+		r->tx_len = tx_size[i];
 		r->rx_buf = r->ctl + 24;
 		r->tx_buf = r->rx_buf + r->rx_len;
 		writel(r->rx_len, r->ctl + RB_RX_LEN);
@@ -105,7 +106,52 @@ int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size)
 		off += len;
 	}
 
+	return total;
+}
+
+/**
+ * mtk_ccci_rings_init() - lay out empty queues
+ * @ccci: driver state, ring[] is filled in and ccism_size set to what the
+ *	queues use (the MediaTek downstream driver reports that, not the region size, to
+ *	the modem in the runtime data)
+ * @base: mapping of the CCISM_MCU region
+ * @size: its size
+ *
+ * Return: 0, or -ENOSPC if the region is too small.
+ */
+int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size)
+{
+	int ret;
+
+	ret = mtk_ccci_rings_layout(ccci, "CCISM", ccci->ring, base, size,
+				    mtk_ccci_rx_size, mtk_ccci_tx_size);
+	if (ret < 0)
+		return ret;
+	ccci->ccism_size = ret;
 	return 0;
+}
+
+/**
+ * mtk_ccci_rings_exp_init() - lay out the exception queues
+ * @ccci: driver state, ring_exp[] is filled in
+ * @base: mapping of the CCISM_MCU_EXP region
+ * @size: its size
+ *
+ * The same queue format, with each queue sharing one buffer size both
+ * ways. The driver does not switch to them (no exception handshake yet),
+ * but the modem is told where they are and expects them laid out.
+ *
+ * Return: 0, or -ENOSPC if the region is too small.
+ */
+int mtk_ccci_rings_exp_init(struct mtk_ccci *ccci, void __iomem *base,
+			    u32 size)
+{
+	int ret;
+
+	ret = mtk_ccci_rings_layout(ccci, "CCISM_EXP", ccci->ring_exp, base,
+				    size, mtk_ccci_exp_size,
+				    mtk_ccci_exp_size);
+	return ret < 0 ? ret : 0;
 }
 
 static void mtk_ccci_ring_copy_from(void *dst, const void __iomem *buf,
@@ -180,6 +226,44 @@ int mtk_ccci_ring_readable(const struct mtk_ccci_ring *ring)
 }
 
 /**
+ * mtk_ccci_ring_peek() - copy the next modem packet, leave it queued
+ * @ring: queue
+ * @buf: destination
+ * @len: from mtk_ccci_ring_readable()
+ *
+ * Return: @len, or a negative error.
+ */
+int mtk_ccci_ring_peek(const struct mtk_ccci_ring *ring, void *buf, u32 len)
+{
+	u32 rd, wr;
+
+	if (mtk_ccci_ring_rx_idx(ring, &rd, &wr))
+		return -EIO;
+
+	mtk_ccci_ring_copy_from(buf, ring->rx_buf, ring->rx_len,
+				(rd + 8) % ring->rx_len, len);
+	return len;
+}
+
+/**
+ * mtk_ccci_ring_consume() - drop the next modem packet from the queue
+ * @ring: queue
+ * @len: from mtk_ccci_ring_readable(), after mtk_ccci_ring_peek()
+ */
+void mtk_ccci_ring_consume(struct mtk_ccci_ring *ring, u32 len)
+{
+	u32 rd, wr;
+
+	if (mtk_ccci_ring_rx_idx(ring, &rd, &wr))
+		return;
+
+	rd = (rd + ALIGN(len + PKT_OVERHEAD, 8)) % ring->rx_len;
+	/* the data is copied out before the modem may reuse the space */
+	mb();
+	writel(rd, ring->ctl + RB_RX_READ);
+}
+
+/**
  * mtk_ccci_ring_read() - take the next modem packet
  * @ring: queue
  * @buf: destination
@@ -189,18 +273,11 @@ int mtk_ccci_ring_readable(const struct mtk_ccci_ring *ring)
  */
 int mtk_ccci_ring_read(struct mtk_ccci_ring *ring, void *buf, u32 len)
 {
-	u32 rd, wr;
+	int ret = mtk_ccci_ring_peek(ring, buf, len);
 
-	if (mtk_ccci_ring_rx_idx(ring, &rd, &wr))
-		return -EIO;
-
-	mtk_ccci_ring_copy_from(buf, ring->rx_buf, ring->rx_len,
-				(rd + 8) % ring->rx_len, len);
-	rd = (rd + ALIGN(len + PKT_OVERHEAD, 8)) % ring->rx_len;
-	/* the data is copied out before the modem may reuse the space */
-	wmb();
-	writel(rd, ring->ctl + RB_RX_READ);
-	return len;
+	if (ret >= 0)
+		mtk_ccci_ring_consume(ring, len);
+	return ret;
 }
 
 /**
