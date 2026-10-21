@@ -565,6 +565,7 @@
 				      "peri_aud_slv",
 				      "peri_aud_mst",
 				      "peri_aud_intbus";
+			mediatek,topckgen = <&topckgen>;
 			status = "disabled";
 		};
 
