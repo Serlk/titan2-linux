@@ -2836,6 +2836,15 @@ config SND_SOC_MT6359_ACCDET
 	  for ASoC codec soc-jack detection mechanism.
 	  Select N if you don't have jack on board.
 
+config SND_SOC_MT6369
+	tristate "MediaTek MT6369 Codec"
+	depends on MFD_MTK_SPMI_PMIC || COMPILE_TEST
+	help
+	  Enable support for the audio codec of the MediaTek MT6369 SPMI
+	  PMIC (MT6878 platforms): receiver, headphone and line outputs,
+	  two ADCs for three analog microphone inputs, connected to the SoC
+	  through MTKAIF.
+
 config SND_SOC_MT6660
 	tristate "Mediatek MT6660 Speaker Amplifier"
 	depends on I2C
