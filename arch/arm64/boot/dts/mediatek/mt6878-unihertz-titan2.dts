@@ -191,6 +191,31 @@
 };
 
 &pio {
+	/*
+	 * MTKAIF to the MT6369 codec (clk/data MOSI, data MISO0/1) and I2S4
+	 * of the speaker amplifier: I2SIN4 BCK/LRCK drive the bus, I2SOUT4
+	 * sends the data, I2SIN4 DATA0 comes back (stock aud-*-on states).
+	 */
+	aud_pins_default: audio-default-pins {
+		pins-mtkaif {
+			pinmux = <PINMUX_GPIO164__FUNC_AUD_CLK_MOSI>,
+				 <PINMUX_GPIO166__FUNC_AUD_DAT_MOSI0>,
+				 <PINMUX_GPIO170__FUNC_AUD_DAT_MISO0>,
+				 <PINMUX_GPIO171__FUNC_AUD_DAT_MISO1>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+
+		pins-i2s4 {
+			pinmux = <PINMUX_GPIO42__FUNC_I2SIN4_BCK>,
+				 <PINMUX_GPIO43__FUNC_I2SIN4_LRCK>,
+				 <PINMUX_GPIO44__FUNC_I2SOUT4_DATA0>,
+				 <PINMUX_GPIO45__FUNC_I2SIN4_DATA0>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
 	key_gpio_default: key-default-pins {
 		pins-keys {
 			pinmux = <PINMUX_GPIO54__FUNC_GPIO54>,
@@ -214,6 +239,23 @@
 &i2c0 {
 	#address-cells = <1>;
 	#size-cells = <0>;
+
+	/*
+	 * USB-C analog audio switch ASW5480 (GPL module asw5480.ko of
+	 * Titan 2 V01.00.14): the register
+	 * map of FSA4480, but the factory driver also drives ENN (GPIO69, active
+	 * low) and HPINT (GPIO33, an output to the codec accessory detection),
+	 * and sets the MIC/GND switches by hand instead of the FSA4480 auto
+	 * detection. The fsa4480 driver handles neither, and the Type-C port
+	 * runs as a sink only: kept disabled.
+	 */
+	typec-mux@42 {
+		compatible = "fcs,fsa4480";
+		reg = <0x42>;
+		mode-switch;
+		orientation-switch;
+		status = "disabled";
+	};
 
 	/* The stock DT runs this bus at 400 kHz */
 	touchscreen@67 {
@@ -278,6 +320,24 @@
  * aw9523_key.ko shipped with Titan 2 V01.00.14
  */
 &i2c6 {
+	/*
+	 * Loudspeaker amplifier, FourSemi FS199x (stock speaker_amp@34,
+	 * snd-soc-fs19xx). SDZ is GPIO29; the factory driver uses no
+	 * interrupt. The firmware file (register scenes, speaker model, DSP
+	 * effect) is the vendor one from /vendor/firmware, not distributed:
+	 * copy it to /lib/firmware. Enabled by the -audio board file.
+	 */
+	speaker_amp: audio-amplifier@34 {
+		compatible = "foursemi,fs199x";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 29 GPIO_ACTIVE_LOW>;
+		firmware-name = "frsm-spk1.bin";
+		/* stock ref-rdc, used only if the chip OTP has no calibrated Re */
+		foursemi,speaker-re = <0x67fd>;
+		status = "disabled";
+	};
+
 	keyboard@58 {
 		compatible = "awinic,aw9523b-keypad";
 		reg = <0x58>;
@@ -603,6 +663,20 @@
 		interrupt-controller;
 		#interrupt-cells = <3>;
 
+		/*
+		 * Audio codec: AIN0 main mic, AIN1 headset mic (over the USB-C
+		 * switch), AIN2 second mic, all AC coupled (stock mic-type
+		 * <1 1 1>). Enabled by the -audio board file.
+		 */
+		mt6369_codec: audio-codec {
+			compatible = "mediatek,mt6369-sound";
+			#sound-dai-cells = <0>;
+			mediatek,mic-type-0 = <1>;
+			mediatek,mic-type-1 = <1>;
+			mediatek,mic-type-2 = <1>;
+			status = "disabled";
+		};
+
 		regulators {
 			compatible = "mediatek,mt6369-regulator";
 
@@ -631,6 +705,12 @@
 				regulator-name = "mt6369_vtp";
 				regulator-min-microvolt = <2800000>;
 				regulator-max-microvolt = <2800000>;
+			};
+
+			/* Audio codec analog supply, always on in stock */
+			mt6369_vaud28: vaud28 {
+				regulator-name = "mt6369_vaud28";
+				regulator-always-on;
 			};
 		};
 	};
@@ -725,6 +805,50 @@
 
 &usbphy {
 	status = "okay";
+};
+
+/*
+ * Sound card: MT6369 codec on ADDA (earpiece, USB-C headset, mics), FS199x
+ * on I2SOUT4 (loudspeaker). Enabled by the -audio board file.
+ */
+/ {
+	sound: sound {
+		compatible = "unihertz,titan2-sound";
+		model = "Titan2";
+		mediatek,platform = <&afe>;
+		audio-routing =
+			"Headphones", "Headphone L",
+			"Headphones", "Headphone R",
+			"Earpiece", "Receiver",
+			"Speaker", "SPK",
+			"AIN0", "Main Mic",
+			"AIN1", "Headset Mic",
+			"AIN2", "Second Mic";
+		status = "disabled";
+
+		dai-link-0 {
+			link-name = "ADDA_BE";
+
+			codec {
+				sound-dai = <&mt6369_codec>;
+			};
+		};
+
+		dai-link-1 {
+			link-name = "I2SOUT4_BE";
+			dai-format = "i2s";
+			mediatek,clk-provider = "cpu";
+
+			codec {
+				sound-dai = <&speaker_amp>;
+			};
+		};
+	};
+};
+
+&afe {
+	pinctrl-names = "default";
+	pinctrl-0 = <&aud_pins_default>;
 };
 
 #include "mt6878-titan2-lk-compat.dtsi"
