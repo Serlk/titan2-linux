@@ -12,6 +12,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-drm.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-dvfs.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-gpu.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-idle.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-modem.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-pd.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6878-unihertz-titan2-wifi.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-rfb1.dtb
