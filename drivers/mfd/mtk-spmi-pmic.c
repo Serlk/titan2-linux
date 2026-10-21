@@ -99,6 +99,7 @@ static const struct mfd_cell mt6363_cells[] = {
 
 static const struct mfd_cell mt6369_cells[] = {
 	MFD_CELL_OF("mt6369-regulator", NULL, NULL, 0, 0, "mediatek,mt6369-regulator"),
+	MFD_CELL_OF("mt6369-sound", NULL, NULL, 0, 0, "mediatek,mt6369-sound"),
 };
 
 /*
@@ -447,7 +448,8 @@ static const struct mtk_spmi_pmic_data mt6369_data = {
 	.num_irq_groups = ARRAY_SIZE(mt6369_irq_groups),
 	.num_irqs = MT6369_IRQ_NR,
 	.top_int_status_reg = MT6369_TOP_INT_STATUS1,
-	.max_register = 0x23ff,
+	/* up to the end of the audio block (AUDDEC/AUDENC/ACCDET) */
+	.max_register = 0x27ff,
 };
 
 static const struct of_device_id mtk_spmi_pmic_of_match[] = {
