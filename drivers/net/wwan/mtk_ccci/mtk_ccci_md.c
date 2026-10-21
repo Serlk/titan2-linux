@@ -172,6 +172,26 @@ static void mtk_ccci_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(ccci->debugfs);
 }
 
+/*
+ * genpd switches a domain off for system suspend and on again on resume
+ * whatever its runtime state: that would stop the modem LK started, or
+ * power the modem domain up after a stop. Until suspend is handled, a
+ * board with the modem power domain does not suspend.
+ */
+static int mtk_ccci_prepare(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	if (!ccci->md_domain)
+		return 0;
+	dev_warn(dev, "system suspend with the modem power domain is not supported\n");
+	return -EBUSY;
+}
+
+static const struct dev_pm_ops mtk_ccci_pm_ops = {
+	.prepare = mtk_ccci_prepare,
+};
+
 static const struct of_device_id mtk_ccci_of_match[] = {
 	{ .compatible = "mediatek,mt6878-ccci" },
 	{ }
@@ -184,6 +204,7 @@ static struct platform_driver mtk_ccci_driver = {
 	.driver = {
 		.name = "mtk-ccci-md",
 		.of_match_table = mtk_ccci_of_match,
+		.pm = pm_sleep_ptr(&mtk_ccci_pm_ops),
 		/* unbinding could power the modem off, see mtk_ccci_fsm_init() */
 		.suppress_bind_attrs = true,
 	},

@@ -84,12 +84,16 @@ properties:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: topckgen syscon holding the modem clock gates.
 
-  power-domains:
+  mediatek,modem-power-domain:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
     maxItems: 1
     description:
-      The modem (MD) power domain. Leave it out while the bootloader
-      started modem is to be left alone: with it, the domain is attached
-      and held from probe on.
+      The modem (MD) power domain. Not "power-domains" on purpose: the
+      bootloader powers the modem up and starts it, and a "power-domains"
+      domain is powered on when the device is bound and off when it is
+      unbound or fails to probe, which would stop that modem. This domain
+      is only switched by the modem driver, on an explicit restart of the
+      modem.
 
   md-vmodem-supply:
     description: Modem core supply.

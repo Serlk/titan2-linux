@@ -35,6 +35,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -72,6 +73,9 @@ enum {
 
 /* expected boot status of MT6878 and later ("boot-status-config" 1) */
 #define MTK_CCCI_BOOT_STATUS_OK		0x544300f1
+
+#define SPM_MD_PWR_CON		0xe00
+#define SPM_MD_PWR_ACK		BIT(30)
 
 #define TOPCKGEN_MD1_CLK_MOD	0x0
 #define TOPCKGEN_MD1_CLK_MASK	(BIT(8) | BIT(9))
@@ -171,8 +175,8 @@ static void mtk_ccci_fsm_check(struct mtk_ccci *ccci,
 
 	c->ok = true;
 	mtk_ccci_check_add(c, power_ctrl, "module parameter power_ctrl=1");
-	mtk_ccci_check_add(c, ccci->dev->pm_domain,
-			   "MD power domain attached (power-domains in DT)");
+	mtk_ccci_check_add(c, ccci->md_domain,
+			   "MD power domain attached (mediatek,modem-power-domain in DT)");
 	mtk_ccci_check_add(c, ccci->topckgen,
 			   "topckgen regmap (mediatek,topckgen)");
 	mtk_ccci_check_add(c, ccci->infra && ccci->ccif_rst_bit != U32_MAX,
@@ -188,6 +192,16 @@ static void mtk_ccci_fsm_check(struct mtk_ccci *ccci,
 				   mtk_ccci_supply_names[i],
 				   mtk_ccci_supply_uv[i], uv);
 	}
+}
+
+/* SPM PWR_CON of the modem: 1 = powered, 0 = off, < 0 unknown */
+static int mtk_ccci_md_pwr_ack(struct mtk_ccci *ccci)
+{
+	unsigned int val;
+
+	if (!ccci->scpsys || regmap_read(ccci->scpsys, SPM_MD_PWR_CON, &val))
+		return -ENODEV;
+	return !!(val & SPM_MD_PWR_ACK);
 }
 
 static int mtk_ccci_topckgen_md_clk(struct mtk_ccci *ccci, bool on)
@@ -228,6 +242,20 @@ static int mtk_ccci_power_off(struct mtk_ccci *ccci)
 	int ret;
 
 	/*
+	 * The modem LK started: genpd sees the domain off. Take it over
+	 * first (on a running domain this only sets bits that are set).
+	 */
+	if (!ccci->md_domain_held) {
+		ret = pm_runtime_resume_and_get(ccci->dev);
+		if (ret) {
+			dev_err(ccci->dev, "MD power domain take-over: %d\n",
+				ret);
+			return ret;
+		}
+		ccci->md_domain_held = true;
+	}
+
+	/*
 	 * The MediaTek downstream driver also blocks UFS I/O around the domain switch
 	 * (ufs_mtk_cali_hold); the mainline UFS driver has no such hook.
 	 */
@@ -236,6 +264,11 @@ static int mtk_ccci_power_off(struct mtk_ccci *ccci)
 	if (ret < 0)
 		dev_warn(ccci->dev, "MD power domain off: %d\n", ret);
 	ccci->md_domain_held = false;
+	/* genpd does not report a failed power off: ask SPM */
+	if (ret >= 0 && mtk_ccci_md_pwr_ack(ccci) > 0) {
+		dev_err(ccci->dev, "MD power domain still on\n");
+		ret = -EIO;
+	}
 	/* required by modem generation 6299 after the domain is off */
 	mdelay(4);
 
@@ -552,12 +585,63 @@ void mtk_ccci_fsm_debugfs_init(struct mtk_ccci *ccci)
 			    &mtk_ccci_fsm_fops);
 }
 
-static void mtk_ccci_fsm_pm_put(void *data)
+static void mtk_ccci_md_domain_detach(void *data)
 {
 	struct device *dev = data;
 
+	/* never switches the domain: genpd keeps whatever state it had */
 	pm_runtime_disable(dev);
-	pm_runtime_put_noidle(dev);
+	pm_genpd_remove_device(dev);
+}
+
+/*
+ * The MD power domain, from "mediatek,modem-power-domain" and not from
+ * "power-domains" on purpose: the bus code powers a "power-domains"
+ * domain on at bind and off at unbind or when probe fails, which would
+ * stop the modem LK started. Here the device is only added to the
+ * domain, which the power controller registers default-off (genpd sees
+ * it off while LK's modem runs). The domain is switched by the FSM
+ * alone, through runtime PM: on in the power on step, off in the power
+ * off step; the first power off adopts LK's modem (a power on of the
+ * running domain, which only sets bits that are set already) and then
+ * really switches it off. The module is pinned: with the domain held,
+ * nothing may tear the device down.
+ */
+static int mtk_ccci_md_domain_attach(struct mtk_ccci *ccci)
+{
+	struct device *dev = ccci->dev;
+	struct of_phandle_args args;
+	int ret;
+
+	ret = of_parse_phandle_with_args(dev->of_node,
+					 "mediatek,modem-power-domain",
+					 "#power-domain-cells", 0, &args);
+	if (ret == -ENOENT)
+		return 0;
+	if (ret)
+		return dev_err_probe(dev, ret, "modem power domain\n");
+	if (dev->pm_domain) {
+		of_node_put(args.np);
+		return dev_err_probe(dev, -EINVAL,
+				     "use mediatek,modem-power-domain, not power-domains\n");
+	}
+
+	ret = of_genpd_add_device(&args, dev);
+	of_node_put(args.np);
+	if (ret == -ENOENT)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "modem power domain not registered\n");
+	if (ret)
+		return dev_err_probe(dev, ret, "modem power domain\n");
+
+	pm_runtime_enable(dev);
+	ret = devm_add_action_or_reset(dev, mtk_ccci_md_domain_detach, dev);
+	if (ret)
+		return ret;
+
+	ccci->md_domain = true;
+	__module_get(THIS_MODULE);
+	return 0;
 }
 
 /**
@@ -591,24 +675,9 @@ int mtk_ccci_fsm_init(struct mtk_ccci *ccci)
 		ccci->supply[i] = reg;
 	}
 
-	/*
-	 * With a power domain in the DT, the driver core has attached (and
-	 * so powered) it before probe: on a running modem a no-op, as all
-	 * the bits it sets are already set. Hold it the way the MediaTek downstream
-	 * driver does ("match LK on") so that genpd never switches the
-	 * running modem off behind the FSM's back, and pin the module:
-	 * unbinding would detach the domain and power the modem off.
-	 */
-	if (dev->pm_domain) {
-		pm_runtime_set_active(dev);
-		pm_runtime_get_noresume(dev);
-		pm_runtime_enable(dev);
-		ccci->md_domain_held = true;
-		ret = devm_add_action_or_reset(dev, mtk_ccci_fsm_pm_put, dev);
-		if (ret)
-			return ret;
-		__module_get(THIS_MODULE);
-	}
+	ret = mtk_ccci_md_domain_attach(ccci);
+	if (ret)
+		return ret;
 
 	return 0;
 }
