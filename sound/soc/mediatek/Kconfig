@@ -77,6 +77,20 @@ config SND_SOC_MT6878
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT6878_TITAN2
+	tristate "ASoC Audio driver for the Unihertz Titan 2 (MT6878)"
+	depends on SND_SOC_MT6878
+	depends on I2C
+	depends on MFD_MTK_SPMI_PMIC || COMPILE_TEST
+	select SND_SOC_MT6369
+	imply SND_SOC_FS199X
+	help
+	  This adds the ASoC machine driver for the Unihertz Titan 2: MT6878
+	  AFE, MT6369 codec (receiver, USB-C headset, microphones) and a
+	  FourSemi FS199x amplifier for the loudspeaker.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
 config SND_SOC_MT7986
 	tristate "ASoC support for Mediatek MT7986 chip"
 	depends on ARCH_MEDIATEK
