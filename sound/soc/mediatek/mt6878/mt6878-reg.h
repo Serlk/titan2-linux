@@ -768,4 +768,145 @@
 /* AUDIO_TOP_CON4: all power-down bits set */
 #define AUDIO_TOP_CON4_ALL_PDN                        0x3fff
 
+/* BE DAIs: ADDA (MTKAIF), ETDM I2SIN4/I2SOUT4, interconnect */
+#define PDN_DL0_PREDIS_SFT                            10
+#define PDN_DL0_DAC_SFT                               9
+#define PDN_UL0_ADC_SFT                               23
+#define PDN_ETDM_OUT4_SFT                             17
+#define PDN_ETDM_IN4_SFT                              9
+#define AUDIO_F3P25M_EN_ON_SFT                        1
+#define AFE_DL_INPUT_MODE_CTL_SFT                     24
+#define AFE_DL_OUTPUT_SEL_CTL_SFT                     18
+#define AFE_DL_MUTE_CH1_OFF_CTL_PRE_SFT               12
+#define AFE_DL_MUTE_CH2_OFF_CTL_PRE_SFT               11
+#define AFE_DL_VOICE_MODE_CTL_PRE_SFT                 5
+#define AFE_DL_GAIN_ON_CTL_PRE_SFT                    1
+#define AFE_DL_SRC_ON_TMP_CTL_PRE_SFT                 0
+#define AFE_DL_GAIN1_CTL_PRE_SFT                      16
+#define AFE_DL_GAIN2_CTL_PRE_SFT                      0
+#define AFE_DL_USE_3RD_SDM_SFT                        28
+#define AFE_DL_USE_3RD_SDM_MASK_SFT                   (0x1 << 28)
+#define AFE_DL_ATTGAIN_CTL_SFT                        0
+#define AFE_DL_ATTGAIN_CTL_MASK_SFT                   (0x3f << 0)
+#define AFE_DL_SDM_AUTO_RESET_TEST_ON_SFT             31
+#define AFE_DL_SDM_AUTO_RESET_TEST_ON_MASK_SFT        (0x1 << 31)
+#define UL_IIR_ON_TMP_CTL_SFT                         10
+#define UL_IIR_ON_TMP_CTL_MASK_SFT                    (0x1 << 10)
+#define UL_IIRMODE_CTL_SFT                            7
+#define UL_IIRMODE_CTL_MASK_SFT                       (0x7 << 7)
+#define UL_SRC_ON_TMP_CTL_SFT                         0
+#define RG_MTKAIF0_RXIF_CLKINV_SFT                    31
+#define RG_MTKAIF0_RXIF_CLKINV_MASK_SFT               (0x1 << 31)
+#define RG_MTKAIF0_RXIF_DELAY_CYCLE_SFT               12
+#define RG_MTKAIF0_RXIF_DELAY_CYCLE_MASK_SFT          (0xf << 12)
+#define RG_MTKAIF0_RXIF_DELAY_DATA_SFT                8
+#define RG_MTKAIF0_RXIF_DELAY_DATA_MASK_SFT           (0x1 << 8)
+#define RG_MTKAIF1_RXIF_CLKINV_ADC_SFT                31
+#define RG_MTKAIF1_RXIF_CLKINV_ADC_MASK_SFT           (0x1 << 31)
+#define RG_RX_FIFO_ON_SFT                             0
+#define REG_ETDM_IN_EN_SFT                            0
+#define REG_SYNC_MODE_MASK_SFT                        (0x1 << 1)
+#define REG_FMT_SFT                                   6
+#define REG_FMT_MASK_SFT                              (0x7 << 6)
+#define REG_BIT_LENGTH_SFT                            11
+#define REG_BIT_LENGTH_MASK_SFT                       (0x1f << 11)
+#define REG_WORD_LENGTH_SFT                           16
+#define REG_WORD_LENGTH_MASK_SFT                      (0x1f << 16)
+#define REG_CH_NUM_SFT                                23
+#define REG_CH_NUM_MASK_SFT                           (0x1f << 23)
+#define REG_RELATCH_1X_EN_DOMAIN_SEL_SFT              28
+#define REG_RELATCH_1X_EN_DOMAIN_SEL_MASK_SFT         (0x7 << 28)
+#define REG_INITIAL_COUNT_SFT                         0
+#define REG_INITIAL_COUNT_MASK_SFT                    (0x1f << 0)
+#define REG_INITIAL_POINT_SFT                         5
+#define REG_INITIAL_POINT_MASK_SFT                    (0x1f << 5)
+#define REG_LRCK_RESET_SFT                            15
+#define REG_LRCK_RESET_MASK_SFT                       (0x1 << 15)
+#define REG_CLOCK_SOURCE_SEL_SFT                      10
+#define REG_CLOCK_SOURCE_SEL_MASK_SFT                 (0x7 << 10)
+#define REG_CK_EN_SEL_AUTO_SFT                        14
+#define REG_CK_EN_SEL_AUTO_MASK_SFT                   (0x1 << 14)
+#define REG_FS_TIMING_SEL_MASK_SFT                    (0x1f << 26)
+#define REG_RELATCH_1X_EN_SEL_SFT                     20
+#define REG_RELATCH_1X_EN_SEL_MASK_SFT                (0x1f << 20)
+#define REG_ETDM_USE_AFIFO_SFT                        8
+#define REG_ETDM_USE_AFIFO_MASK_SFT                   (0x1 << 8)
+#define REG_AFIFO_MODE_SFT                            0
+#define REG_AFIFO_MODE_MASK_SFT                       (0x1f << 0)
+#define REG_OUT2LATCH_TIME_SFT                        10
+#define REG_OUT2LATCH_TIME_MASK_SFT                   (0x1f << 10)
+#define REG_ALMOST_END_BIT_COUNT_SFT                  5
+#define REG_ALMOST_END_BIT_COUNT_MASK_SFT             (0x1f << 5)
+#define REG_ALMOST_END_CH_COUNT_SFT                   0
+#define REG_ALMOST_END_CH_COUNT_MASK_SFT              (0x1f << 0)
+#define OUT_REG_ETDM_OUT_EN_SFT                       0
+#define OUT_REG_FMT_SFT                               6
+#define OUT_REG_FMT_MASK_SFT                          (0x7 << 6)
+#define OUT_REG_BIT_LENGTH_SFT                        11
+#define OUT_REG_BIT_LENGTH_MASK_SFT                   (0x1f << 11)
+#define OUT_REG_WORD_LENGTH_SFT                       16
+#define OUT_REG_WORD_LENGTH_MASK_SFT                  (0x1f << 16)
+#define OUT_REG_RELATCH_DOMAIN_SEL_SFT                28
+#define OUT_REG_RELATCH_DOMAIN_SEL_MASK_SFT           (0x7 << 28)
+#define OUT_REG_INITIAL_COUNT_SFT                     0
+#define OUT_REG_INITIAL_COUNT_MASK_SFT                (0x1f << 0)
+#define OUT_REG_INITIAL_POINT_SFT                     5
+#define OUT_REG_INITIAL_POINT_MASK_SFT                (0x1f << 5)
+#define OUT_REG_LRCK_RESET_SFT                        15
+#define OUT_REG_LRCK_RESET_MASK_SFT                   (0x1 << 15)
+#define OUT_REG_IN2LATCH_TIME_SFT                     0
+#define OUT_REG_IN2LATCH_TIME_MASK_SFT                (0x1f << 0)
+#define OUT_REG_FS_TIMING_SEL_SFT                     0
+#define OUT_REG_FS_TIMING_SEL_MASK_SFT                (0x1f << 0)
+#define OUT_REG_CLOCK_SOURCE_SEL_SFT                  6
+#define OUT_REG_CLOCK_SOURCE_SEL_MASK_SFT             (0x7 << 6)
+#define OUT_REG_RELATCH_EN_SEL_SFT                    24
+#define OUT_REG_RELATCH_EN_SEL_MASK_SFT               (0x1f << 24)
+#define ETDM_OUT4_SLAVE_SEL_SFT                       8
+#define ETDM_OUT4_SLAVE_SEL_MASK_SFT                  (0xf << 8)
+#define ETDM_IN4_SLAVE_SEL_SFT                        24
+#define ETDM_IN4_SLAVE_SEL_MASK_SFT                   (0xf << 24)
+#define AUDIO_TOP_CON1                                0x4
+#define AUDIO_TOP_CON2                                0x8
+#define AFE_ADDA_DL_SRC_CON0                          0x4d0
+#define AFE_ADDA_DL_SRC_CON1                          0x4d4
+#define AFE_ADDA_DL_PREDIS_CON0                       0x4dc
+#define AFE_ADDA_DL_PREDIS_CON1                       0x4e0
+#define AFE_ADDA_DL_SDM_DCCOMP_CON                    0x4ec
+#define AFE_ADDA_DL_SDM_AUTO_RESET_CON                0x510
+#define AFE_ADDA_UL0_SRC_CON0                         0xbd0
+#define AFE_ADDA_UL0_IIR_COEF_02_01                   0xbec
+#define AFE_ADDA_UL0_IIR_COEF_04_03                   0xbf0
+#define AFE_ADDA_UL0_IIR_COEF_06_05                   0xbf4
+#define AFE_ADDA_UL0_IIR_COEF_08_07                   0xbf8
+#define AFE_ADDA_UL0_IIR_COEF_10_09                   0xbfc
+#define AFE_MTKAIF0_CFG0                              0x1190
+#define AFE_MTKAIF0_RX_CFG0                           0x1198
+#define AFE_MTKAIF0_RX_CFG2                           0x11a0
+#define AFE_MTKAIF1_CFG0                              0x11f0
+#define AFE_AUD_PAD_TOP_CFG0                          0x1204
+#define ETDM_IN4_CON0                                 0x13c0
+#define ETDM_IN4_CON1                                 0x13c4
+#define ETDM_IN4_CON2                                 0x13c8
+#define ETDM_IN4_CON4                                 0x13d0
+#define ETDM_IN4_CON8                                 0x13e0
+#define ETDM_IN4_CON9                                 0x13e4
+#define ETDM_OUT4_CON0                                0x1580
+#define ETDM_OUT4_CON1                                0x1584
+#define ETDM_OUT4_CON2                                0x1588
+#define ETDM_OUT4_CON4                                0x1590
+#define ETDM_4_7_COWORK_CON0                          0x1690
+#define AFE_CONN014_1                                 0x2244
+#define AFE_CONN014_2                                 0x2248
+#define AFE_CONN015_1                                 0x2264
+#define AFE_CONN015_2                                 0x2268
+#define AFE_CONN018_0                                 0x22c0
+#define AFE_CONN019_0                                 0x22e0
+#define AFE_CONN020_4                                 0x2310
+#define AFE_CONN021_4                                 0x2330
+#define AFE_CONN116_1                                 0x2f04
+#define AFE_CONN116_2                                 0x2f08
+#define AFE_CONN117_1                                 0x2f24
+#define AFE_CONN117_2                                 0x2f28
+
 #endif

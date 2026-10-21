@@ -79,8 +79,21 @@ enum {
 	MT6878_MEMIF_ETDM_IN2,
 	MT6878_MEMIF_ETDM_IN4,
 	MT6878_MEMIF_NUM,
-	MT6878_DAI_NUM = MT6878_MEMIF_NUM,
+	/* BE DAIs */
+	MT6878_DAI_ADDA = MT6878_MEMIF_NUM,
+	MT6878_DAI_I2S_IN4,
+	MT6878_DAI_I2S_OUT4,
+	MT6878_DAI_NUM,
 };
+
+/* MTKAIF link to the PMIC codec */
+enum {
+	MTKAIF_PROTOCOL_1,
+	MTKAIF_PROTOCOL_2,
+	MTKAIF_PROTOCOL_2_CLK_P2,
+};
+
+#define MT6878_MTKAIF_MISO_NUM	3
 
 /* update irq ID (= enum) from AFE_IRQ_MCU_STATUS */
 enum {
@@ -130,11 +143,24 @@ enum {
 };
 
 struct clk;
+struct regmap;
+struct mtk_base_afe;
 
 struct mt6878_afe_private {
 	struct clk **clk;
+	/* topckgen syscon, for the MTKAIF calibration test (optional) */
+	struct regmap *topckgen;
 	/* dai */
 	void *dai_priv[MT6878_DAI_NUM];
+	/* mtkaif */
+	int mtkaif_protocol;
+	int mtkaif_calibration_ok;
+	int mtkaif_chosen_phase[MT6878_MTKAIF_MISO_NUM];
+	int mtkaif_phase_cycle[MT6878_MTKAIF_MISO_NUM];
+	int mtkaif_calibration_num_phase;
 };
+
+int mt6878_dai_adda_register(struct mtk_base_afe *afe);
+int mt6878_dai_i2s_register(struct mtk_base_afe *afe);
 
 #endif

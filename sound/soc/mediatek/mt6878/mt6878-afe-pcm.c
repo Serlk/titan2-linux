@@ -13,6 +13,7 @@
  */
 
 #include <linux/arm-smccc.h>
+#include <linux/mfd/syscon.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
@@ -27,6 +28,7 @@
 
 #include "mt6878-afe-clk.h"
 #include "mt6878-afe-common.h"
+#include "mt6878-interconnection.h"
 
 #include "../common/mtk-afe-fe-dai.h"
 #include "../common/mtk-afe-platform-driver.h"
@@ -886,6 +888,57 @@ static const struct snd_soc_component_driver mt6878_afe_component = {
 	.pointer = mtk_afe_pcm_pointer,
 };
 
+/* capture memif inputs: UL0 records the codec ADCs, UL1 the I2SIN4 data */
+static const struct snd_kcontrol_new memif_ul0_ch1_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH1", AFE_CONN018_0,
+				    I_ADDA_UL_CH1, 1, 0),
+	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH2", AFE_CONN018_0,
+				    I_ADDA_UL_CH2, 1, 0),
+};
+
+static const struct snd_kcontrol_new memif_ul0_ch2_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH1", AFE_CONN019_0,
+				    I_ADDA_UL_CH1, 1, 0),
+	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH2", AFE_CONN019_0,
+				    I_ADDA_UL_CH2, 1, 0),
+};
+
+static const struct snd_kcontrol_new memif_ul1_ch1_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH1", AFE_CONN020_4,
+				    I_I2SIN4_CH1, 1, 0),
+};
+
+static const struct snd_kcontrol_new memif_ul1_ch2_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH2", AFE_CONN021_4,
+				    I_I2SIN4_CH2, 1, 0),
+};
+
+static const struct snd_soc_dapm_widget mt6878_memif_widgets[] = {
+	/* inter-connections */
+	SND_SOC_DAPM_MIXER("UL0_CH1", SND_SOC_NOPM, 0, 0,
+			   memif_ul0_ch1_mix, ARRAY_SIZE(memif_ul0_ch1_mix)),
+	SND_SOC_DAPM_MIXER("UL0_CH2", SND_SOC_NOPM, 0, 0,
+			   memif_ul0_ch2_mix, ARRAY_SIZE(memif_ul0_ch2_mix)),
+	SND_SOC_DAPM_MIXER("UL1_CH1", SND_SOC_NOPM, 0, 0,
+			   memif_ul1_ch1_mix, ARRAY_SIZE(memif_ul1_ch1_mix)),
+	SND_SOC_DAPM_MIXER("UL1_CH2", SND_SOC_NOPM, 0, 0,
+			   memif_ul1_ch2_mix, ARRAY_SIZE(memif_ul1_ch2_mix)),
+};
+
+static const struct snd_soc_dapm_route mt6878_memif_routes[] = {
+	{"UL0", NULL, "UL0_CH1"},
+	{"UL0", NULL, "UL0_CH2"},
+	{"UL0_CH1", "ADDA_UL_CH1", "ADDA Capture"},
+	{"UL0_CH1", "ADDA_UL_CH2", "ADDA Capture"},
+	{"UL0_CH2", "ADDA_UL_CH1", "ADDA Capture"},
+	{"UL0_CH2", "ADDA_UL_CH2", "ADDA Capture"},
+
+	{"UL1", NULL, "UL1_CH1"},
+	{"UL1", NULL, "UL1_CH2"},
+	{"UL1_CH1", "I2SIN4_CH1", "I2SIN4"},
+	{"UL1_CH2", "I2SIN4_CH2", "I2SIN4"},
+};
+
 static int mt6878_dai_memif_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
@@ -898,12 +951,18 @@ static int mt6878_dai_memif_register(struct mtk_base_afe *afe)
 
 	dai->dai_drivers = mt6878_memif_dai_driver;
 	dai->num_dai_drivers = ARRAY_SIZE(mt6878_memif_dai_driver);
+	dai->dapm_widgets = mt6878_memif_widgets;
+	dai->num_dapm_widgets = ARRAY_SIZE(mt6878_memif_widgets);
+	dai->dapm_routes = mt6878_memif_routes;
+	dai->num_dapm_routes = ARRAY_SIZE(mt6878_memif_routes);
 
 	return 0;
 }
 
 typedef int (*dai_register_cb)(struct mtk_base_afe *);
 static const dai_register_cb dai_register_cbs[] = {
+	mt6878_dai_adda_register,
+	mt6878_dai_i2s_register,
 	mt6878_dai_memif_register,
 };
 
@@ -960,6 +1019,13 @@ static int mt6878_afe_pcm_dev_probe(struct platform_device *pdev)
 	ret = mt6878_init_clock(afe);
 	if (ret)
 		return ret;
+
+	/* only needed for the MTKAIF calibration of the machine driver */
+	afe_priv->topckgen = syscon_regmap_lookup_by_phandle_optional(dev->of_node,
+								     "mediatek,topckgen");
+	if (IS_ERR(afe_priv->topckgen))
+		return dev_err_probe(dev, PTR_ERR(afe_priv->topckgen),
+				     "failed to get topckgen\n");
 
 	/* init memif: IPM2.0 has no bit banding */
 	afe->memif_32bit_supported = 1;
