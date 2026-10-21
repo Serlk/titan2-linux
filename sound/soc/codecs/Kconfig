@@ -1343,6 +1343,18 @@ config SND_SOC_FS210X
 	  Digital Input Class-D Power Amplifiers with Enhanced Signal Processing.
 	  The amplifiers support I2C and I2S/TDM.
 
+config SND_SOC_FS199X
+	tristate 'FourSemi FS199x smart audio amplifier'
+	depends on I2C
+	select GPIOLIB
+	select REGMAP_I2C
+	select SND_SOC_FS_AMP_LIB
+	help
+	  Enable support for the FourSemi FS199x mono smart amplifier.
+	  The amplifier is configured by a FourSemi firmware file (register
+	  scenes, speaker model and DSP effect), which has to be present in
+	  the firmware search path when the sound card is bound.
+
 config SND_SOC_GTM601
 	tristate 'GTM601 UMTS modem audio codec'
 
