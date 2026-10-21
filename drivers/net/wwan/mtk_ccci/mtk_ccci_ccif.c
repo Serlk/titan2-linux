@@ -25,6 +25,7 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
@@ -442,6 +443,16 @@ int mtk_ccci_ccif_init(struct mtk_ccci *ccci)
 	if (IS_ERR(ccci->topckgen))
 		ccci->topckgen = NULL;
 
+	/* requested only while the driver runs the modem */
+	ccci->irq_ccif[0] = platform_get_irq_byname_optional(pdev, "ccif0");
+	ccci->irq_ccif[1] = platform_get_irq_byname_optional(pdev, "ccif1");
+	ccci->irq_wdt = platform_get_irq_byname_optional(pdev, "wdt");
+	for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++)
+		if (ccci->irq_ccif[i] == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+	if (ccci->irq_wdt == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
 	return 0;
 }
 
@@ -466,14 +477,21 @@ void mtk_ccci_ccif_ack(struct mtk_ccci *ccci, u32 channels)
  */
 int mtk_ccci_ccif_notify(struct mtk_ccci *ccci, unsigned int channel)
 {
+	unsigned long flags;
+	int ret = 0;
+
 	if (channel >= MTK_CCIF_CH_NUM)
 		return -EINVAL;
-	if (readl(ccci->ccif_ap + CCIF_BUSY) & BIT(channel))
-		return -EBUSY;
 
-	writel(BIT(channel), ccci->ccif_ap + CCIF_BUSY);
-	writel(channel, ccci->ccif_ap + CCIF_TCHNUM);
-	return 0;
+	spin_lock_irqsave(&ccci->ccif_lock, flags);
+	if (readl(ccci->ccif_ap + CCIF_BUSY) & BIT(channel)) {
+		ret = -EBUSY;
+	} else {
+		writel(BIT(channel), ccci->ccif_ap + CCIF_BUSY);
+		writel(channel, ccci->ccif_ap + CCIF_TCHNUM);
+	}
+	spin_unlock_irqrestore(&ccci->ccif_lock, flags);
+	return ret;
 }
 
 /* HS1 as the modem left it in the SRAM */
@@ -530,33 +548,42 @@ static void mtk_ccci_ccif_reset(struct mtk_ccci *ccci)
 		return;
 	tail = ccci->ccif_ap + CCIF_CHDATA + ccci->ccif_sram_size - 12;
 	writel(MTK_CCIF_SRAM_DBG_MAGIC, tail);
-	writel(le32_to_cpu(dbg->md_offset) + MTK_CCCI_SMEM_MD_VIEW_BASE,
-	       tail + 4);
+	writel(mtk_ccci_lk_smem_md_addr(dbg), tail + 4);
 	writel(le32_to_cpu(dbg->size), tail + 8);
+}
+
+/* map a shared memory region LK described (inside a no-map carveout) */
+static void __iomem *mtk_ccci_smem_map(struct mtk_ccci *ccci,
+				       enum mtk_ccci_smem_id id, u32 *size)
+{
+	const struct mtk_ccci_smem_region *r = mtk_ccci_lk_smem(ccci, id);
+	void __iomem *p;
+
+	if (!r) {
+		dev_err(ccci->dev, "no shared memory region %d from LK\n", id);
+		return NULL;
+	}
+	*size = le32_to_cpu(r->size);
+	p = ioremap_wc(le64_to_cpu(r->ap_phys), *size);
+	if (!p)
+		dev_err(ccci->dev, "cannot map shared memory region %d\n", id);
+	return p;
 }
 
 /**
  * mtk_ccci_ccif_start() - take CCIF over for a modem (re)start
  * @ccci: driver state
  *
- * The stock order: CCIF clocks, SRAM cleared, ring buffers laid out in
- * the CCISM shared memory, CCIF reset. Interrupts are not used yet: the
- * FSM polls RCHNUM.
+ * The stock order: CCIF clocks, ring buffers laid out in the CCISM shared
+ * memory (normal and exception queues), CCIF reset with both SRAM views
+ * cleared. The runtime data region is mapped for the answer to HS1.
  *
  * Return: 0 or a negative error.
  */
 int mtk_ccci_ccif_start(struct mtk_ccci *ccci)
 {
-	const struct mtk_ccci_smem_region *ccism;
-	u64 phys;
 	u32 size;
 	int ret;
-
-	ccism = mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_CCISM_MCU);
-	if (!ccism)
-		return -ENODEV;
-	phys = le64_to_cpu(ccism->ap_phys);
-	size = le32_to_cpu(ccism->size);
 
 	if (!ccci->clks_on) {
 		ret = clk_bulk_prepare_enable(ccci->num_clks, ccci->clks);
@@ -565,28 +592,176 @@ int mtk_ccci_ccif_start(struct mtk_ccci *ccci)
 		ccci->clks_on = true;
 	}
 
-	/* inside the no-map carveout (checked by the LK parser) */
-	ccci->ccism = ioremap_wc(phys, size);
+	ret = -ENOMEM;
+	ccci->ccism = mtk_ccci_smem_map(ccci, MTK_CCCI_SMEM_CCISM_MCU, &size);
 	if (!ccci->ccism)
-		return -ENOMEM;
-	ccci->ccism_size = size;
-
+		goto err;
 	ret = mtk_ccci_rings_init(ccci, ccci->ccism, size);
-	if (ret) {
-		mtk_ccci_ccif_stop(ccci);
-		return ret;
-	}
+	if (ret)
+		goto err;
+
+	ret = -ENOMEM;
+	ccci->ccism_exp = mtk_ccci_smem_map(ccci, MTK_CCCI_SMEM_CCISM_MCU_EXP,
+					    &size);
+	if (!ccci->ccism_exp)
+		goto err;
+	ret = mtk_ccci_rings_exp_init(ccci, ccci->ccism_exp, size);
+	if (ret)
+		goto err;
+
+	ret = -ENOMEM;
+	ccci->rt_data = mtk_ccci_smem_map(ccci, MTK_CCCI_SMEM_RUNTIME_DATA,
+					  &ccci->rt_data_size);
+	if (!ccci->rt_data)
+		goto err;
 
 	mtk_ccci_ccif_reset(ccci);
 	return 0;
+
+err:
+	mtk_ccci_ccif_stop(ccci);
+	return ret;
 }
 
-/* back to quiet; the clocks stay on, the modem may still use CCIF */
+/**
+ * mtk_ccci_ccif_stop() - back to quiet after the modem is off
+ * @ccci: driver state
+ *
+ * Unmaps the shared memory and resets CCIF, as the MediaTek downstream driver does
+ * once the modem is gated. The CCIF clocks stay on: the stock way to
+ * gate CCIF4/5 needs registers this driver does not map, and the
+ * clocks were on before the driver started anyway.
+ */
 void mtk_ccci_ccif_stop(struct mtk_ccci *ccci)
 {
+	if (ccci->clks_on && ccci->ccism)
+		mtk_ccci_ccif_reset(ccci);
+
+	if (ccci->rt_data) {
+		iounmap(ccci->rt_data);
+		ccci->rt_data = NULL;
+	}
+	if (ccci->ccism_exp) {
+		iounmap(ccci->ccism_exp);
+		ccci->ccism_exp = NULL;
+		memset(ccci->ring_exp, 0, sizeof(ccci->ring_exp));
+	}
 	if (ccci->ccism) {
 		iounmap(ccci->ccism);
 		ccci->ccism = NULL;
 		memset(ccci->ring, 0, sizeof(ccci->ring));
 	}
+}
+
+/*
+ * Both CCIF0 lines report the channels the modem raised (the MediaTek downstream
+ * driver splits them: data queues on the first, SRAM and exceptions on
+ * the second). Take whatever is pending, acknowledge it so the level
+ * interrupt drops, and leave the work to the RX worker.
+ */
+static irqreturn_t mtk_ccci_ccif_isr(int irq, void *data)
+{
+	struct mtk_ccci *ccci = data;
+	u32 rch;
+
+	rch = readl(ccci->ccif_ap + CCIF_RCHNUM);
+	if (!rch)
+		return IRQ_NONE;
+	writel(rch, ccci->ccif_ap + CCIF_ACK);
+	atomic_or(rch, &ccci->ccif_pending);
+	ccci->stats.irqs++;
+	mtk_ccci_hif_kick(ccci);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t mtk_ccci_wdt_isr(int irq, void *data)
+{
+	struct mtk_ccci *ccci = data;
+
+	/* one shot: re-armed on the next start */
+	disable_irq_nosync(irq);
+	ccci->wdt_fired = true;
+	dev_err(ccci->dev, "modem watchdog fired\n");
+	mtk_ccci_fsm_exception(ccci, 0);
+	return IRQ_HANDLED;
+}
+
+/**
+ * mtk_ccci_ccif_irq_start() - take the CCIF interrupts
+ * @ccci: driver state
+ *
+ * Only while the driver runs the modem. Without interrupts in the DT the
+ * RX worker still polls.
+ *
+ * Return: 0 or a negative error.
+ */
+int mtk_ccci_ccif_irq_start(struct mtk_ccci *ccci)
+{
+	unsigned int i;
+	int ret;
+
+	if (ccci->irqs_on)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++) {
+		if (ccci->irq_ccif[i] <= 0)
+			continue;
+		ret = request_irq(ccci->irq_ccif[i], mtk_ccci_ccif_isr, 0,
+				  i ? "ccci-ccif1" : "ccci-ccif0", ccci);
+		if (ret) {
+			dev_err(ccci->dev, "CCIF interrupt %u: %d\n", i, ret);
+			while (i--)
+				if (ccci->irq_ccif[i] > 0)
+					free_irq(ccci->irq_ccif[i], ccci);
+			return ret;
+		}
+	}
+	ccci->irqs_on = true;
+	return 0;
+}
+
+void mtk_ccci_ccif_irq_stop(struct mtk_ccci *ccci)
+{
+	unsigned int i;
+
+	if (!ccci->irqs_on)
+		return;
+	for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++)
+		if (ccci->irq_ccif[i] > 0)
+			free_irq(ccci->irq_ccif[i], ccci);
+	ccci->irqs_on = false;
+}
+
+/**
+ * mtk_ccci_wdt_irq_start() - watch the modem watchdog
+ * @ccci: driver state
+ *
+ * As the MediaTek downstream driver: from the release of the modem until it is
+ * stopped. One shot, logged and treated as a modem exception.
+ *
+ * Return: 0 or a negative error.
+ */
+int mtk_ccci_wdt_irq_start(struct mtk_ccci *ccci)
+{
+	int ret;
+
+	if (ccci->irq_wdt <= 0 || ccci->wdt_on)
+		return 0;
+	ccci->wdt_fired = false;
+	ret = request_irq(ccci->irq_wdt, mtk_ccci_wdt_isr, 0, "ccci-md-wdt",
+			  ccci);
+	if (ret)
+		return ret;
+	ccci->wdt_on = true;
+	return 0;
+}
+
+void mtk_ccci_wdt_irq_stop(struct mtk_ccci *ccci)
+{
+	if (!ccci->wdt_on)
+		return;
+	free_irq(ccci->irq_wdt, ccci);
+	/* as the stock stop: no stale watchdog for the next start */
+	irq_set_irqchip_state(ccci->irq_wdt, IRQCHIP_STATE_PENDING, false);
+	ccci->wdt_on = false;
 }

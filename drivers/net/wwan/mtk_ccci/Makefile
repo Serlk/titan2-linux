@@ -7,5 +7,7 @@ mtk_ccci-y := \
 	mtk_ccci_lk.o \
 	mtk_ccci_ccif.o \
 	mtk_ccci_ring.o \
+	mtk_ccci_hif.o \
+	mtk_ccci_ctl.o \
 	mtk_ccci_fsm.o \
 	mtk_ccci_port.o

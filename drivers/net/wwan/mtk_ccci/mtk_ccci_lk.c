@@ -169,6 +169,12 @@ mtk_ccci_lk_smem(const struct mtk_ccci *ccci, enum mtk_ccci_smem_id id)
 	return NULL;
 }
 
+/* the address the modem sees a shared memory region at */
+u32 mtk_ccci_lk_smem_md_addr(const struct mtk_ccci_smem_region *r)
+{
+	return MTK_CCCI_SMEM_MD_VIEW_BASE + le32_to_cpu(r->md_offset);
+}
+
 /* every shared memory region LK describes must lie in its carveout */
 static int mtk_ccci_lk_check_smem(struct mtk_ccci *ccci, const char *what,
 				  const struct mtk_ccci_smem_region *tbl,
