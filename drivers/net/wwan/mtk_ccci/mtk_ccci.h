@@ -19,6 +19,7 @@
 #include <linux/build_bug.h>
 #include <linux/clk.h>
 #include <linux/ioport.h>
+#include <linux/miscdevice.h>
 #include <linux/mutex.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
@@ -327,6 +328,18 @@ struct mtk_ccci_port {
 	struct wwan_port *wwan;
 };
 
+/* a character device port, see mtk_ccci_cdev.c */
+struct mtk_ccci_cdev {
+	struct mtk_ccci *ccci;
+	struct miscdevice misc;
+	u16 tx_ch;
+	u8 txq;
+	struct sk_buff_head rx;
+	wait_queue_head_t wq;
+	atomic_t open;
+	unsigned long rx_pkts, tx_pkts, rx_full;
+};
+
 /* per-start statistics, for debugfs */
 struct mtk_ccci_stats {
 	unsigned long irqs;
@@ -411,6 +424,7 @@ struct mtk_ccci {
 	struct mtk_ccci_port *ports;
 	unsigned int num_ports;
 	bool ports_registered;
+	struct mtk_ccci_cdev cdev_fs;	/* /dev/ccci_fs */
 	struct dentry *debugfs;
 };
 
@@ -471,6 +485,12 @@ void mtk_ccci_ctl_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_sys_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_status_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_fsm_exception(struct mtk_ccci *ccci, u32 channels);
+
+/* mtk_ccci_cdev.c */
+int mtk_ccci_cdev_init(struct mtk_ccci *ccci);
+int mtk_ccci_cdev_recv(struct mtk_ccci_cdev *cd, struct sk_buff *skb);
+void mtk_ccci_cdev_reset(struct mtk_ccci *ccci);
+void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s);
 
 /* mtk_ccci_fsm.c */
 int mtk_ccci_fsm_init(struct mtk_ccci *ccci);

@@ -149,6 +149,10 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = mtk_ccci_cdev_init(ccci);
+	if (ret)
+		return ret;
+
 	ccci->debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	debugfs_create_file("md_mem", 0400, ccci->debugfs, ccci,
 			    &mtk_ccci_md_mem_fops);

@@ -154,7 +154,8 @@ static void mtk_ccci_rx_check_seq(struct mtk_ccci *ccci,
 
 /*
  * Hand a packet to its consumer.
- * Return: 0 if taken (or dropped), -EBUSY to leave it in the ring.
+ * Return: 0 if taken (or dropped), -EBUSY to leave it in the ring. The
+ * skb belongs to the consumer either way.
  */
 static int mtk_ccci_rx_dispatch(struct mtk_ccci *ccci, struct sk_buff *skb)
 {
@@ -172,6 +173,8 @@ static int mtk_ccci_rx_dispatch(struct mtk_ccci *ccci, struct sk_buff *skb)
 		mtk_ccci_status_recv(ccci, skb);
 		return 0;
 	case MTK_CCCI_CH_FS_RX:
+		ccci->stats.fs_rpc++;
+		return mtk_ccci_cdev_recv(&ccci->cdev_fs, skb);
 	case MTK_CCCI_CH_RPC_RX:
 		ccci->stats.fs_rpc++;
 		break;
@@ -323,6 +326,7 @@ void mtk_ccci_hif_stop(struct mtk_ccci *ccci)
 	WRITE_ONCE(ccci->hif_on, false);
 	cancel_delayed_work_sync(&ccci->poll_work);
 	cancel_work_sync(&ccci->rx_work);
+	mtk_ccci_cdev_reset(ccci);
 }
 
 static int mtk_ccci_queues_show(struct seq_file *s, void *unused)
@@ -347,6 +351,7 @@ static int mtk_ccci_queues_show(struct seq_file *s, void *unused)
 				   readl(r->ctl + 12), readl(r->ctl + 16));
 		seq_puts(s, "\n");
 	}
+	mtk_ccci_cdev_debugfs(ccci, s);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(mtk_ccci_queues);
