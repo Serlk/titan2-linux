@@ -492,6 +492,9 @@ int mtk_ccci_cdev_recv(struct mtk_ccci_cdev *cd, struct sk_buff *skb);
 void mtk_ccci_cdev_reset(struct mtk_ccci *ccci);
 void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s);
 
+/* mtk_ccci_rpc.c */
+int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
+
 /* mtk_ccci_fsm.c */
 int mtk_ccci_fsm_init(struct mtk_ccci *ccci);
 void mtk_ccci_fsm_debugfs_init(struct mtk_ccci *ccci);

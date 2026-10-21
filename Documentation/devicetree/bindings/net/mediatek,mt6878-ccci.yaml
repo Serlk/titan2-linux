@@ -95,6 +95,20 @@ properties:
       is only switched by the modem driver, on an explicit restart of the
       modem.
 
+  mediatek,md-gpio-names:
+    $ref: /schemas/types.yaml#/definitions/string-array
+    maxItems: 32
+    description:
+      Names the modem firmware asks for when it looks up the pins of its
+      SIM, band detection and other lines (e.g. "GPIO_SIM1_HOT_PLUG").
+
+  mediatek,md-gpio-pins:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    maxItems: 32
+    description:
+      Pin numbers, as the modem numbers them, for the names in
+      mediatek,md-gpio-names, in the same order.
+
   md-vmodem-supply:
     description: Modem core supply.
 
