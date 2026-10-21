@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2, audio bring-up: the -pd board (power controller on, so the
+ * audio power domain exists) plus the AFE, the MT6369 codec, the FS199x
+ * speaker amplifier and the sound card.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ *
+ * Kept as a separate board file until the sound card has been seen
+ * working on the device. Nothing is routed at boot; userspace (UCM) enables a path
+ * with all gains at their lowest step.
+ */
+
+#include "mt6878-unihertz-titan2-pd.dts"
+
+&afe {
+	status = "okay";
+};
+
+&mt6369_codec {
+	status = "okay";
+};
+
+&speaker_amp {
+	status = "okay";
+};
+
+&sound {
+	status = "okay";
+};
