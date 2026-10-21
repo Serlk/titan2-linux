@@ -513,9 +513,9 @@ static void mtk_ccci_fsm_dry_run(struct mtk_ccci *ccci)
 	for (p = c.buf; (line = strsep(&p, "\n")) && *line;)
 		dev_info(ccci->dev, "  %s\n", line);
 	dev_info(ccci->dev,
-		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; poll HS1 for %u ms\n",
-		 ccci->state == MTK_CCCI_FSM_LK_OWNED ?
-		 "; SIP CHECK_DONE poll; MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
+		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then (runtime data not implemented) MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off\n",
+		 !ccci->lk_modem_gone ?
+		 "; SIP CHECK_DONE poll; take the MD domain over, off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
 		 MTK_CCCI_HS1_TIMEOUT_MS);
 	kfree(c.buf);
 }
