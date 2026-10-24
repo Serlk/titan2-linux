@@ -14,3 +14,20 @@
 #include "mt6878-unihertz-titan2-wifi.dtsi"
 #include "mt6878-unihertz-titan2-audio.dtsi"
 #include "mt6878-unihertz-titan2-modem.dtsi"
+
+/*
+ * Connectivity all the way: CONNINFRA, the Wi-Fi driver (mt7921-soc starts
+ * the firmware LK loaded and registers wlan0) and Bluetooth. The -wifi
+ * board keeps them disabled for the step by step bring-up.
+ */
+&consys {
+	status = "okay";
+};
+
+&{/wifi@18400000} {
+	status = "okay";
+};
+
+&{/bt@18800000} {
+	status = "okay";
+};
