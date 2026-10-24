@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: every bring-up stage at once, except the mediatek-drm display:
+ * the screen stays on simplefb and the LK frame trigger. CPU frequency and
+ * thermal, cpuidle, the GPU, connectivity (Wi-Fi/BT), audio and the modem
+ * driver, on top of the power-domain stage.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+#include "mt6878-unihertz-titan2-pd.dts"
+#include "mt6878-unihertz-titan2-dvfs.dtsi"
+#include "mt6878-unihertz-titan2-gpu.dtsi"
+#include "mt6878-unihertz-titan2-idle.dtsi"
+#include "mt6878-unihertz-titan2-wifi.dtsi"
+#include "mt6878-unihertz-titan2-audio.dtsi"
+#include "mt6878-unihertz-titan2-modem.dtsi"

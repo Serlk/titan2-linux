@@ -15,15 +15,4 @@
  */
 
 #include "mt6878-unihertz-titan2.dts"
-
-&performance {
-	status = "okay";
-};
-
-&lvts_ap {
-	status = "okay";
-};
-
-&lvts_mcu {
-	status = "okay";
-};
+#include "mt6878-unihertz-titan2-dvfs.dtsi"

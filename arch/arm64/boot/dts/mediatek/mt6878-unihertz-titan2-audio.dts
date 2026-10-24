@@ -12,19 +12,4 @@
  */
 
 #include "mt6878-unihertz-titan2-pd.dts"
-
-&afe {
-	status = "okay";
-};
-
-&mt6369_codec {
-	status = "okay";
-};
-
-&speaker_amp {
-	status = "okay";
-};
-
-&sound {
-	status = "okay";
-};
+#include "mt6878-unihertz-titan2-audio.dtsi"

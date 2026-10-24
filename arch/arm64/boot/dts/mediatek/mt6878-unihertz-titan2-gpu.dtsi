@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the gpu bring-up, applied by mt6878-unihertz-titan2-gpu.dts and
+ * mt6878-unihertz-titan2-all*.dts.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+&gpueb_mbox {
+	status = "okay";
+};
+
+&gpufreq {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};

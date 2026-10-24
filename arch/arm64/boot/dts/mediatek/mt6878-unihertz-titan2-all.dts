@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: every bring-up stage at once, the display on mediatek-drm.
+ * Same as -all-fb plus the -drm stage.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+#include "mt6878-unihertz-titan2-all-fb.dts"
+#include "mt6878-unihertz-titan2-drm.dtsi"

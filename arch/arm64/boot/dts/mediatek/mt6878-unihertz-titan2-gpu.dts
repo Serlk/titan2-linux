@@ -11,15 +11,4 @@
  */
 
 #include "mt6878-unihertz-titan2.dts"
-
-&gpueb_mbox {
-	status = "okay";
-};
-
-&gpufreq {
-	status = "okay";
-};
-
-&gpu {
-	status = "okay";
-};
+#include "mt6878-unihertz-titan2-gpu.dtsi"

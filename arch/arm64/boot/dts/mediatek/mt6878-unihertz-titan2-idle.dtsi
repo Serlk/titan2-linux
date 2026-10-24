@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the idle bring-up, applied by mt6878-unihertz-titan2-idle.dts and
+ * mt6878-unihertz-titan2-all*.dts.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+&systimer {
+	status = "okay";
+};
+
+&{/soc@0/i2c@11d71000/fuel-gauge@55} {
+	status = "okay";
+};
