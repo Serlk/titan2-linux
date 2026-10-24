@@ -478,6 +478,9 @@ struct block_device *bdev_alloc(struct gendisk *disk, u8 partno)
 	bdev->bd_queue = disk->queue;
 	if (partno && bdev_test_flag(disk->part0, BD_HAS_SUBMIT_BIO))
 		bdev_set_flag(bdev, BD_HAS_SUBMIT_BIO);
+	/* a new partition of a locked disk is locked too (disks: add_disk_fwnode) */
+	if (partno && bdev_ro_locked(disk->part0))
+		bdev_set_flag(bdev, BD_READ_ONLY | BD_RO_LOCKED);
 	bdev->bd_stats = alloc_percpu(struct disk_stats);
 	if (!bdev->bd_stats) {
 		iput(inode);

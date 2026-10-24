@@ -27,6 +27,8 @@ static int blkpg_do_ioctl(struct block_device *bdev,
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
+	if (bdev_disk_ro_locked(bdev))
+		return -EPERM;
 	if (copy_from_user(&p, upart, sizeof(struct blkpg_partition)))
 		return -EFAULT;
 	if (bdev_is_partition(bdev))
@@ -537,6 +539,8 @@ static int blkdev_roset(struct block_device *bdev, unsigned cmd,
 
 	if (get_user(n, (int __user *)arg))
 		return -EFAULT;
+	if (!n && bdev_ro_locked(bdev))
+		return -EPERM;
 	if (bdev->bd_disk->fops->set_read_only) {
 		ret = bdev->bd_disk->fops->set_read_only(bdev, n);
 		if (ret)
@@ -707,6 +711,8 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 	case BLKRRPART:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
+		if (bdev_disk_ro_locked(bdev))
+			return -EPERM;
 		if (bdev_is_partition(bdev))
 			return -EINVAL;
 		return disk_scan_partitions(bdev->bd_disk,

@@ -58,6 +58,7 @@
 #include <linux/t10-pi.h>
 #include <linux/uaccess.h>
 #include <linux/unaligned.h>
+#include <linux/cdrom.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -68,6 +69,7 @@
 #include <scsi/scsi_eh.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_ioctl.h>
+#include <scsi/sg.h>
 #include <scsi/scsicam.h>
 #include <scsi/scsi_common.h>
 
@@ -1746,6 +1748,15 @@ static int sd_ioctl(struct block_device *bdev, blk_mode_t mode,
 			(mode & BLK_OPEN_NDELAY));
 	if (error)
 		return error;
+
+	/*
+	 * Commands passed through (also on a partition: they address the whole
+	 * disk) would bypass a locked read-only disk (block.ro_lock).
+	 */
+	if (bdev_disk_ro_locked(bdev) &&
+	    (is_sed_ioctl(cmd) || cmd == SG_IO || cmd == SCSI_IOCTL_SEND_COMMAND ||
+	     cmd == CDROM_SEND_PACKET))
+		return -EPERM;
 
 	if (is_sed_ioctl(cmd))
 		return sed_ioctl(sdkp->opal_dev, cmd, p);

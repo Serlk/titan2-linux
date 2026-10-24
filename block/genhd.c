@@ -586,6 +586,13 @@ int __must_check add_disk_fwnode(struct device *parent, struct gendisk *disk,
 	unsigned int memflags;
 	int ret;
 
+	/*
+	 * A new disk behind the controller of a locked disk (block.ro_lock), e.g.
+	 * a rescanned UFS LU, starts read-only and locked.
+	 */
+	if (blk_ro_locked_device(parent))
+		bdev_set_flag(disk->part0, BD_READ_ONLY | BD_RO_LOCKED);
+
 	if (queue_is_mq(disk->queue)) {
 		set = disk->queue->tag_set;
 		memflags = memalloc_noio_save();

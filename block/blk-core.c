@@ -563,14 +563,21 @@ static int __init fail_make_request_debugfs(void)
 late_initcall(fail_make_request_debugfs);
 #endif /* CONFIG_FAIL_MAKE_REQUEST */
 
-static inline void bio_check_ro(struct bio *bio)
+/* true: fail the bio (a locked read-only device, block.ro_lock) */
+static inline bool bio_check_ro(struct bio *bio)
 {
 	if (op_is_write(bio_op(bio)) && bdev_read_only(bio->bi_bdev)) {
 		if (op_is_flush(bio->bi_opf) && !bio_sectors(bio))
-			return;
+			return false;
+
+		if (bdev_ro_locked(bio->bi_bdev)) {
+			pr_warn_ratelimited("Refusing write to read-only block-device %pg\n",
+					    bio->bi_bdev);
+			return true;
+		}
 
 		if (bdev_test_flag(bio->bi_bdev, BD_RO_WARNED))
-			return;
+			return false;
 
 		bdev_set_flag(bio->bi_bdev, BD_RO_WARNED);
 
@@ -581,6 +588,7 @@ static inline void bio_check_ro(struct bio *bio)
 		pr_warn("Trying to write to read-only block-device %pg\n",
 			bio->bi_bdev);
 	}
+	return false;
 }
 
 int should_fail_bio(struct bio *bio)
@@ -838,7 +846,8 @@ void submit_bio_noacct(struct bio *bio)
 
 	if (should_fail_bio(bio))
 		goto end_io;
-	bio_check_ro(bio);
+	if (bio_check_ro(bio))
+		goto end_io;
 	if (!bio_flagged(bio, BIO_REMAPPED)) {
 		if (unlikely(bio_check_eod(bio)))
 			goto end_io;

@@ -830,8 +830,38 @@ static inline bool get_disk_ro(struct gendisk *disk)
 		test_bit(GD_READ_ONLY, &disk->state);
 }
 
+#ifdef CONFIG_BLK_DEV_RO_LOCK
+bool blk_ro_locked(void);
+bool blk_ro_locked_device(struct device *dev);
+#else
+static inline bool blk_ro_locked(void)
+{
+	return false;
+}
+static inline bool blk_ro_locked_device(struct device *dev)
+{
+	return false;
+}
+#endif
+
+/* read-only until the next boot (block.ro_lock); for a partition, of itself only */
+static inline bool bdev_ro_locked(struct block_device *bdev)
+{
+	return IS_ENABLED(CONFIG_BLK_DEV_RO_LOCK) && bdev_test_flag(bdev, BD_RO_LOCKED);
+}
+
+/* a locked disk, or a partition of one: no partition table changes, no pass-through */
+static inline bool bdev_disk_ro_locked(struct block_device *bdev)
+{
+	return bdev_ro_locked(bdev->bd_disk->part0);
+}
+
 static inline bool bdev_read_only(struct block_device *bdev)
 {
+	/* with CONFIG_BLK_DEV_RO_LOCK, BLKROSET on the disk is not inherited */
+	if (IS_ENABLED(CONFIG_BLK_DEV_RO_LOCK) && bdev_partno(bdev))
+		return bdev_test_flag(bdev, BD_READ_ONLY) ||
+			test_bit(GD_READ_ONLY, &bdev->bd_disk->state);
 	return bdev_test_flag(bdev, BD_READ_ONLY) || get_disk_ro(bdev->bd_disk);
 }
 

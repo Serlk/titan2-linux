@@ -94,6 +94,25 @@ config BLK_DEV_WRITE_MOUNTED
 	storage stack. If in doubt, say Y. The configuration can be overridden
 	with the bdev_allow_write_mounted boot option.
 
+config BLK_DEV_RO_LOCK
+	bool "One-way lock of read-only block devices"
+	help
+	With this option, a partition is read-only only when it is marked so
+	itself (BLKROSET on the partition) or its driver reports the disk as
+	write-protected; BLKROSET on the whole disk no longer makes all of its
+	partitions read-only. A disk can then be read-only as a whole while one
+	of its partitions stays writable.
+
+	It also adds the block.ro_lock parameter (boot option, or
+	/sys/module/block/parameters/ro_lock at run time, one-way). Setting it
+	locks every block device that is read-only at that moment: BLKROSET
+	cannot make it writable, writes to it fail (instead of a warning), and
+	for a locked disk BLKPG, BLKRRPART and SCSI pass-through (SG_IO, bsg)
+	are refused. New partitions of a locked disk and new disks behind the
+	same controller start locked. Other devices (an SD card, USB storage,
+	loop, zram) are not affected. Meant for a system sharing a disk with
+	another operating system. If in doubt, say N.
+
 config BLK_DEV_ZONED
 	bool "Zoned block device support"
 	help

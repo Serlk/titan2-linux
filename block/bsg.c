@@ -62,6 +62,9 @@ static int bsg_sg_io(struct bsg_device *bd, bool open_for_write,
 	struct sg_io_v4 hdr;
 	int ret;
 
+	/* pass-through would bypass a locked read-only disk (block.ro_lock) */
+	if (blk_ro_locked_device(&bd->device))
+		return -EPERM;
 	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 		return -EFAULT;
 	if (hdr.guard != 'Q')
@@ -182,6 +185,8 @@ static int bsg_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags)
 
 	if (!bd->uring_cmd_fn)
 		return -EOPNOTSUPP;
+	if (blk_ro_locked_device(&bd->device))
+		return -EPERM;
 
 	return bd->uring_cmd_fn(q, ioucmd, issue_flags, open_for_write);
 }
