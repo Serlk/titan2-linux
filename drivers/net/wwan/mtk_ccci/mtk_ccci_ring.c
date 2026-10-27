@@ -180,13 +180,14 @@ static int mtk_ccci_ring_rx_idx(const struct mtk_ccci_ring *r, u32 *rd,
 {
 	*rd = readl(r->ctl + RB_RX_READ);
 	*wr = readl(r->ctl + RB_RX_WRITE);
-	/* the modem may leave its write index at the very end, not at 0 */
-	if (r->rx_len && *wr == r->rx_len)
+	if (!r->rx_len || *rd >= r->rx_len || *rd & 7)
+		return -EIO;
+	/* the write index is the modem's: see mtk_ccci_ring_write() */
+	if (*wr == r->rx_len)
 		*wr = 0;
-	if (!r->rx_len || *rd >= r->rx_len || *wr >= r->rx_len ||
-	    (*rd | *wr) & 7) {
-		pr_warn_ratelimited("mtk_ccci: RX queue indexes %#x/%#x of %#x\n",
-				    *rd, *wr, r->rx_len);
+	if (*wr > r->rx_len) {
+		pr_warn_ratelimited("mtk_ccci: RX write index %#x of %#x\n",
+				    *wr, r->rx_len);
 		return -EIO;
 	}
 	return 0;
@@ -309,13 +310,20 @@ int mtk_ccci_ring_write(struct mtk_ccci_ring *ring, const void *data,
 		return -EINVAL;
 	rd = readl(ring->ctl + RB_TX_READ);
 	wr = readl(ring->ctl + RB_TX_WRITE);
-	/* the modem may leave its read index at the very end, not at 0 */
+	/*
+	 * The read index is the modem's: it may stand at the very end
+	 * instead of 0, and while the modem takes a packet it is not on a
+	 * packet boundary. The downstream driver checks neither; only an
+	 * index beyond the ring is not usable, and that one only for now.
+	 */
+	if (wr >= ring->tx_len || wr & 7)
+		return -EIO;
 	if (rd == ring->tx_len)
 		rd = 0;
-	if (rd >= ring->tx_len || wr >= ring->tx_len || (rd | wr) & 7) {
-		pr_warn_ratelimited("mtk_ccci: TX queue indexes %#x/%#x of %#x\n",
-				    rd, wr, ring->tx_len);
-		return -EIO;
+	if (rd > ring->tx_len) {
+		pr_warn_ratelimited("mtk_ccci: TX read index %#x of %#x\n",
+				    rd, ring->tx_len);
+		return -ENOSPC;
 	}
 
 	frame = ALIGN(len + PKT_OVERHEAD, 8);
