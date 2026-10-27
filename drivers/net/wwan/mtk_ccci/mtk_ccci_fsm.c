@@ -633,7 +633,18 @@ static ssize_t mtk_ccci_fsm_write(struct file *file, const char __user *ubuf,
 			ret = -ENOMEM;
 		} else {
 			mtk_ccci_fsm_check(ccci, &c);
-			ret = c.ok ? mtk_ccci_fsm_start(ccci) : -EPERM;
+			if (c.ok) {
+				ret = mtk_ccci_fsm_start(ccci);
+			} else {
+				char *line, *p = c.buf;
+
+				/* say why, not only -EPERM to the writer */
+				while ((line = strsep(&p, "\n")))
+					if (strstarts(line, "[MISS]"))
+						dev_err(ccci->dev, "start: %s\n",
+							line + 7);
+				ret = -EPERM;
+			}
 			kfree(c.buf);
 		}
 	} else if (!strcmp(cmd, "stop")) {
