@@ -3,8 +3,9 @@
  *  mt6878-titan2.c  --  MT6878 ALSA SoC machine driver for the Unihertz Titan 2
  *
  *  MT6369 PMIC codec on ADDA (receiver, headset over USB-C, microphones)
- *  and a FourSemi FS199x amplifier on I2SOUT4 (loudspeaker). The codec
- *  links and the audio routing come from the devicetree. The MTKAIF
+ *  and a FourSemi FS199x amplifier on I2SOUT4 (loudspeaker); PCM 1, the
+ *  voice interface of the modem, for calls. The codec links and the audio
+ *  routing come from the devicetree. The MTKAIF
  *  calibration is the one of the MediaTek downstream MT6878 machine driver, in the form
  *  of the mainline mt8195-mt6359 driver.
  *
@@ -234,6 +235,10 @@ SND_SOC_DAILINK_DEFS(capture1,
 		     DAILINK_COMP_ARRAY(COMP_CPU("UL1")),
 		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
 		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
+SND_SOC_DAILINK_DEFS(hostless_speech,
+		     DAILINK_COMP_ARRAY(COMP_CPU("Hostless Speech DAI")),
+		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
+		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
 /* BE */
 SND_SOC_DAILINK_DEFS(adda,
 		     DAILINK_COMP_ARRAY(COMP_CPU("ADDA")),
@@ -245,6 +250,10 @@ SND_SOC_DAILINK_DEFS(i2sout4,
 		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
 SND_SOC_DAILINK_DEFS(i2sin4,
 		     DAILINK_COMP_ARRAY(COMP_CPU("I2SIN4")),
+		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
+		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
+SND_SOC_DAILINK_DEFS(pcm1,
+		     DAILINK_COMP_ARRAY(COMP_CPU("PCM 1")),
 		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
 		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
@@ -287,6 +296,19 @@ static struct snd_soc_dai_link mt6878_titan2_dai_links[] = {
 		.capture_only = 1,
 		SND_SOC_DAILINK_REG(capture1),
 	},
+	{
+		/*
+		 * Voice call: no data, opening it (both directions) runs the
+		 * modem PCM 1 and the codec/amplifier back ends at its rate.
+		 */
+		.name = "Hostless_Speech",
+		.stream_name = "Voice Call",
+		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
+			    SND_SOC_DPCM_TRIGGER_PRE},
+		.dynamic = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(hostless_speech),
+	},
 	/* Back End DAI links */
 	{
 		.name = "ADDA_BE",
@@ -314,6 +336,13 @@ static struct snd_soc_dai_link mt6878_titan2_dai_links[] = {
 		.ignore_suspend = 1,
 		.be_hw_params_fixup = mt6878_titan2_i2s_fixup,
 		SND_SOC_DAILINK_REG(i2sin4),
+	},
+	{
+		/* in-SoC voice interface of the modem (MD1) */
+		.name = "PCM1_BE",
+		.no_pcm = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(pcm1),
 	},
 };
 
