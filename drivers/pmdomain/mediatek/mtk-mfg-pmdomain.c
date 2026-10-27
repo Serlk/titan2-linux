@@ -160,6 +160,8 @@
  */
 #define GPUFREQ_IPI_TIMEOUT_MS		10000
 #define GPUFREQ_IPI_SLOW_MS		500
+/* how often a power request looks at the EB's power count while it waits */
+#define GPUFREQ_PWR_POLL_MS		10
 
 /* how far the EB power count may be off before its reply is taken as an error */
 #define GPUFREQ_PWR_COUNT_SLACK		4
@@ -545,12 +547,10 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
  *
  * Returns 0 on success, negative errno on failure.
  */
-static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+static int mtk_mfg_ipi_send(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 {
 	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
 	struct device *dev = &mfg->pdev->dev;
-	unsigned long timeout, left;
-	unsigned int ms;
 	int ret;
 
 	BUILD_BUG_ON(sizeof(*msg) > GPUEB_MBOX_MAX_RX_SIZE);
@@ -572,19 +572,45 @@ static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 		return ret;
 	}
 
-	timeout = msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS);
-	left = wait_for_completion_timeout(&gf->rx_done, timeout);
-	if (!left) {
-		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
+	return 0;
+}
+
+/* wait up to @timeout jiffies for the reply to a sent message, copy it into @msg */
+static int mtk_mfg_ipi_wait(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg,
+			    unsigned long timeout)
+{
+	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
+
+	if (!wait_for_completion_timeout(&gf->rx_done, timeout))
 		return -ETIMEDOUT;
+
+	memcpy(msg, gf->rx_data, sizeof(*msg));
+
+	return 0;
+}
+
+static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+{
+	struct device *dev = &mfg->pdev->dev;
+	unsigned long t0 = jiffies;
+	unsigned int ms;
+	int ret;
+
+	ret = mtk_mfg_ipi_send(mfg, msg);
+	if (ret)
+		return ret;
+
+	ret = mtk_mfg_ipi_wait(mfg, msg,
+			       msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS));
+	if (ret) {
+		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
+		return ret;
 	}
 
-	ms = jiffies_to_msecs(timeout - left);
+	ms = jiffies_to_msecs(jiffies - t0);
 	if (ms > GPUFREQ_IPI_SLOW_MS)
 		dev_warn(dev, "GPUFreq IPI command %u took %u ms\n",
 			 le32_to_cpu(msg->cmd), ms);
-
-	memcpy(msg, gf->rx_data, sizeof(*msg));
 
 	return 0;
 }
@@ -652,31 +678,46 @@ static int mtk_mfg_init_shared_mem(struct mtk_mfg *mfg)
  */
 static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
 {
+	struct device *dev = &mfg->pdev->dev;
+	unsigned long end = jiffies + msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS);
 	struct mtk_mfg_ipi_msg msg = {};
-	int before;
+	int before, after;
 	int ret;
 
 	before = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
+	after = before + (on ? 1 : -1);
 
 	msg.cmd = CMD_POWER_CONTROL;
 	msg.u.power_state = on ? 1 : 0;
 
-	ret = __mtk_mfg_send_ipi(mfg, &msg);
-	if (ret == -ETIMEDOUT) {
-		*count = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
-		if (*count != before + (on ? 1 : -1))
-			return ret;
-
-		dev_warn(&mfg->pdev->dev, "EB did switch the GPU %s, count %d\n",
-			 str_on_off(on), *count);
-		return 0;
-	}
+	ret = mtk_mfg_ipi_send(mfg, &msg);
 	if (ret)
 		return ret;
 
-	*count = msg.u.return_value;
+	/*
+	 * Now and then the EB switches the GPU but never replies. Everything
+	 * waiting for the GPU would stall for the whole timeout; its power
+	 * count tells that the request is done, so stop waiting then.
+	 */
+	do {
+		ret = mtk_mfg_ipi_wait(mfg, &msg,
+				       msecs_to_jiffies(GPUFREQ_PWR_POLL_MS));
+		if (!ret) {
+			*count = msg.u.return_value;
+			return 0;
+		}
+		*count = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
+		if (*count == after) {
+			dev_dbg(dev, "EB switched the GPU %s without a reply, count %d\n",
+				str_on_off(on), *count);
+			return 0;
+		}
+	} while (time_before(jiffies, end));
 
-	return 0;
+	dev_err(dev, "No reply to GPUFreq IPI command %u, count %d\n",
+		le32_to_cpu(msg.cmd), *count);
+
+	return -ETIMEDOUT;
 }
 
 static int mtk_mfg_power_control(struct mtk_mfg *mfg, bool enabled)
