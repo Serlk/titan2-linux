@@ -1589,11 +1589,16 @@ static void mt7921_mgd_prepare_tx(struct ieee80211_hw *hw,
 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
 	u16 duration = info->duration ? info->duration :
 		       jiffies_to_msecs(HZ);
+	int err;
 
 	mt792x_mutex_acquire(dev);
-	mt7921_set_roc(mvif->phy, mvif, mvif->bss_conf.mt76.ctx->def.chan, duration,
-		       MT7921_ROC_REQ_JOIN);
+	err = mt7921_set_roc(mvif->phy, mvif, mvif->bss_conf.mt76.ctx->def.chan,
+			     duration, MT7921_ROC_REQ_JOIN);
 	mt792x_mutex_release(dev);
+	/* without the channel the frames to the AP go nowhere */
+	if (err)
+		dev_dbg(dev->mt76.dev, "no channel for the join (%u ms): %d\n",
+			duration, err);
 }
 
 static void mt7921_mgd_complete_tx(struct ieee80211_hw *hw,

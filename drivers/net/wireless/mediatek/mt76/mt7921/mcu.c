@@ -325,6 +325,9 @@ mt7921_mcu_legacy_roc_event(struct mt792x_dev *dev, struct sk_buff *skb)
 		return;
 	}
 
+	dev_dbg(dev->mt76.dev, "channel %u granted, type %u, token %u, %u ms\n",
+		grant->primary_ch, grant->req_type, grant->token,
+		le32_to_cpu(grant->grant_interval));
 	if (grant->req_type == MT7921_ROC_REQ_ROC)
 		ieee80211_ready_on_channel(dev->mt76.phy.hw);
 
