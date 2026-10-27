@@ -37,8 +37,35 @@
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 
+/*
+ * As drm_atomic_helper_commit_tail_rpm(), but wait for the page flips
+ * instead of the next vblank: the CRTC completes a flip once the hardware
+ * has taken the new configuration. A command mode CRTC counts vblanks with
+ * a timer, so a vblank does not mean that the frame which still reads the
+ * old buffers has ended.
+ */
+static void mtk_drm_atomic_commit_tail(struct drm_atomic_commit *state)
+{
+	struct drm_device *dev = state->dev;
+
+	drm_atomic_helper_commit_modeset_disables(dev, state);
+
+	drm_atomic_helper_commit_modeset_enables(dev, state);
+
+	drm_atomic_helper_commit_planes(dev, state,
+					DRM_PLANE_COMMIT_ACTIVE_ONLY);
+
+	drm_atomic_helper_fake_vblank(state);
+
+	drm_atomic_helper_commit_hw_done(state);
+
+	drm_atomic_helper_wait_for_flip_done(dev, state);
+
+	drm_atomic_helper_cleanup_planes(dev, state);
+}
+
 static const struct drm_mode_config_helper_funcs mtk_drm_mode_config_helpers = {
-	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
+	.atomic_commit_tail = mtk_drm_atomic_commit_tail,
 };
 
 static struct drm_framebuffer *
