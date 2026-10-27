@@ -24,6 +24,7 @@
 #include <linux/pm_opp.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/string_choices.h>
 #include <linux/units.h>
 
 #define GPR_LP_STATE		0x0028
@@ -159,6 +160,9 @@
  */
 #define GPUFREQ_IPI_TIMEOUT_MS		10000
 #define GPUFREQ_IPI_SLOW_MS		500
+
+/* how far the EB power count may be off before its reply is taken as an error */
+#define GPUFREQ_PWR_COUNT_SLACK		4
 
 /*
  * This enum is part of the ABI of the GPUEB firmware. Don't change the
@@ -633,22 +637,100 @@ static int mtk_mfg_init_shared_mem(struct mtk_mfg *mfg)
 	return 0;
 }
 
+/**
+ * mtk_mfg_power_request - send one GPU power request to the EB
+ * @mfg: pointer to this driver instance's private &struct mtk_mfg
+ * @on: whether to ask for the GPU to be on or off
+ * @count: where to store the EB's power count after the request
+ *
+ * The EB counts power requests, and replies with the new count, or with a
+ * negative errno if switching failed. It also keeps the count in the shared
+ * status, once it is done: when the reply doesn't come, that tells whether
+ * the EB carried out the request regardless.
+ *
+ * Returns 0 if the EB took the request, negative errno otherwise.
+ */
+static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
+{
+	struct mtk_mfg_ipi_msg msg = {};
+	int before;
+	int ret;
+
+	before = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
+
+	msg.cmd = CMD_POWER_CONTROL;
+	msg.u.power_state = on ? 1 : 0;
+
+	ret = __mtk_mfg_send_ipi(mfg, &msg);
+	if (ret == -ETIMEDOUT) {
+		*count = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
+		if (*count != before + (on ? 1 : -1))
+			return ret;
+
+		dev_warn(&mfg->pdev->dev, "EB did switch the GPU %s, count %d\n",
+			 str_on_off(on), *count);
+		return 0;
+	}
+	if (ret)
+		return ret;
+
+	*count = msg.u.return_value;
+
+	return 0;
+}
+
 static int mtk_mfg_power_control(struct mtk_mfg *mfg, bool enabled)
 {
 	const struct mtk_mfg_gf_layout *l = mfg->variant->layout;
+	struct device *dev = &mfg->pdev->dev;
 	struct mtk_mfg_ipi_msg msg = {};
+	int want = enabled ? 1 : 0;
+	bool on = enabled;
+	int count, i, ret;
+
+	/* the shared status isn't there yet: just send the request */
+	if (!mfg->gf_ready) {
+		msg.cmd = CMD_POWER_CONTROL;
+		msg.u.power_state = enabled ? 1 : 0;
+
+		return mtk_mfg_send_ipi(mfg, &msg);
+	}
 
 	/*
 	 * The EB says in the shared status whether it switches the GPU on
 	 * request. If it doesn't, it keeps the GPU powered by itself.
 	 */
-	if (l->pwr_ctl && mfg->gf_ready && !readl(mfg->shared_mem + l->pwr_ctl))
+	if (l->pwr_ctl && !readl(mfg->shared_mem + l->pwr_ctl))
 		return 0;
 
-	msg.cmd = CMD_POWER_CONTROL;
-	msg.u.power_state = enabled ? 1 : 0;
+	/*
+	 * The EB switches the GPU only when its power count goes from 0 to 1
+	 * or from 1 to 0, as downstream's __gpufreq_power_control() does, so
+	 * the count must follow the domain: 1 when on, 0 when off. A request
+	 * whose reply was missed leaves the count one off. Every request after
+	 * it then misses the switch, and the GPU stays in the wrong state for
+	 * good while the domain flips. Step the count back to where it belongs
+	 * instead; the steps in between don't touch the hardware.
+	 */
+	for (i = 0; i <= GPUFREQ_PWR_COUNT_SLACK; i++) {
+		ret = mtk_mfg_power_request(mfg, on, &count);
+		if (ret)
+			return ret;
 
-	return mtk_mfg_send_ipi(mfg, &msg);
+		if (count == want)
+			return 0;
+
+		if (abs(count - want) > GPUFREQ_PWR_COUNT_SLACK) {
+			dev_err(dev, "IPI return: %d\n", count);
+			return -EPROTO;
+		}
+
+		dev_warn(dev, "EB GPU power count is %d, not %d, correcting\n",
+			 count, want);
+		on = count < want;
+	}
+
+	return -EPROTO;
 }
 
 static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, unsigned int opp_idx)
