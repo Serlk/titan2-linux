@@ -810,6 +810,26 @@ out:
 }
 
 /*
+ * mt76_set_irq_mask() writes the interrupt enable mask through the mapping
+ * directly, at the PCIe BAR offset, where nothing is on this bus. Every
+ * change of the mask (mt76_connac_irq_enable(), the NAPI and tx done
+ * paths) ends up in this tasklet: write the mask through the bus ops.
+ */
+static void mt7921_soc_irq_tasklet(unsigned long data)
+{
+	struct mt792x_dev *dev = (struct mt792x_dev *)data;
+	unsigned long flags;
+
+	mt792x_irq_tasklet(data);
+
+	spin_lock_irqsave(&dev->mt76.mmio.irq_lock, flags);
+	if (READ_ONCE(to_soc(dev)->wfsys_on))
+		mt76_wr(dev, dev->irq_map->host_irq_enable,
+			dev->mt76.mmio.irqmask);
+	spin_unlock_irqrestore(&dev->mt76.mmio.irq_lock, flags);
+}
+
+/*
  * WF2AP software interrupt (CCIF4): the firmware asks for a subsystem or
  * whole chip reset (after an assert), or announces new log data in EMI.
  */
@@ -1147,7 +1167,7 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	dev->irq_map = &irq_map;
 	dev->soc_axi = true;
 	mt76_mmio_init(&dev->mt76, regs);
-	tasklet_init(&mdev->irq_tasklet, mt792x_irq_tasklet, (unsigned long)dev);
+	tasklet_init(&mdev->irq_tasklet, mt7921_soc_irq_tasklet, (unsigned long)dev);
 
 	dev->phy.dev = dev;
 	dev->phy.mt76 = &dev->mt76.phy;
