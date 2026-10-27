@@ -375,6 +375,7 @@
 			mediatek,ccif-reset-bit = <26>;
 			mediatek,scpsys = <&scpsys>;
 			mediatek,topckgen = <&topckgen>;
+			mediatek,dpmaif = <&dpmaif>;
 			status = "disabled";
 		};
 
@@ -440,6 +441,23 @@
 			#clock-cells = <1>;
 
 			mediatek,hardware-voter = <&hwv>;
+		};
+
+		/* modem data path, driven by the modem driver through &modem */
+		dpmaif: dpmaif@10014000 {
+			compatible = "mediatek,mt6878-dpmaif";
+			reg = <0x10014000 0x1000>,
+			      <0x1022d000 0x1000>,
+			      <0x1022c000 0x1000>,
+			      <0x1022e000 0x1000>;
+			reg-names = "ao", "pd", "md-misc", "sram";
+			interrupts = <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&infracfg_ao CLK_IFRAO_DPMAIF_MAIN>,
+				 <&infracfg_ao CLK_IFRAO_CLDMA_BCLK>,
+				 <&infracfg_ao CLK_IFRAO_RG_MMW_DPMAIF26M>;
+			clock-names = "main", "blk", "26m";
+			mediatek,infracfg-ao = <&infracfg_ao>;
 		};
 
 		nemicfg_ao: syscon@10270000 {
