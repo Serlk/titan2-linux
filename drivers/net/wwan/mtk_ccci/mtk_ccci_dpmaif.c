@@ -27,6 +27,14 @@
  * been read, so the hardware never writes into a buffer the AP owns, and
  * all buffers are freed only after the block is reset.
  *
+ * Transmit follows the downstream driver and t7xx_hif_dpmaif_tx.c: a
+ * packet is a message DRB (CCMNI channel, length) and one payload DRB
+ * (the links do not do scatter-gather), on TX queue 0, or on queue 1 for
+ * a TCP segment that only acknowledges, as the downstream CCMNI does. The
+ * hardware read index tells which packets it took; they are released
+ * from a BH work item on the TX done interrupt, and the links are woken
+ * when a full queue drains.
+ *
  * Nothing here runs unless the module parameter data=1.
  *
  * Copyright (C) 2016 MediaTek Inc.
@@ -43,6 +51,8 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -55,6 +65,9 @@
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
+#include <linux/tcp.h>
+#include <linux/workqueue.h>
+#include <net/ip.h>
 
 #include "mtk_ccci.h"
 
@@ -84,7 +97,13 @@ MODULE_PARM_DESC(data,
 #define DPMAIF_CHK_PIT_NUM	(DPMAIF_CHK_BAT_NUM * 2)
 #define DPMAIF_CHK_RB_PIT_NUM	64
 
+/* UL: TCP ACKs on their own queue, as the downstream CCMNI does */
+#define DPMAIF_TXQ_DATA		0
+#define DPMAIF_TXQ_ACK		1
+#define DPMAIF_TX_DRBS		2	/* message + payload */
+
 /* register poll limits; the downstream driver spins forever */
+#define DPMAIF_UL_POLL_US	1000
 #define DPMAIF_POLL_US		10000
 #define DPMAIF_IDLE_POLL_US	100000
 
@@ -93,6 +112,8 @@ MODULE_PARM_DESC(data,
  * SRAM copies of the AO settings: DL +0xc00, UL +0xd00, misc +0xe00.
  */
 #define PD_UL_DBG_STA2		0x088
+#define PD_UL_ADD_DESC_CH(q)	(0x0b0 + 4 * (q))	/* DRB words added */
+#define  UL_ADD_UPDATE		BIT(31)	/* reads 1 while the update runs */
 #define  UL_DBG_IDLE		BIT(11)
 #define PD_DL_BAT_INIT		0x100
 #define PD_DL_BAT_ADD		0x104	/* buffers lent, BIT(16): fragment */
@@ -160,7 +181,8 @@ MODULE_PARM_DESC(data,
 #define PD_UL_CHNL_CON1(q)	(0xd14 + 0x10 * (q))
 #define  DRB_CON1_SIZE		GENMASK(15, 0)	/* in 32-bit words */
 #define  DRB_CON1_ADDR_HI	GENMASK(31, 24)
-#define PD_UL_CH_STA(q)		(0xde0 + 4 * (q))	/* 31:16 read index */
+#define PD_UL_CH_STA(q)		(0xde0 + 4 * (q))
+#define  UL_STA_RD_IDX		GENMASK(31, 16)	/* in 32-bit words */
 #define PD_MISC_REMAP(i)	(0xe0c + 4 * (i))	/* 8 registers, 3 windows each */
 
 /* "ao" window (0x10014000): AO UL +0x000, AO DL +0x400 */
@@ -270,6 +292,25 @@ struct dpmaif_drb {
 	__le32 w[2];
 };
 
+/* the packet behind a payload DRB */
+struct dpmaif_drb_skb {
+	struct sk_buff *skb;
+	dma_addr_t dma;
+	u32 len;
+};
+
+struct dpmaif_txq {
+	spinlock_t lock;		/* the indexes, on, the DRB ring */
+	bool on;			/* takes packets */
+	struct dpmaif_drb_skb *skbs;	/* by DRB slot */
+	u32 wr;				/* next DRB to fill */
+	u32 rel;			/* next DRB to release */
+	unsigned long pkts;
+	unsigned long full;
+	unsigned long add_err;
+	unsigned long rd_err;
+};
+
 struct dpmaif_ring {
 	void *base;
 	dma_addr_t dma;
@@ -313,6 +354,11 @@ struct mtk_ccci_dpmaif {
 	bool rx_drop;
 	bool rx_csum_ok;
 	u8 rx_ch;
+
+	/* UL */
+	struct dpmaif_txq txq[DPMAIF_TXQ_NUM];
+	struct work_struct tx_work;
+	atomic_t tx_pending;		/* TX queues with done interrupts */
 
 	/* DL counters: per CCMNI channel, and what was dropped */
 	unsigned long dl_pkts[MTK_CCCI_NET_LINKS];
@@ -915,6 +961,124 @@ static int dpmaif_napi_poll(struct napi_struct *napi, int budget)
 	return done;
 }
 
+static u32 dpmaif_txq_used(struct mtk_ccci_dpmaif *dp, unsigned int q)
+{
+	u32 cnt = dp->drb[q].cnt;
+
+	return (dp->txq[q].wr + cnt - dp->txq[q].rel) % cnt;
+}
+
+static u32 dpmaif_txq_free(struct mtk_ccci_dpmaif *dp, unsigned int q)
+{
+	return dp->drb[q].cnt - 1 - dpmaif_txq_used(dp, q);
+}
+
+static void dpmaif_tx_enable(struct mtk_ccci_dpmaif *dp, bool on)
+{
+	unsigned int q;
+
+	for (q = 0; q < DPMAIF_TXQ_NUM; q++) {
+		spin_lock_bh(&dp->txq[q].lock);
+		dp->txq[q].on = on;
+		spin_unlock_bh(&dp->txq[q].lock);
+	}
+}
+
+/* wake the links once a queue has room again */
+static void dpmaif_tx_wake(struct mtk_ccci_dpmaif *dp)
+{
+	unsigned int i;
+
+	rcu_read_lock();
+	for (i = 0; i < MTK_CCCI_NET_LINKS; i++) {
+		struct net_device *ndev = rcu_dereference(dp->ccci->net_link[i]);
+
+		if (ndev && netif_running(ndev) && netif_queue_stopped(ndev))
+			netif_wake_queue(ndev);
+	}
+	rcu_read_unlock();
+}
+
+/* release what the hardware has read of TX queue @q */
+static bool dpmaif_tx_release(struct mtk_ccci_dpmaif *dp, unsigned int q)
+{
+	struct dpmaif_txq *txq = &dp->txq[q];
+	u32 cnt = dp->drb[q].cnt, hw_rd;
+	bool freed = false;
+
+	hw_rd = FIELD_GET(UL_STA_RD_IDX, readl(dp->pd + PD_UL_CH_STA(q))) /
+		(sizeof(struct dpmaif_drb) / 4);
+
+	spin_lock_bh(&txq->lock);
+	/* never past what was handed over */
+	if (hw_rd >= cnt ||
+	    (hw_rd + cnt - txq->rel) % cnt > dpmaif_txq_used(dp, q)) {
+		txq->rd_err++;
+		goto out;
+	}
+	while (txq->rel != hw_rd) {
+		struct dpmaif_drb_skb *e = &txq->skbs[txq->rel];
+
+		if (e->skb) {
+			dma_unmap_single(dp->dev, e->dma, e->len,
+					 DMA_TO_DEVICE);
+			dev_consume_skb_any(e->skb);
+			e->skb = NULL;
+			freed = true;
+		}
+		txq->rel = (txq->rel + 1) % cnt;
+	}
+out:
+	spin_unlock_bh(&txq->lock);
+	return freed;
+}
+
+static void dpmaif_tx_done_work(struct work_struct *work)
+{
+	struct mtk_ccci_dpmaif *dp = container_of(work, struct mtk_ccci_dpmaif,
+						  tx_work);
+	unsigned long pending = atomic_xchg(&dp->tx_pending, 0);
+	bool freed = false;
+	unsigned int q;
+
+	for_each_set_bit(q, &pending, DPMAIF_TXQ_NUM) {
+		freed |= dpmaif_tx_release(dp, q);
+		/* masked by the interrupt handler */
+		writel(BIT(q), dp->ao + AO_UL_AP_L2TIMCR0);
+	}
+	if (freed)
+		dpmaif_tx_wake(dp);
+}
+
+/* only with the block reset: the hardware reads no DRB any more */
+static void dpmaif_tx_free(struct mtk_ccci_dpmaif *dp)
+{
+	unsigned int q;
+	u32 i;
+
+	for (q = 0; q < DPMAIF_TXQ_NUM; q++) {
+		struct dpmaif_txq *txq = &dp->txq[q];
+
+		spin_lock_bh(&txq->lock);
+		for (i = 0; i < dp->drb[q].cnt; i++) {
+			struct dpmaif_drb_skb *e = &txq->skbs[i];
+
+			if (!e->skb)
+				continue;
+			dma_unmap_single(dp->dev, e->dma, e->len,
+					 DMA_TO_DEVICE);
+			dev_kfree_skb_any(e->skb);
+			e->skb = NULL;
+		}
+		txq->wr = 0;
+		txq->rel = 0;
+		memset(dp->drb[q].base, 0,
+		       dp->drb[q].cnt * sizeof(struct dpmaif_drb));
+		spin_unlock_bh(&txq->lock);
+	}
+	atomic_set(&dp->tx_pending, 0);
+}
+
 /* stop UL arbitration and DL, wait for both to go idle */
 static void dpmaif_hw_quiesce(struct mtk_ccci_dpmaif *dp)
 {
@@ -973,10 +1137,10 @@ static u32 dpmaif_dl_mask_to_sta(u32 mask)
 static irqreturn_t dpmaif_irq(int irq, void *data)
 {
 	struct mtk_ccci_dpmaif *dp = data;
-	u32 ul, dl;
+	u32 ul, ul_mask, dl, mask;
 
-	ul = readl(dp->pd + PD_AP_UL_L2TISAR0) &
-	     ~readl(dp->ao + AO_UL_AP_L2TIMR0);
+	ul_mask = readl(dp->ao + AO_UL_AP_L2TIMR0);
+	ul = readl(dp->pd + PD_AP_UL_L2TISAR0) & ~ul_mask;
 	dl = readl(dp->pd + PD_AP_DL_L2TISAR0) &
 	     ~dpmaif_dl_mask_to_sta(readl(dp->ao + AO_UL_APDL_L2TIMR0));
 	dpmaif_clear_ip_busy(dp);
@@ -987,15 +1151,28 @@ static irqreturn_t dpmaif_irq(int irq, void *data)
 	if (ul) {
 		dp->last_ul_sta = ul;
 		writel(ul, dp->pd + PD_AP_UL_L2TISAR0);
-		if (ul & UL_INT_QDONE)
-			dp->ul_done++;
 		if (ul & UL_INT_LEN_ERR)
 			dp->ul_len_err++;
-		/* the modem sleeps: the downstream driver masks it too */
 		if (ul & UL_INT_PWR_NOTRDY)
 			dp->ul_pwr_notrdy++;
-		writel(ul & (UL_INT_QDONE | UL_INT_PWR_NOTRDY),
-		       dp->ao + AO_UL_AP_L2TIMSR0);
+		if (ul & UL_INT_QDONE) {
+			dp->ul_done++;
+			/*
+			 * Masked before the work is queued: the work unmasks
+			 * it again and may run at once on another CPU.
+			 */
+			mask = ul & UL_INT_QDONE;
+			writel(mask, dp->ao + AO_UL_AP_L2TIMSR0);
+			atomic_or(mask, &dp->tx_pending);
+			queue_work(system_bh_wq, &dp->tx_work);
+			/* the modem is awake again (downstream does this too) */
+			if (ul_mask & UL_INT_PWR_NOTRDY)
+				writel(UL_INT_PWR_NOTRDY,
+				       dp->ao + AO_UL_AP_L2TIMCR0);
+		} else if (ul & UL_INT_PWR_NOTRDY) {
+			/* the modem sleeps: masked until the next TX done */
+			writel(UL_INT_PWR_NOTRDY, dp->ao + AO_UL_AP_L2TIMSR0);
+		}
 	}
 	if (dl) {
 		dp->last_dl_sta = dl;
@@ -1062,6 +1239,7 @@ int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci)
 	dpmaif_clear_ip_busy(dp);
 	napi_enable(&dp->napi);
 	enable_irq(dp->irq);
+	dpmaif_tx_enable(dp, true);
 	dp->started = true;
 	dev_info(ccci->dev, "DPMAIF up (coda %#x), %u+%u buffers lent\n",
 		 readl(dp->pd + PD_AP_CODA_VER), dp->bat_lent, dp->frg_lent);
@@ -1088,8 +1266,10 @@ void mtk_ccci_dpmaif_pre_stop(struct mtk_ccci *ccci)
 	if (!dp)
 		return;
 	mutex_lock(&dp->lock);
-	if (dp->started)
+	if (dp->started) {
+		dpmaif_tx_enable(dp, false);
 		dpmaif_hw_quiesce(dp);
+	}
 	mutex_unlock(&dp->lock);
 }
 
@@ -1105,13 +1285,16 @@ void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci)
 		return;
 	mutex_lock(&dp->lock);
 	if (dp->started) {
+		dpmaif_tx_enable(dp, false);
 		disable_irq(dp->irq);
 		napi_disable(&dp->napi);
+		cancel_work_sync(&dp->tx_work);
 		dpmaif_hw_quiesce(dp);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(dp->clks), dp->clks);
 		dpmaif_hw_reset(dp);
 		/* the block is reset: the buffers are the AP's again */
 		dpmaif_dl_free(dp);
+		dpmaif_tx_free(dp);
 		dp->started = false;
 		dev_info(ccci->dev, "DPMAIF down\n");
 	}
@@ -1285,6 +1468,17 @@ int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci)
 		ret = -ENOMEM;
 		goto out;
 	}
+	for (i = 0; i < DPMAIF_TXQ_NUM; i++) {
+		spin_lock_init(&dp->txq[i].lock);
+		dp->txq[i].skbs = devm_kcalloc(dev, DPMAIF_DRB_CNT,
+					       sizeof(*dp->txq[i].skbs),
+					       GFP_KERNEL);
+		if (!dp->txq[i].skbs) {
+			ret = -ENOMEM;
+			goto out;
+		}
+	}
+	INIT_WORK(&dp->tx_work, dpmaif_tx_done_work);
 	ret = dpmaif_napi_init(dp);
 	if (ret)
 		goto out;
@@ -1397,6 +1591,11 @@ static int mtk_ccci_dpmaif_show(struct seq_file *s, void *unused)
 		   dp->frg_wr, dp->frg_lent, dp->dl_dropped, dp->dl_err,
 		   dp->pit_seq_err, dp->bat_nomem, dp->dl_bad_ch,
 		   dp->dl_last_bad_ch);
+	for (i = 0; i < DPMAIF_TXQ_NUM; i++)
+		seq_printf(s, "ul q%u: wr %u rel %u, %lu packets, full %lu, add-err %lu rd-err %lu\n",
+			   i, dp->txq[i].wr, dp->txq[i].rel, dp->txq[i].pkts,
+			   dp->txq[i].full, dp->txq[i].add_err,
+			   dp->txq[i].rd_err);
 	/* the channel a PDN uses shows here, link or not */
 	for (i = 0; i < MTK_CCCI_NET_LINKS; i++)
 		if (dp->dl_pkts[i])
@@ -1424,6 +1623,61 @@ void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci)
 				    ccci->dpmaif, &mtk_ccci_dpmaif_fops);
 }
 
+/* a TCP segment that only acknowledges: downstream sends those on queue 1 */
+static bool dpmaif_tx_is_ack(const struct sk_buff *skb)
+{
+	const struct tcphdr *th;
+	unsigned int l3, total;
+
+	switch (skb->data[0] >> 4) {
+	case 4: {
+		const struct iphdr *iph = (const struct iphdr *)skb->data;
+
+		if (skb->len < sizeof(*iph) || iph->ihl < 5 ||
+		    iph->protocol != IPPROTO_TCP ||
+		    (iph->frag_off & htons(IP_MF | IP_OFFSET)))
+			return false;
+		l3 = iph->ihl * 4;
+		total = ntohs(iph->tot_len);
+		break;
+	}
+	case 6: {
+		const struct ipv6hdr *ip6h = (const struct ipv6hdr *)skb->data;
+
+		if (skb->len < sizeof(*ip6h) || ip6h->nexthdr != IPPROTO_TCP)
+			return false;
+		l3 = sizeof(*ip6h);
+		total = l3 + ntohs(ip6h->payload_len);
+		break;
+	}
+	default:
+		return false;
+	}
+	if (skb->len < l3 + sizeof(*th))
+		return false;
+	th = (const struct tcphdr *)(skb->data + l3);
+	return th->ack && !th->syn && !th->fin && !th->rst &&
+	       total == l3 + th->doff * 4;
+}
+
+/* tell the hardware about @words more DRB words of TX queue @q */
+static int dpmaif_ul_add(struct mtk_ccci_dpmaif *dp, unsigned int q,
+			 u32 words)
+{
+	void __iomem *reg = dp->pd + PD_UL_ADD_DESC_CH(q);
+	u32 v;
+
+	if (readl_poll_timeout_atomic(reg, v, !(v & UL_ADD_UPDATE), 1,
+				      DPMAIF_UL_POLL_US))
+		return -ETIMEDOUT;
+	writel(UL_ADD_UPDATE | words, reg);
+	/* taken or not, the DRBs are the hardware's now */
+	if (readl_poll_timeout_atomic(reg, v, !(v & UL_ADD_UPDATE), 1,
+				      DPMAIF_UL_POLL_US))
+		dev_err_ratelimited(dp->dev, "DPMAIF UL q%u add slow\n", q);
+	return 0;
+}
+
 /**
  * mtk_ccci_dpmaif_xmit() - send an IP packet to the modem
  * @ccci: driver state
@@ -1431,14 +1685,82 @@ void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci)
  * @skb: the packet, raw IP
  * @ch: CCMNI index of the link
  *
- * TODO: the UL path; drops.
- *
- * Return: NETDEV_TX_OK.
+ * Return: NETDEV_TX_OK, or NETDEV_TX_BUSY with @dev stopped when the TX
+ * queue is full.
  */
 netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
 				 struct sk_buff *skb, unsigned int ch)
 {
-	dev->stats.tx_dropped++;
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+	struct dpmaif_drb_skb *e;
+	struct dpmaif_txq *txq;
+	struct dpmaif_drb *drb;
+	unsigned int q, len;
+	dma_addr_t dma;
+	u32 i, j, cnt;
+
+	if (!dp || skb_linearize(skb) || skb->len > FIELD_MAX(DRB0_DATA_LEN))
+		goto drop;
+	len = skb->len;
+	q = dpmaif_tx_is_ack(skb) ? DPMAIF_TXQ_ACK : DPMAIF_TXQ_DATA;
+	txq = &dp->txq[q];
+	drb = dp->drb[q].base;
+	cnt = dp->drb[q].cnt;
+
+	spin_lock_bh(&txq->lock);
+	if (!txq->on) {
+		spin_unlock_bh(&txq->lock);
+		goto drop;
+	}
+	if (dpmaif_txq_free(dp, q) < DPMAIF_TX_DRBS) {
+		/* woken by the TX done work; a full queue has packets out */
+		netif_stop_queue(dev);
+		txq->full++;
+		spin_unlock_bh(&txq->lock);
+		return NETDEV_TX_BUSY;
+	}
+	dma = dma_map_single(dp->dev, skb->data, len, DMA_TO_DEVICE);
+	if (dma_mapping_error(dp->dev, dma)) {
+		spin_unlock_bh(&txq->lock);
+		goto drop;
+	}
+
+	i = txq->wr;
+	j = (i + 1) % cnt;
+	drb[i].w[0] = cpu_to_le32(FIELD_PREP(DRB0_TYPE, 1) | DRB0_CONT |
+				  FIELD_PREP(DRB0_DATA_LEN, len));
+	drb[i].w[1] = cpu_to_le32(FIELD_PREP(DRB1_CHANNEL_ID, ch));
+	drb[j].w[0] = cpu_to_le32(FIELD_PREP(DRB0_TYPE, 0) |
+				  FIELD_PREP(DRB0_ADDR_EXT,
+					     upper_32_bits(dma) & 0xff) |
+				  FIELD_PREP(DRB0_DATA_LEN, len));
+	drb[j].w[1] = cpu_to_le32(lower_32_bits(dma));
+	e = &txq->skbs[j];
+	e->skb = skb;
+	e->dma = dma;
+	e->len = len;
+
+	/* writel() orders the DRB writes before the register */
+	if (dpmaif_ul_add(dp, q, DPMAIF_TX_DRBS *
+			  sizeof(struct dpmaif_drb) / 4)) {
+		e->skb = NULL;
+		dma_unmap_single(dp->dev, dma, len, DMA_TO_DEVICE);
+		txq->add_err++;
+		spin_unlock_bh(&txq->lock);
+		goto drop;
+	}
+	txq->wr = (j + 1) % cnt;
+	txq->pkts++;
+	if (dpmaif_txq_free(dp, q) < DPMAIF_TX_DRBS) {
+		netif_stop_queue(dev);
+		txq->full++;
+	}
+	spin_unlock_bh(&txq->lock);
+	dev_sw_netstats_tx_add(dev, 1, len);
+	return NETDEV_TX_OK;
+
+drop:
+	dev_core_stats_tx_dropped_inc(dev);
 	dev_kfree_skb_any(skb);
 	return NETDEV_TX_OK;
 }
