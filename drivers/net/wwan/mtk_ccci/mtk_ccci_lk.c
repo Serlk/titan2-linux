@@ -143,10 +143,20 @@ mtk_ccci_lk_smem_table(struct mtk_ccci *ccci, const char *name,
 	return tbl;
 }
 
+static bool mtk_ccci_lk_smem_is(const struct mtk_ccci_smem_region *r,
+				enum mtk_ccci_smem_id id)
+{
+	return le32_to_cpu(r->id) == id && le32_to_cpu(r->size) &&
+	       !(le32_to_cpu(r->flags) & MTK_CCCI_SMEM_F_PADDING);
+}
+
 /**
  * mtk_ccci_lk_smem() - look up a shared memory region by SMEM user
  * @ccci: driver state
  * @id: SMEM user
+ *
+ * LK pads a region to its alignment with an entry carrying the same id and
+ * the padding flag (DRDI: 0x800 bytes before its 64 KiB); those are skipped.
  *
  * Return: the region from the non-cached or the cached table (both checked
  * to lie inside their carveouts), or NULL if LK did not set it up.
@@ -158,12 +168,10 @@ mtk_ccci_lk_smem(const struct mtk_ccci *ccci, enum mtk_ccci_smem_id id)
 	unsigned int i;
 
 	for (i = 0; i < lk->nc_smem_num; i++)
-		if (le32_to_cpu(lk->nc_smem[i].id) == id &&
-		    le32_to_cpu(lk->nc_smem[i].size))
+		if (mtk_ccci_lk_smem_is(&lk->nc_smem[i], id))
 			return &lk->nc_smem[i];
 	for (i = 0; i < lk->c_smem_num; i++)
-		if (le32_to_cpu(lk->c_smem[i].id) == id &&
-		    le32_to_cpu(lk->c_smem[i].size))
+		if (mtk_ccci_lk_smem_is(&lk->c_smem[i], id))
 			return &lk->c_smem[i];
 
 	return NULL;
