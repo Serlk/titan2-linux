@@ -841,6 +841,13 @@ static irqreturn_t mt7921_soc_sw_irq(int irq, void *data)
 
 static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 {
+	/*
+	 * mt76 accesses the ring registers through the mapping directly, not
+	 * through the bus ops: give it their offsets in the AXI window (the
+	 * WFDMA is at +0x24000 here, at +0xd4000 in the PCIe BAR).
+	 */
+	u32 tx_base = mt7921_soc_reg_addr(dev, MT_TX_RING_BASE);
+	u32 rx_base = mt7921_soc_reg_addr(dev, MT_RX_EVENT_RING_BASE);
 	int ret;
 
 	mt76_dma_attach(&dev->mt76);
@@ -852,7 +859,7 @@ static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 	/* tx data, band 0 */
 	ret = mt76_connac_init_tx_queues(dev->phy.mt76, MT7921_TXQ_BAND0,
 					 MT7921_TX_RING_SIZE,
-					 MT_TX_RING_BASE, NULL, 0);
+					 tx_base, NULL, 0);
 	if (ret)
 		return ret;
 
@@ -860,13 +867,13 @@ static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 
 	/* command to WM */
 	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_WM, MT7921_SOC_TXQ_MCU_WM,
-				  MT7921_TX_MCU_RING_SIZE, MT_TX_RING_BASE);
+				  MT7921_TX_MCU_RING_SIZE, tx_base);
 	if (ret)
 		return ret;
 
 	/* firmware download ring: unused, the boot loader loaded the firmware */
 	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_FWDL, MT7921_SOC_TXQ_FWDL,
-				  MT7921_TX_FWDL_RING_SIZE, MT_TX_RING_BASE);
+				  MT7921_TX_FWDL_RING_SIZE, tx_base);
 	if (ret)
 		return ret;
 
@@ -874,7 +881,7 @@ static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
 			       MT7921_SOC_RXQ_EVENT,
 			       MT7921_SOC_RX_EVENT_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
+			       MT_RX_BUF_SIZE, rx_base);
 	if (ret)
 		return ret;
 
@@ -882,14 +889,14 @@ static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
 			       MT7921_SOC_RXQ_TXDONE1,
 			       MT7921_RX_MCU_WA_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
+			       MT_RX_BUF_SIZE, rx_base);
 	if (ret)
 		return ret;
 
 	/* rx data, band 0 */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN],
 			       MT7921_SOC_RXQ_DATA, MT7921_RX_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
+			       MT_RX_BUF_SIZE, rx_base);
 	if (ret)
 		return ret;
 
