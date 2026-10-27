@@ -368,8 +368,40 @@ static int mtk_ccci_lk_layout_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(mtk_ccci_lk_layout);
 
+/* the CCB control area: per buffer the DL and UL headers both sides keep */
+static int mtk_ccci_ccb_ctrl_show(struct seq_file *s, void *unused)
+{
+	const struct mtk_ccci *ccci = s->private;
+	const struct mtk_ccci_smem_region *r;
+	u32 size, off, w[8];
+	void __iomem *p;
+	unsigned int i;
+
+	r = mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_CCB_CTRL);
+	if (!r)
+		return -ENODEV;
+	size = le32_to_cpu(r->size) & ~(sizeof(w) - 1);
+	p = ioremap_wc(le64_to_cpu(r->ap_phys), size);
+	if (!p)
+		return -ENOMEM;
+	for (off = 0; off < size; off += sizeof(w)) {
+		for (i = 0; i < ARRAY_SIZE(w); i++)
+			w[i] = readl(p + off + 4 * i);
+		if (!memchr_inv(w, 0, sizeof(w)))
+			continue;
+		seq_printf(s, "%04x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			   off, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+	}
+	iounmap(p);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(mtk_ccci_ccb_ctrl);
+
 void mtk_ccci_lk_debugfs_init(struct mtk_ccci *ccci)
 {
+	debugfs_create_file("ccb_ctrl", 0400, ccci->debugfs, ccci,
+			    &mtk_ccci_ccb_ctrl_fops);
 	debugfs_create_file("lk_tags", 0400, ccci->debugfs, ccci,
 			    &mtk_ccci_lk_tags_fops);
 	debugfs_create_file("lk_layout", 0400, ccci->debugfs, ccci,
