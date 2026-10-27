@@ -702,6 +702,7 @@
 		mt6369_codec: audio-codec {
 			compatible = "mediatek,mt6369-sound";
 			#sound-dai-cells = <0>;
+			clocks = <&mt6685_audclk>;
 			mediatek,mic-type-0 = <1>;
 			mediatek,mic-type-1 = <1>;
 			mediatek,mic-type-2 = <1>;
@@ -782,13 +783,20 @@
 	};
 
 	/*
-	 * MT6685 clock buffer / RTC chip. Only the RTC is described: read
-	 * time and wake-up alarm; the driver never writes the time, BBPU
-	 * power bits or the power-on alarm spare registers.
+	 * MT6685 clock buffer / RTC chip. The RTC: read time and wake-up
+	 * alarm; the driver never writes the time, BBPU power bits or the
+	 * power-on alarm spare registers. Of the clock buffers only BBCK5,
+	 * the software switched 26 MHz reference of the MT6369 audio codec,
+	 * is described; the others follow SRCLKEN in hardware.
 	 */
 	mt6685: pmic@9 {
 		compatible = "mediatek,mt6685";
 		reg = <0x9 SPMI_USID>;
+
+		mt6685_audclk: clock-controller {
+			compatible = "mediatek,mt6685-audclk";
+			#clock-cells = <0>;
+		};
 
 		rtc {
 			compatible = "mediatek,mt6685-rtc";
