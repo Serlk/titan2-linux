@@ -14,6 +14,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/iio/adc/mediatek,mt6375-adc.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/spmi/spmi.h>
 #include <dt-bindings/usb/pd.h>
@@ -142,6 +143,21 @@
 	 * stock range (min-brightness 60 of 4095); the default 1640 is 40 %.
 	 * LK leaves the backlight on: the driver keeps LK's duty cycle.
 	 */
+	/*
+	 * Keyboard backlight: PWM channel 3 (PWM_2 on GPIO21), as the factory
+	 * keypad_led node (pwm_ch 2, levels 0..100, nothing lit below 8).
+	 */
+	keyboard-backlight {
+		compatible = "pwm-leds";
+
+		led-keyboard {
+			function = LED_FUNCTION_KBD_BACKLIGHT;
+			color = <LED_COLOR_ID_WHITE>;
+			pwms = <&pwm 2 50000>;
+			max-brightness = <100>;
+		};
+	};
+
 	backlight: backlight {
 		compatible = "pwm-backlight";
 		pwms = <&disp_pwm0 0 157538>;
@@ -190,7 +206,19 @@
 	status = "disabled";
 };
 
+&pwm {
+	pinctrl-names = "default";
+	pinctrl-0 = <&kbd_led_pins>;
+	status = "okay";
+};
+
 &pio {
+	kbd_led_pins: kbd-led-pins {
+		pins-pwm {
+			pinmux = <PINMUX_GPIO21__FUNC_PWM_2>;
+		};
+	};
+
 	/*
 	 * MTKAIF to the MT6369 codec (clk/data MOSI, data MISO0/1) and I2S4
 	 * of the speaker amplifier: I2SIN4 BCK/LRCK drive the bus, I2SOUT4
