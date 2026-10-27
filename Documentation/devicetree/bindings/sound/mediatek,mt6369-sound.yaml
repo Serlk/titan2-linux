@@ -25,6 +25,12 @@ properties:
   "#sound-dai-cells":
     const: 0
 
+  clocks:
+    description:
+      26 MHz reference of the codec (the MT6685 audio clock buffer), needed
+      by its digital part and the MTKAIF link while audio runs.
+    maxItems: 1
+
 patternProperties:
   "^mediatek,mic-type-[0-2]$":
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -48,6 +54,7 @@ examples:
     audio-codec {
         compatible = "mediatek,mt6369-sound";
         #sound-dai-cells = <0>;
+        clocks = <&audclk>;
         mediatek,mic-type-0 = <1>;
         mediatek,mic-type-1 = <1>;
         mediatek,mic-type-2 = <1>;
