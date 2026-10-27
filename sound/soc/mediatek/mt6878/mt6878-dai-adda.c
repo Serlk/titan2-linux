@@ -274,6 +274,15 @@ static const struct snd_soc_dapm_widget mtk_dai_adda_widgets[] = {
 			      AUDIO_TOP_CON0, PDN_DL0_PREDIS_SFT, 1, NULL, 0),
 	SND_SOC_DAPM_SUPPLY_S("ADDA_UL0_ADC_CG", SUPPLY_SEQ_ADDA_CG,
 			      AUDIO_TOP_CON1, PDN_UL0_ADC_SFT, 1, NULL, 0),
+	/*
+	 * The TML gates have no user in the MediaTek downstream driver: its
+	 * runtime resume clears AUDIO_TOP_CON0..3 as a whole, so they are open
+	 * whenever the AFE is. Open them with the paths they belong to.
+	 */
+	SND_SOC_DAPM_SUPPLY_S("ADDA_DL0_TML_CG", SUPPLY_SEQ_ADDA_CG,
+			      AUDIO_TOP_CON0, PDN_DL0_DAC_TML_SFT, 1, NULL, 0),
+	SND_SOC_DAPM_SUPPLY_S("ADDA_UL0_TML_CG", SUPPLY_SEQ_ADDA_CG,
+			      AUDIO_TOP_CON1, PDN_UL0_TML_SFT, 1, NULL, 0),
 
 	SND_SOC_DAPM_SUPPLY_S("ADDA Playback Enable", SUPPLY_SEQ_ADDA_DL_ON,
 			      AFE_ADDA_DL_SRC_CON0,
@@ -338,12 +347,14 @@ static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
 	{"ADDA Playback", NULL, "ADDA Enable"},
 	{"ADDA Playback", NULL, "ADDA_DL0_DAC_CG"},
 	{"ADDA Playback", NULL, "ADDA_DL0_PREDIS_CG"},
+	{"ADDA Playback", NULL, "ADDA_DL0_TML_CG"},
 	{"ADDA Playback", NULL, "ADDA Playback Enable"},
 	{"ADDA Playback", NULL, "AUD_PAD_TOP"},
 
 	/* capture */
 	{"ADDA Capture", NULL, "ADDA Enable"},
 	{"ADDA Capture", NULL, "ADDA_UL0_ADC_CG"},
+	{"ADDA Capture", NULL, "ADDA_UL0_TML_CG"},
 	{"ADDA Capture", NULL, "ADDA Capture Enable"},
 	{"ADDA Capture", NULL, "AUD_PAD_TOP"},
 	{"ADDA Capture", NULL, "ADDA_MTKAIF_CFG"},
@@ -412,12 +423,14 @@ static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
 				   AFE_DL_USE_3RD_SDM_MASK_SFT,
 				   AUDIO_SDM_2ND << AFE_DL_USE_3RD_SDM_SFT);
 
-		/* sdm auto reset */
+		/*
+		 * SDM auto reset threshold. The downstream driver also tries to
+		 * set TEST_ON (bit 31) but passes the shift as the mask, so the
+		 * hardware it was tuned on always ran with the bit clear: keep
+		 * it that way.
+		 */
 		regmap_write(afe->regmap, AFE_ADDA_DL_SDM_AUTO_RESET_CON,
 			     SDM_AUTO_RESET_THRESHOLD);
-		regmap_update_bits(afe->regmap, AFE_ADDA_DL_SDM_AUTO_RESET_CON,
-				   AFE_DL_SDM_AUTO_RESET_TEST_ON_MASK_SFT,
-				   0x1 << AFE_DL_SDM_AUTO_RESET_TEST_ON_SFT);
 	} else {
 		unsigned int ul_src_con0 = 0;
 

@@ -774,6 +774,8 @@
 #define PDN_UL0_ADC_SFT                               23
 #define PDN_ETDM_OUT4_SFT                             17
 #define PDN_ETDM_IN4_SFT                              9
+#define PDN_DL0_DAC_TML_SFT                           7
+#define PDN_UL0_TML_SFT                               22
 #define AUDIO_F3P25M_EN_ON_SFT                        1
 #define AFE_DL_INPUT_MODE_CTL_SFT                     24
 #define AFE_DL_OUTPUT_SEL_CTL_SFT                     18
@@ -788,8 +790,6 @@
 #define AFE_DL_USE_3RD_SDM_MASK_SFT                   (0x1 << 28)
 #define AFE_DL_ATTGAIN_CTL_SFT                        0
 #define AFE_DL_ATTGAIN_CTL_MASK_SFT                   (0x3f << 0)
-#define AFE_DL_SDM_AUTO_RESET_TEST_ON_SFT             31
-#define AFE_DL_SDM_AUTO_RESET_TEST_ON_MASK_SFT        (0x1 << 31)
 #define UL_IIR_ON_TMP_CTL_SFT                         10
 #define UL_IIR_ON_TMP_CTL_MASK_SFT                    (0x1 << 10)
 #define UL_IIRMODE_CTL_SFT                            7
