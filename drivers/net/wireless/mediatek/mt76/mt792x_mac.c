@@ -146,11 +146,15 @@ struct mt76_wcid *mt792x_rx_get_wcid(struct mt792x_dev *dev, u16 idx,
 	if (unicast || !wcid)
 		return wcid;
 
-	if (!wcid->sta)
-		return NULL;
-
 	link = container_of(wcid, struct mt792x_link_sta, wcid);
 	sta = link->sta;
+	if (!wcid->sta) {
+		/* a vif's own (group) entry, when the vif is linked to it */
+		if (sta && sta->vif && &sta->vif->sta == sta)
+			return wcid;
+		return NULL;
+	}
+
 	if (!sta->vif)
 		return NULL;
 

@@ -351,6 +351,14 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 
 	INIT_LIST_HEAD(&mvif->sta.deflink.wcid.poll_list);
 	mvif->sta.deflink.wcid.idx = idx;
+	/*
+	 * The SoC firmware reports group frames with this entry, the BSS's
+	 * group entry, not the AP's: let the RX path get to the vif from it.
+	 */
+	if (dev->soc_axi) {
+		mvif->sta.deflink.sta = &mvif->sta;
+		mvif->sta.vif = mvif;
+	}
 	mvif->sta.deflink.wcid.tx_info |= MT_WCID_TX_INFO_SET;
 	mt76_wcid_init(&mvif->sta.deflink.wcid, mvif->bss_conf.mt76.band_idx);
 
