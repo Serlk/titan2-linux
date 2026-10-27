@@ -169,6 +169,11 @@
 #define  BUS_CR_OFF_BUS_TIMEOUT_CTRL	(BUS_CR + 0x024)
 #define  BUS_CR_EMI_PATH_START		(BUS_CR + 0x070)
 #define  BUS_CR_EMI_PATH_END		(BUS_CR + 0x074)
+/* CONN2AP peripheral remap, programmed by the ATF EMI remap call */
+#define  BUS_CR_CONN2AP_REMAP_WF_PERI	(BUS_CR + 0x364)
+#define  BUS_CR_CONN2AP_REMAP_BT_PERI	(BUS_CR + 0x368)
+#define  BUS_CR_CONN2AP_REMAP_GPS_PERI	(BUS_CR + 0x36c)
+#define  BUS_CR_SCPSYS_SRAM_BASE	(BUS_CR + 0x370)
 #define  BUS_CR_LIGHT_SECURITY_CTRL	(BUS_CR + 0x374)
 
 /* conn_infra_off_debug_ctrl_ao */
@@ -192,6 +197,7 @@
 #define HOST_CSR			0x60000
 #define  HOST_CONN_INFRA_WAKEPU_TOP	(HOST_CSR + 0x1a0)
 #define  HOST_CONN_INFRA_WAKEPU_WF	(HOST_CSR + 0x1a4)
+/* secure only: reads 0 and ignores writes from the non-secure side */
 #define  HOST_CONN2AP_REMAP_MCU_EMI	(HOST_CSR + 0x354)
 #define   CONN2AP_REMAP_BASE		GENMASK(19, 0)	/* address >> 16 */
 #define  HOST_CONN_INFRA_SLP_CNT_CTL	(HOST_CSR + 0x380)
@@ -335,6 +341,7 @@ struct mtk_conninfra {
 	phys_addr_t emi_base;		/* from LK ("emi-addr"), 0 if absent */
 	u32 emi_size;
 	bool emi_remapped;
+	unsigned long emi_remap_ret;	/* a0 of the last ATF remap call */
 	bool co_clock_52m;
 
 	struct mutex lock;		/* protects everything below */
@@ -1029,13 +1036,42 @@ static void mtk_conninfra_low_power_cfg(struct mtk_conninfra *ci)
 
 /*
  * CONN2AP EMI remapping: the stock kernel asks ATF to program it (the
- * addresses came from LK through another SiP call). Read it back; fall
- * back to a direct write if ATF did nothing.
+ * addresses came from LK through another SiP call, the kernel cannot pass
+ * them). The HOST_CSR EMI remap registers are secure only, so they cannot
+ * be read back; the same call also sets the BUS_CR peripheral remap, which
+ * is readable and serves as the proof that it ran. Neither is written from
+ * here: ATF owns both.
  */
+static const struct {
+	u32 off;
+	u32 val;
+} mtk_conninfra_peri_remap[] = {
+	{ BUS_CR_CONN2AP_REMAP_WF_PERI,  0x01000 },
+	{ BUS_CR_CONN2AP_REMAP_BT_PERI,  0x01100 },
+	{ BUS_CR_CONN2AP_REMAP_GPS_PERI, 0x01c00 },
+	{ BUS_CR_SCPSYS_SRAM_BASE,       0x01ca0 },
+};
+
+static bool mtk_conninfra_peri_remapped(struct mtk_conninfra *ci, u32 *got)
+{
+	bool ok = true;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(mtk_conninfra_peri_remap); i++) {
+		got[i] = ci_rd(ci, mtk_conninfra_peri_remap[i].off) &
+			 CONN2AP_REMAP_BASE;
+		if (got[i] != mtk_conninfra_peri_remap[i].val)
+			ok = false;
+	}
+	return ok;
+}
+
 static void mtk_conninfra_emi_remap(struct mtk_conninfra *ci)
 {
+	u32 got[ARRAY_SIZE(mtk_conninfra_peri_remap)];
 	struct arm_smccc_res res;
-	u32 want, got;
+	bool peri_ok;
+	u32 want;
 
 	ci->emi_remapped = false;
 	if (!ci->emi_base) {
@@ -1046,20 +1082,19 @@ static void mtk_conninfra_emi_remap(struct mtk_conninfra *ci)
 	want = FIELD_PREP(CONN2AP_REMAP_BASE, ci->emi_base >> 16);
 	arm_smccc_smc(MTK_SIP_KERNEL_CONNSYS_CONTROL, CONNSYS_SMC_EMI_REMAP,
 		      0, 0, 0, 0, 0, 0, &res);
-	got = ci_rd(ci, HOST_CONN2AP_REMAP_MCU_EMI) & CONN2AP_REMAP_BASE;
-	if (got != want) {
-		dev_warn(ci->dev, "EMI remap after SMC (ret %lu): 0x%05x, writing 0x%05x\n",
-			 res.a0, got, want);
-		ci_rmw(ci, HOST_CONN2AP_REMAP_MCU_EMI, CONN2AP_REMAP_BASE, want);
-		got = ci_rd(ci, HOST_CONN2AP_REMAP_MCU_EMI) & CONN2AP_REMAP_BASE;
-	}
+	ci->emi_remap_ret = res.a0;
+	peri_ok = mtk_conninfra_peri_remapped(ci, got);
 
-	ci->emi_remapped = got == want;
+	ci->emi_remapped = !res.a0 && peri_ok;
 	if (ci->emi_remapped)
-		dev_info(ci->dev, "CONNSYS EMI at %pa (0x%x), remap 0x%05x\n",
-			 &ci->emi_base, ci->emi_size, got);
+		dev_info(ci->dev,
+			 "CONNSYS EMI at %pa (0x%x): ATF remap ret %lu, peri %05x %05x %05x %05x, EMI remap 0x%05x (HOST_CSR not readable)\n",
+			 &ci->emi_base, ci->emi_size, res.a0,
+			 got[0], got[1], got[2], got[3], want);
 	else
-		dev_err(ci->dev, "CONN2AP EMI remap stays 0x%05x\n", got);
+		dev_err(ci->dev,
+			"CONN2AP remap not confirmed: ATF ret %lu, peri %05x %05x %05x %05x, EMI remap 0x%05x (HOST_CSR not readable)\n",
+			res.a0, got[0], got[1], got[2], got[3], want);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1689,7 +1724,9 @@ static const char * const mtk_conninfra_radio_names[] = {
 
 static int mtk_conninfra_status_show(struct seq_file *s, void *unused)
 {
+	u32 peri[ARRAY_SIZE(mtk_conninfra_peri_remap)];
 	struct mtk_conninfra *ci = s->private;
+	bool peri_ok;
 
 	mutex_lock(&ci->lock);
 	seq_printf(s, "A-die (compatible): %s\n", ci->data->adie_name);
@@ -1702,13 +1739,17 @@ static int mtk_conninfra_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "D-die efuse: 0x%08x\n", ci->d_die_efuse);
 	seq_printf(s, "co-clock: %s, RC mode: %d\n",
 		   ci->co_clock_52m ? "52 MHz" : "26 MHz", ci->rc_mode);
-	seq_printf(s, "EMI: %pa size 0x%x, remapped %d\n",
-		   &ci->emi_base, ci->emi_size, ci->emi_remapped);
+	seq_printf(s, "EMI: %pa size 0x%x, remapped %d (ATF ret %lu)\n",
+		   &ci->emi_base, ci->emi_size, ci->emi_remapped,
+		   ci->emi_remap_ret);
 
 	if (ci->radios && !__mtk_conninfra_wakeup(ci)) {
-		seq_printf(s, "IP version 0x%08x, radio status 0x%08x, remap 0x%08x\n",
-			   ci_rd(ci, CFG_IP_VERSION), ci_rd(ci, SW_CR_RADIO_STATUS),
-			   ci_rd(ci, HOST_CONN2AP_REMAP_MCU_EMI));
+		seq_printf(s, "IP version 0x%08x, radio status 0x%08x\n",
+			   ci_rd(ci, CFG_IP_VERSION), ci_rd(ci, SW_CR_RADIO_STATUS));
+		peri_ok = mtk_conninfra_peri_remapped(ci, peri);
+		seq_printf(s, "BUS_CR peri remap %05x %05x %05x %05x (%s; EMI remap: secure, not readable)\n",
+			   peri[0], peri[1], peri[2], peri[3],
+			   peri_ok ? "ok" : "unexpected");
 		seq_printf(s, "PWR_STATES 0x%08x WF_SLP_STATUS 0x%08x MONFLG 0x%08x\n",
 			   ci_rd(ci, HOST_CONNSYS_PWR_STATES),
 			   ci_rd(ci, CFG_ON_WF_SLP_STATUS),
