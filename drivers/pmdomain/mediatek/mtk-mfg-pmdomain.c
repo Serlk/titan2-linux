@@ -541,6 +541,9 @@ static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 
 	msg->magic = mfg->ipi_magic;
 
+	/* a reply that came after an earlier timeout isn't the answer to this */
+	reinit_completion(&mfg->gf_mbox->rx_done);
+
 	ret = mbox_send_message(mfg->gf_mbox->ch, msg);
 	if (ret < 0) {
 		dev_err(dev, "Cannot send GPUFreq IPI command: %pe\n", ERR_PTR(ret));
@@ -548,8 +551,10 @@ static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 	}
 
 	wait = wait_for_completion_timeout(&mfg->gf_mbox->rx_done, msecs_to_jiffies(500));
-	if (!wait)
+	if (!wait) {
+		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
 		return -ETIMEDOUT;
+	}
 
 	msg = mfg->gf_mbox->rx_data;
 
