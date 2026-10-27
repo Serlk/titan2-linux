@@ -354,6 +354,10 @@ struct mtk_conninfra {
 	u32 adie_uid[2];		/* efuse block 0x1d0, words 2-3 */
 	u32 d_die_efuse;
 
+	/* Wi-Fi starts (power-on to calibration done): BT on/off waits */
+	bool wifi_starting;
+	wait_queue_head_t wifi_start_wq;
+
 	spinlock_t spi_lock;		/* RF SPI semaphore holder, IRQs off */
 	unsigned long spi_flags;
 };
@@ -883,6 +887,9 @@ static int mtk_conninfra_radio_status(struct mtk_conninfra *ci,
 	return 0;
 }
 
+/* the longest Wi-Fi start (power-on, ROM calibration, firmware) BT waits for */
+#define MTK_CONNINFRA_WIFI_START_MS	5000
+
 /* XO buffers of the MT6637 for the radios that change state */
 static int mtk_conninfra_adie_xo_buffers(struct mtk_conninfra *ci,
 					 unsigned long cur, unsigned long next)
@@ -1290,6 +1297,36 @@ err:
 	return ret;
 }
 
+/*
+ * The A-die is shared. Switching BT on or off while the Wi-Fi ROM code
+ * calibrates the RF leaves Wi-Fi now and then unable to transmit to its
+ * AP until the next power cycle: let BT wait for the Wi-Fi start.
+ */
+static void mtk_conninfra_wait_wifi_start(struct mtk_conninfra *ci,
+					  enum mtk_conninfra_radio radio)
+{
+	if (radio == MTK_CONNINFRA_WIFI)
+		return;
+	if (!wait_event_timeout(ci->wifi_start_wq, !READ_ONCE(ci->wifi_starting),
+				msecs_to_jiffies(MTK_CONNINFRA_WIFI_START_MS)))
+		dev_warn(ci->dev, "radio %d: Wi-Fi still starting after %u ms\n",
+			 radio, MTK_CONNINFRA_WIFI_START_MS);
+}
+
+/**
+ * mtk_conninfra_wifi_starting() - mark the start of the Wi-Fi subsystem
+ * @ci: CONNINFRA
+ * @starting: true from before the power-on, false once the RF is calibrated
+ *	(or the start failed)
+ */
+void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci, bool starting)
+{
+	WRITE_ONCE(ci->wifi_starting, starting);
+	if (!starting)
+		wake_up_all(&ci->wifi_start_wq);
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_wifi_starting);
+
 int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio radio)
 {
 	unsigned long cur;
@@ -1297,6 +1334,7 @@ int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio ra
 
 	if (radio >= MTK_CONNINFRA_RADIO_MAX)
 		return -EINVAL;
+	mtk_conninfra_wait_wifi_start(ci, radio);
 	if (!ci->data->full_power_on) {
 		dev_err(ci->dev, "power-on sequence for the %s A-die not implemented\n",
 			ci->data->adie_name);
@@ -1345,6 +1383,7 @@ void mtk_conninfra_radio_off(struct mtk_conninfra *ci, enum mtk_conninfra_radio 
 
 	if (radio >= MTK_CONNINFRA_RADIO_MAX)
 		return;
+	mtk_conninfra_wait_wifi_start(ci, radio);
 
 	mutex_lock(&ci->lock);
 	cur = ci->radios;
@@ -1877,6 +1916,7 @@ static int mtk_conninfra_probe(struct platform_device *pdev)
 	if (!ci->data)
 		return -EINVAL;
 	spin_lock_init(&ci->spi_lock);
+	init_waitqueue_head(&ci->wifi_start_wq);
 
 	ret = devm_mutex_init(dev, &ci->lock);
 	if (ret)

@@ -40,6 +40,8 @@ struct mtk_conninfra *devm_mtk_conninfra_get(struct device *dev);
  */
 int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio radio);
 void mtk_conninfra_radio_off(struct mtk_conninfra *ci, enum mtk_conninfra_radio radio);
+/* Wi-Fi brackets its start with this; BT radio changes wait for the end */
+void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci, bool starting);
 
 /*
  * Keep the CONN_INFRA "off" domain (bus, clocks) awake for register
@@ -86,6 +88,11 @@ static inline int mtk_conninfra_radio_on(struct mtk_conninfra *ci,
 
 static inline void mtk_conninfra_radio_off(struct mtk_conninfra *ci,
 					   enum mtk_conninfra_radio radio)
+{
+}
+
+static inline void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci,
+					       bool starting)
 {
 }
 

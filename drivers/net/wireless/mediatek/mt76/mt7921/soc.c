@@ -697,6 +697,8 @@ static int mt7921_soc_start_firmware(struct mt7921_soc_dev *soc)
 
 	/* dev->soc_axi: FW_IMAGE_START instead of the patch/RAM download */
 	err = mt7921_run_firmware(dev);
+	/* the RF is calibrated (or will not be): BT may switch again */
+	mtk_conninfra_wifi_starting(soc->ci, false);
 	if (err)
 		return err;
 
@@ -773,6 +775,8 @@ static int mt7921_soc_wfsys_cycle(struct mt7921_soc_dev *soc)
 		disable_irq(soc->irq_sw);
 
 	WRITE_ONCE(soc->wfsys_on, false);
+	/* the firmware start after this calibrates again */
+	mtk_conninfra_wifi_starting(soc->ci, true);
 	mtk_conninfra_wfsys_off(soc->ci);
 	ret = mtk_conninfra_wfsys_on(soc->ci);
 	if (!ret)
@@ -981,6 +985,7 @@ static int mt7921_soc_dma_init(struct mt792x_dev *dev)
 
 static void mt7921_soc_power_off(struct mt7921_soc_dev *soc)
 {
+	mtk_conninfra_wifi_starting(soc->ci, false);
 	if (soc->wfsys_on) {
 		soc->wfsys_on = false;
 		mtk_conninfra_wfsys_off(soc->ci);
@@ -1000,9 +1005,12 @@ static int mt7921_soc_power_on(struct mt7921_soc_dev *soc)
 	struct device *dev = soc->dev.mt76.dev;
 	int ret;
 
+	/* until the firmware start: keep BT from switching the shared A-die */
+	mtk_conninfra_wifi_starting(soc->ci, true);
 	ret = mtk_conninfra_radio_on(soc->ci, MTK_CONNINFRA_WIFI);
 	if (ret) {
 		dev_err(dev, "CONNINFRA power on failed: %d\n", ret);
+		mtk_conninfra_wifi_starting(soc->ci, false);
 		return ret;
 	}
 	soc->radio_on = true;
