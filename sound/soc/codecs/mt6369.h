@@ -426,6 +426,7 @@ enum {
 /* Supply widget subseq */
 enum {
 	/* common */
+	SUPPLY_SEQ_CLK_BUF,
 	SUPPLY_SEQ_AUD_GLB,
 	SUPPLY_SEQ_DL_GPIO,
 	SUPPLY_SEQ_UL_GPIO,

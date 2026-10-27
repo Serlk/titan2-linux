@@ -12,6 +12,7 @@
 // Author: Chih-hong Yang <chih-hong.yang@mediatek.com>
 // Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
 
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
@@ -26,6 +27,9 @@
 struct mt6369_priv {
 	struct device *dev;
 	struct regmap *regmap;
+	/* 26 MHz reference of the codec (MT6685 BBCK5), optional */
+	struct clk *xo;
+	bool xo_calib;		/* xo held by the MTKAIF calibration */
 	/* gains as register indexes: 0 = +8 dB ... 0x12 = -10 dB */
 	int ana_gain[AUDIO_ANALOG_VOLUME_TYPE_MAX];
 	unsigned int mux_select[MUX_NUM];
@@ -193,6 +197,11 @@ void mt6369_mtkaif_calibration_enable(struct snd_soc_component *cmpnt)
 {
 	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
+	/* the codec side of the link runs from the 26 MHz reference */
+	priv->xo_calib = !clk_prepare_enable(priv->xo);
+	if (!priv->xo_calib)
+		dev_warn(priv->dev, "26 MHz reference not enabled\n");
+
 	mt6369_set_playback_gpio(priv);
 	mt6369_set_capture_gpio(priv);
 	mt6369_mtkaif_tx_enable(priv);
@@ -233,6 +242,10 @@ void mt6369_mtkaif_calibration_disable(struct snd_soc_component *cmpnt)
 	mt6369_mtkaif_tx_disable(priv);
 	mt6369_reset_playback_gpio(priv);
 	mt6369_reset_capture_gpio(priv);
+
+	if (priv->xo_calib)
+		clk_disable_unprepare(priv->xo);
+	priv->xo_calib = false;
 }
 EXPORT_SYMBOL_GPL(mt6369_mtkaif_calibration_disable);
 
@@ -1678,8 +1691,32 @@ static int mt_ul_gpio_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int mt_clk_buf_event(struct snd_soc_dapm_widget *w,
+			    struct snd_kcontrol *kcontrol,
+			    int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6369_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		return clk_prepare_enable(priv->xo);
+	case SND_SOC_DAPM_POST_PMD:
+		clk_disable_unprepare(priv->xo);
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_dapm_widget mt6369_dapm_widgets[] = {
 	/* Global Supply */
+	SND_SOC_DAPM_SUPPLY_S("CLK_BUF", SUPPLY_SEQ_CLK_BUF,
+			      SND_SOC_NOPM, 0, 0,
+			      mt_clk_buf_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY_S("AUDGLB", SUPPLY_SEQ_AUD_GLB,
 			      MT6369_AUDDEC_ANA_CON24,
 			      RG_AUDGLB_PWRDN_VA28_SFT, 1, NULL, 0),
@@ -1916,6 +1953,7 @@ static int mt_dcc_clk_connect(struct snd_soc_dapm_widget *source,
 
 static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	/* Capture */
+	{"AIFTX_Supply", NULL, "CLK_BUF"},
 	{"AIFTX_Supply", NULL, "AUDGLB"},
 	{"AIFTX_Supply", NULL, "CLKSQ Audio"},
 	{"AIFTX_Supply", NULL, "AUD_CK"},
@@ -1983,6 +2021,7 @@ static const struct snd_soc_dapm_route mt6369_dapm_routes[] = {
 	{"AIN2", NULL, "MIC_BIAS_0"},
 
 	/* DL Supply */
+	{"DL Power Supply", NULL, "CLK_BUF"},
 	{"DL Power Supply", NULL, "AUDGLB"},
 	{"DL Power Supply", NULL, "CLKSQ Audio"},
 	{"DL Power Supply", NULL, "AUDNCP_CK"},
@@ -2195,6 +2234,16 @@ static int mt6369_platform_driver_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, -ENODEV, "no PMIC regmap\n");
 
 	dev_set_drvdata(&pdev->dev, priv);
+
+	/*
+	 * The codec has no oscillator of its own: its 26 MHz reference is a
+	 * switched clock buffer of the MT6685, needed by the digital part
+	 * and the MTKAIF link whenever audio runs.
+	 */
+	priv->xo = devm_clk_get_optional(&pdev->dev, NULL);
+	if (IS_ERR(priv->xo))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->xo),
+				     "failed to get the 26 MHz reference\n");
 
 	ret = mt6369_parse_dt(priv);
 	if (ret)
