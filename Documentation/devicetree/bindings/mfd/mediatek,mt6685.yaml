@@ -23,6 +23,27 @@ properties:
   reg:
     maxItems: 1
 
+  clock-controller:
+    type: object
+    additionalProperties: false
+    description:
+      The software switched clock buffer BBCK5, the 26 MHz reference of
+      the audio codec of the second PMIC.
+
+    properties:
+      compatible:
+        const: mediatek,mt6685-audclk
+
+      "#clock-cells":
+        const: 0
+
+      clock-output-names:
+        maxItems: 1
+
+    required:
+      - compatible
+      - "#clock-cells"
+
   rtc:
     type: object
     additionalProperties: false
@@ -58,6 +79,11 @@ examples:
         pmic@9 {
             compatible = "mediatek,mt6685";
             reg = <0x9 SPMI_USID>;
+
+            clock-controller {
+                compatible = "mediatek,mt6685-audclk";
+                #clock-cells = <0>;
+            };
 
             rtc {
                 compatible = "mediatek,mt6685-rtc";
