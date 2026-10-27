@@ -738,6 +738,17 @@
 				regulator-max-microvolt = <2800000>;
 			};
 
+			/*
+			 * 1.8 V auxiliary rail, always on in the factory device tree
+			 * (mt6369.dtsi) without a named consumer. Kept on so
+			 * the 1.8 V side of the audio codec does not depend on
+			 * what the boot loader left enabled.
+			 */
+			mt6369_vaux18: vaux18 {
+				regulator-name = "mt6369_vaux18";
+				regulator-always-on;
+			};
+
 			/* Audio codec analog supply, always on in stock */
 			mt6369_vaud28: vaud28 {
 				regulator-name = "mt6369_vaud28";
