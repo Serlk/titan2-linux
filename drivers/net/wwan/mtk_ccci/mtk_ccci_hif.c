@@ -56,8 +56,9 @@ int mtk_ccci_send_skb(struct mtk_ccci *ccci, unsigned int qno,
 	bool assert = true;
 	int ret;
 
+	/* the MTU is payload: the header and the FS reserved word come on top */
 	if (qno >= MTK_CCCI_RINGQ_NUM || skb->len < sizeof(*hdr) ||
-	    skb->len > MTK_CCCI_MTU + 4)
+	    skb->len > MTK_CCCI_MTU + sizeof(*hdr) + 4)
 		return -EINVAL;
 	if (!READ_ONCE(ccci->hif_on))
 		return -ENODEV;
