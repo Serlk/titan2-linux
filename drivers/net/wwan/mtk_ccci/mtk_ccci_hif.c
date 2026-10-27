@@ -179,6 +179,8 @@ static int mtk_ccci_rx_dispatch(struct mtk_ccci *ccci, struct sk_buff *skb)
 	case MTK_CCCI_CH_RPC_RX:
 		ccci->stats.fs_rpc++;
 		return mtk_ccci_rpc_recv(ccci, skb);
+	case MTK_CCCI_CH_PCM_RX:
+		return mtk_ccci_cdev_recv(&ccci->cdev_aud, skb);
 	}
 
 	if (!mtk_ccci_port_recv(ccci, skb))

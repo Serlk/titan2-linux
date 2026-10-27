@@ -185,6 +185,8 @@ enum mtk_ccci_channel {
 	MTK_CCCI_CH_SYSTEM_TX = 3,
 	MTK_CCCI_CH_UART2_RX = 10,	/* AT, stock /dev/ttyC0 */
 	MTK_CCCI_CH_UART2_TX = 12,
+	MTK_CCCI_CH_PCM_RX = 4,		/* speech control, /dev/ccci_aud */
+	MTK_CCCI_CH_PCM_TX = 5,
 	MTK_CCCI_CH_FS_RX = 14,		/* NVRAM file server */
 	MTK_CCCI_CH_FS_TX = 15,
 	MTK_CCCI_CH_RPC_RX = 32,
@@ -341,6 +343,7 @@ struct mtk_ccci_port {
 };
 
 /* a character device port, see mtk_ccci_cdev.c */
+#define MTK_CCCI_CDEV_NO_TX	U16_MAX
 struct mtk_ccci_cdev {
 	struct mtk_ccci *ccci;
 	struct miscdevice misc;
@@ -453,6 +456,8 @@ struct mtk_ccci {
 	bool ports_registered;
 	struct mtk_ccci_cdev cdev_fs;	/* /dev/ccci_fs */
 	struct mtk_ccci_cdev cdev_rpc;	/* /dev/ccci_rpc */
+	struct mtk_ccci_cdev cdev_aud;	/* /dev/ccci_aud */
+	struct mtk_ccci_cdev cdev_raw_audio;	/* /dev/ccci_raw_audio, mmap only */
 
 	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */
 	/* WWAN links by CCMNI index, written under RTNL */

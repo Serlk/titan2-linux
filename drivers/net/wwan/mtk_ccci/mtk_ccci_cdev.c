@@ -153,6 +153,9 @@ static ssize_t mtk_ccci_cdev_write(struct file *file, const char __user *buf,
 	struct sk_buff *skb;
 	int ret;
 
+	/* a shared memory node: nothing to send on */
+	if (cd->tx_ch == MTK_CCCI_CDEV_NO_TX)
+		return -EOPNOTSUPP;
 	if (count < sizeof(*hdr))
 		return -EINVAL;
 	/* the stock limit for a port with a user header (+4 on FS) */
@@ -254,6 +257,8 @@ void mtk_ccci_cdev_reset(struct mtk_ccci *ccci)
 	wake_up_interruptible(&ccci->cdev_fs.wq);
 	skb_queue_purge(&ccci->cdev_rpc.rx);
 	wake_up_interruptible(&ccci->cdev_rpc.wq);
+	skb_queue_purge(&ccci->cdev_aud.rx);
+	wake_up_interruptible(&ccci->cdev_aud.wq);
 }
 
 static void mtk_ccci_cdev_show(const struct mtk_ccci_cdev *cd,
@@ -269,6 +274,7 @@ void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s)
 {
 	mtk_ccci_cdev_show(&ccci->cdev_fs, s);
 	mtk_ccci_cdev_show(&ccci->cdev_rpc, s);
+	mtk_ccci_cdev_show(&ccci->cdev_aud, s);
 }
 
 static void mtk_ccci_cdev_cleanup(void *data)
@@ -313,7 +319,19 @@ int mtk_ccci_cdev_init(struct mtk_ccci *ccci)
 				MTK_CCCI_SMEM_DBM);
 	if (ret)
 		return ret;
-	return mtk_ccci_cdev_add(ccci, &ccci->cdev_rpc, "ccci_rpc",
-				 MTK_CCCI_CH_RPC_TX, MTK_CCCI_Q_RPC,
-				 MTK_CCCI_SMEM_DRDI);
+	ret = mtk_ccci_cdev_add(ccci, &ccci->cdev_rpc, "ccci_rpc",
+				MTK_CCCI_CH_RPC_TX, MTK_CCCI_Q_RPC,
+				MTK_CCCI_SMEM_DRDI);
+	if (ret)
+		return ret;
+	/* the speech control of the audio HAL, as the downstream ccci_aud port */
+	ret = mtk_ccci_cdev_add(ccci, &ccci->cdev_aud, "ccci_aud",
+				MTK_CCCI_CH_PCM_TX, MTK_CCCI_Q_CTRL,
+				MTK_CCCI_SMEM_DBM);
+	if (ret)
+		return ret;
+	/* the speech data rings in RAW_AUDIO shared memory, mmap() only */
+	return mtk_ccci_cdev_add(ccci, &ccci->cdev_raw_audio, "ccci_raw_audio",
+				 MTK_CCCI_CDEV_NO_TX, MTK_CCCI_Q_CTRL,
+				 MTK_CCCI_SMEM_RAW_AUDIO);
 }
