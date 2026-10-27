@@ -113,7 +113,9 @@ static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
 {
 	unsigned long flags;
 
-	drm_crtc_handle_vblank(&mtk_crtc->base);
+	/* in command mode the vblank timer counts vblanks, see enable_vblank */
+	if (!mtk_crtc->cmd_mode)
+		drm_crtc_handle_vblank(&mtk_crtc->base);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan)
@@ -700,9 +702,16 @@ static int mtk_crtc_enable_vblank(struct drm_crtc *crtc)
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 
-	/* in command mode the output reports the end of each frame */
+	/*
+	 * Command mode: the panel refreshes itself from its own memory and the
+	 * output only reports the end of the frames it is asked to send, so
+	 * there is no vblank while the picture does not change. Clients that
+	 * wait for a vblank before an update (fbdev) would never see one: let
+	 * a timer at the refresh rate of the mode count the vblanks. The end of
+	 * a frame still completes the page flip.
+	 */
 	if (mtk_crtc->cmd_mode)
-		return 0;
+		return drm_crtc_vblank_start_timer(crtc);
 
 	mtk_ddp_comp_enable_vblank(comp);
 
@@ -713,6 +722,11 @@ static void mtk_crtc_disable_vblank(struct drm_crtc *crtc)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+
+	if (mtk_crtc->cmd_mode) {
+		drm_crtc_vblank_cancel_timer(crtc);
+		return;
+	}
 
 	mtk_ddp_comp_disable_vblank(comp);
 }
