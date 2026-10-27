@@ -128,6 +128,13 @@ struct mt7921_soc_phy_hdr {
 	__le16 len;
 } __packed;
 
+/* the reply has no magic */
+struct mt7921_soc_phy_rsp_hdr {
+	u8 tag_num;
+	u8 version;
+	__le16 len;
+} __packed;
+
 struct mt7921_soc_phy_tlv {
 	__le16 tag;
 	__le16 len;
@@ -514,6 +521,7 @@ out:
 static int mt7921_soc_phy_action(struct mt7921_soc_dev *soc)
 {
 	struct mt792x_dev *dev = &soc->dev;
+	struct mt7921_soc_phy_rsp_hdr *rhdr;
 	struct mt7921_soc_phy_hdr *hdr;
 	struct mt7921_soc_phy_tlv *tlv;
 	struct mt7921_soc_phy_cal *cal;
@@ -559,7 +567,7 @@ static int mt7921_soc_phy_action(struct mt7921_soc_dev *soc)
 	if (ret)
 		return ret;
 
-	if (skb->len < sizeof(*hdr) + sizeof(*tlv) + sizeof(*rsp)) {
+	if (skb->len < sizeof(*rhdr) + sizeof(*tlv) + sizeof(*rsp)) {
 		dev_err(dev->mt76.dev, "short calibration response (%u bytes)\n",
 			skb->len);
 		print_hex_dump(KERN_ERR, "cal: ", DUMP_PREFIX_OFFSET, 16, 1,
@@ -567,15 +575,15 @@ static int mt7921_soc_phy_action(struct mt7921_soc_dev *soc)
 		ret = -EINVAL;
 		goto out;
 	}
-	hdr = (struct mt7921_soc_phy_hdr *)skb->data;
-	tlv = (struct mt7921_soc_phy_tlv *)(hdr + 1);
+	rhdr = (struct mt7921_soc_phy_rsp_hdr *)skb->data;
+	tlv = (struct mt7921_soc_phy_tlv *)(rhdr + 1);
 	rsp = (struct mt7921_soc_phy_rsp *)(tlv + 1);
-	if (le32_to_cpu(hdr->magic) != MT7921_SOC_PHY_MAGIC ||
+	if (!rhdr->tag_num ||
 	    le16_to_cpu(tlv->tag) != MT7921_SOC_PHY_TAG_CAL ||
 	    rsp->event != MT7921_SOC_PHY_FORCE_CAL_RSP || rsp->status) {
 		dev_err(dev->mt76.dev,
-			"calibration failed: magic 0x%08x tag %u event 0x%02x status %u\n",
-			le32_to_cpu(hdr->magic), le16_to_cpu(tlv->tag),
+			"calibration failed: tags %u tag %u event 0x%02x status %u\n",
+			rhdr->tag_num, le16_to_cpu(tlv->tag),
 			rsp->event, rsp->status);
 		ret = -EIO;
 		goto out;
@@ -709,9 +717,38 @@ static int mt7921_soc_mcu_init(struct mt792x_dev *dev)
 	return mt7921_soc_start_firmware(to_soc(dev));
 }
 
+static int mt7921_soc_wfsys_cycle(struct mt7921_soc_dev *soc);
+
+/*
+ * Restart the WFSYS from the ROM: power cycle through CONNINFRA, own the
+ * core again and rebuild the rings, which the power cycle has cleared.
+ */
+static int mt7921_soc_restart(struct mt7921_soc_dev *soc)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	int err;
+
+	err = mt7921_soc_wfsys_cycle(soc);
+	if (err) {
+		dev_err(dev->mt76.dev, "WFSYS power cycle failed: %d\n", err);
+		return err;
+	}
+
+	mt7921_soc_force_host_csr_irq(dev);
+	mt792xe_mcu_fw_pmctrl(dev);
+	err = __mt792xe_mcu_drv_pmctrl(dev);
+	if (!err)
+		err = mt792x_wpdma_reset(dev, true);
+	if (err)
+		dev_err(dev->mt76.dev, "WFDMA restart failed: %d\n", err);
+
+	return err;
+}
+
+/* after a failed start: from the ROM again, as the MediaTek driver does */
 static int mt7921_soc_init_reset(struct mt792x_dev *dev)
 {
-	return mt792x_wpdma_reset(dev, true);
+	return mt7921_soc_restart(to_soc(dev));
 }
 
 /*
@@ -766,16 +803,7 @@ static int mt7921_soc_mac_reset(struct mt792x_dev *dev)
 	mt76_connac2_tx_token_put(&dev->mt76);
 	idr_init(&dev->mt76.token);
 
-	err = mt7921_soc_wfsys_cycle(soc);
-	if (err) {
-		dev_err(dev->mt76.dev, "WFSYS power cycle failed: %d\n", err);
-	} else {
-		mt7921_soc_force_host_csr_irq(dev);
-		mt792xe_mcu_fw_pmctrl(dev);
-		err = __mt792xe_mcu_drv_pmctrl(dev);
-		if (!err)
-			mt792x_wpdma_reset(dev, true);
-	}
+	err = mt7921_soc_restart(soc);
 
 	mt76_for_each_q_rx(&dev->mt76, i) {
 		napi_enable(&dev->mt76.napi[i]);

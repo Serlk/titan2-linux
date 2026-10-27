@@ -342,7 +342,11 @@ int mt792x_wpdma_reset(struct mt792x_dev *dev, bool force)
 	mt76_for_each_q_rx(&dev->mt76, i)
 		mt76_queue_rx_cleanup(dev, &dev->mt76.q_rx[i]);
 
-	if (force) {
+	/*
+	 * On the SoC the WFSYS is power cycled through CONNINFRA instead:
+	 * its RGU reset register has no init done bit to wait for.
+	 */
+	if (force && !dev->soc_axi) {
 		err = mt792x_wfsys_reset(dev);
 		if (err)
 			return err;
