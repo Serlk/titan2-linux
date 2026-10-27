@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/mediatek,mt6878-dpmaif.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek DPMAIF data path DMA of the SoC-integrated modem
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description: |
+  DPMAIF (Data Path Modem AP Interface) moves the network packets between
+  the application processor and the modem built into the SoC, with
+  descriptor rings in AP memory. It has an always-on part (AO) and a part
+  in a power-down domain (PD) that also holds its SRAM configuration
+  mirror. The modem node (mediatek,mt6878-ccci) points at this node and
+  its driver drives the block, as part of the modem start and stop. The
+  PD half of the block is reset through the infracfg window of the modem
+  node, which it shares with the CCIF reset.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-dpmaif
+
+  reg:
+    items:
+      - description: always-on registers (AO UL, AO DL, modem DL)
+      - description: power-down registers (UL, DL, DMA, AP misc, SRAM mirror)
+      - description: modem side misc registers of the power-down part
+      - description: power-down SRAM
+
+  reg-names:
+    items:
+      - const: ao
+      - const: pd
+      - const: md-misc
+      - const: sram
+
+  interrupts:
+    minItems: 1
+    items:
+      - description: transmit done, receive queue 0 and errors
+      - description: receive queue 1, only used with receive offload
+
+  clocks:
+    items:
+      - description: main clock
+      - description: bus clock
+      - description: 26 MHz clock
+
+  clock-names:
+    items:
+      - const: main
+      - const: blk
+      - const: 26m
+
+  mediatek,infracfg-ao:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      infracfg_ao syscon holding the always-on reset and the bus enable
+      of the block.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - mediatek,infracfg-ao
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt6878-clock.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    dpmaif@10014000 {
+        compatible = "mediatek,mt6878-dpmaif";
+        reg = <0x10014000 0x1000>,
+              <0x1022d000 0x1000>,
+              <0x1022c000 0x1000>,
+              <0x1022e000 0x1000>;
+        reg-names = "ao", "pd", "md-misc", "sram";
+        interrupts = <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&infracfg_ao CLK_IFRAO_DPMAIF_MAIN>,
+                 <&infracfg_ao CLK_IFRAO_CLDMA_BCLK>,
+                 <&infracfg_ao CLK_IFRAO_RG_MMW_DPMAIF26M>;
+        clock-names = "main", "blk", "26m";
+        mediatek,infracfg-ao = <&infracfg_ao>;
+    };

@@ -87,7 +87,7 @@ properties:
   mediatek,modem-power-domain:
     $ref: /schemas/types.yaml#/definitions/phandle-array
     maxItems: 1
-    description:
+    description: |
       The modem (MD) power domain. Not "power-domains" on purpose: the
       bootloader powers the modem up and starts it, and a "power-domains"
       domain is powered on when the device is bound and off when it is
@@ -104,7 +104,7 @@ properties:
 
   mediatek,md-gpios:
     maxItems: 32
-    description:
+    description: |
       The pins for the names in mediatek,md-gpio-names, in the same
       order, all on one controller. The modem numbers pins as that
       controller does. The driver reads their levels for the modem but
@@ -134,6 +134,12 @@ properties:
     description:
       The SIM hot plug interrupts the modem asks about at boot, one row
       per SIM in order.
+
+  mediatek,dpmaif:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The DPMAIF block (mediatek,mt6878-dpmaif) carrying the network
+      data of the modem.
 
   md-vmodem-supply:
     description: Modem core supply.
