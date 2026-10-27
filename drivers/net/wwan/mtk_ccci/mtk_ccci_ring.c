@@ -180,9 +180,15 @@ static int mtk_ccci_ring_rx_idx(const struct mtk_ccci_ring *r, u32 *rd,
 {
 	*rd = readl(r->ctl + RB_RX_READ);
 	*wr = readl(r->ctl + RB_RX_WRITE);
+	/* the modem may leave its write index at the very end, not at 0 */
+	if (r->rx_len && *wr == r->rx_len)
+		*wr = 0;
 	if (!r->rx_len || *rd >= r->rx_len || *wr >= r->rx_len ||
-	    (*rd | *wr) & 7)
+	    (*rd | *wr) & 7) {
+		pr_warn_ratelimited("mtk_ccci: RX queue indexes %#x/%#x of %#x\n",
+				    *rd, *wr, r->rx_len);
 		return -EIO;
+	}
 	return 0;
 }
 
@@ -303,8 +309,14 @@ int mtk_ccci_ring_write(struct mtk_ccci_ring *ring, const void *data,
 		return -EINVAL;
 	rd = readl(ring->ctl + RB_TX_READ);
 	wr = readl(ring->ctl + RB_TX_WRITE);
-	if (rd >= ring->tx_len || wr >= ring->tx_len || (rd | wr) & 7)
+	/* the modem may leave its read index at the very end, not at 0 */
+	if (rd == ring->tx_len)
+		rd = 0;
+	if (rd >= ring->tx_len || wr >= ring->tx_len || (rd | wr) & 7) {
+		pr_warn_ratelimited("mtk_ccci: TX queue indexes %#x/%#x of %#x\n",
+				    rd, wr, ring->tx_len);
 		return -EIO;
+	}
 
 	frame = ALIGN(len + PKT_OVERHEAD, 8);
 	free = rd > wr ? rd - wr - 1 : ring->tx_len - wr + rd - 1;
