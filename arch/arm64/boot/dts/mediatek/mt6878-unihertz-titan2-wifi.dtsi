@@ -228,5 +228,14 @@
 	emi-alignment = <0x1000000>;
 	emi-max-addr = <0xc0000000>;
 
+	/*
+	 * For titan2-boot: LK's EMI MPU lets CONNSYS reach that pool only, so
+	 * all DMA of the device has to bounce through it: take LK's
+	 * memory-region and make the pool a (mapped) restricted-dma-pool.
+	 */
+	titan2,lk-refs = "memory-region";
+	titan2,lk-region-compatible = "restricted-dma-pool";
+	titan2,lk-region-map;
+
 	status = "disabled";
 };
