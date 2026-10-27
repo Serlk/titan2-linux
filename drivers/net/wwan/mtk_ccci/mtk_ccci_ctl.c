@@ -23,9 +23,9 @@
  * @ccci: driver state
  * @channels: exception CCIF channels raised, 0 for the watchdog
  *
- * The vendor exception handshake (queue switch, dumps) is not done: the
- * modem is only marked, the FSM gives up waiting and "stop" powers the
- * modem off. May be called from interrupt context.
+ * The modem is marked; the handshake runs in mtk_ccci_ee.c, the FSM
+ * gives up waiting, collects the report and powers the modem off. May
+ * be called from interrupt context.
  */
 void mtk_ccci_fsm_exception(struct mtk_ccci *ccci, u32 channels)
 {
@@ -73,7 +73,10 @@ void mtk_ccci_ctl_recv(struct mtk_ccci *ccci, struct sk_buff *skb)
 	case MTK_CCCI_CTL_MD_EX:
 	case MTK_CCCI_CTL_MD_EX_REC_OK:
 	case MTK_CCCI_CTL_MD_EX_PASS:
+		mtk_ccci_ee_ctl(ccci, w[1], w[3], skb);
+		break;
 	case MTK_CCCI_CTL_DRV_VER_ERROR:
+		dev_err(ccci->dev, "modem: AP/modem driver version mismatch\n");
 		mtk_ccci_fsm_exception(ccci, 0);
 		break;
 	default:

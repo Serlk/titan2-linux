@@ -442,6 +442,7 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	memset(ccci->rt_answer, 0, sizeof(ccci->rt_answer));
 	WRITE_ONCE(ccci->exception, false);
 	ccci->ex_channels = 0;
+	mtk_ccci_ee_reset(ccci);
 
 	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_REQUEST, 0, 0, &res);
 
@@ -490,6 +491,10 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	ret = -EOPNOTSUPP;
 
 fail:
+	if (READ_ONCE(ccci->exception)) {
+		WRITE_ONCE(ccci->state, MTK_CCCI_FSM_EXCEPTION);
+		mtk_ccci_ee_report(ccci);
+	}
 	if (ret != -EOPNOTSUPP)
 		mtk_ccci_query_boot_status(ccci);
 	if (ccci->md_domain_held)

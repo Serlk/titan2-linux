@@ -153,6 +153,10 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = mtk_ccci_ee_init(ccci);
+	if (ret)
+		return ret;
+
 	/* only with data=1; allocates, never starts */
 	ret = mtk_ccci_dpmaif_init(ccci);
 	if (ret)
@@ -166,6 +170,7 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	mtk_ccci_fsm_debugfs_init(ccci);
 	mtk_ccci_hif_debugfs_init(ccci);
 	mtk_ccci_port_debugfs_init(ccci);
+	mtk_ccci_ee_debugfs_init(ccci);
 
 	/* only with ccif_regs=1: reads, logs what LK left */
 	mtk_ccci_ccif_log_state(ccci);

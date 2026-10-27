@@ -255,7 +255,7 @@ static void mtk_ccci_rx_work(struct work_struct *work)
 	}
 
 	if (pending & MTK_CCIF_EX_MASK)
-		mtk_ccci_fsm_exception(ccci, pending & MTK_CCIF_EX_MASK);
+		mtk_ccci_ee_ccif(ccci, pending & MTK_CCIF_EX_MASK);
 
 	if (pending & BIT(MTK_CCIF_CH_SRAM)) {
 		/* the boot handshake: the FSM reads the SRAM itself */

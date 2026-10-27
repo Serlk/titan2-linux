@@ -230,6 +230,8 @@ enum mtk_ccci_channel {
 #define MTK_CCIF_CH_EX_ALLQ_RESET	19
 #define MTK_CCIF_CH_PEER_WAKEUP		20
 #define MTK_CCIF_CH_SEQ_ERROR		21
+#define MTK_CCIF_CH_EX_ACK		17	/* H2D */
+#define MTK_CCIF_CH_EX_CLEARQ_ACK	18	/* H2D */
 
 #define MTK_CCIF_RINGQ_MASK		(GENMASK(14, 0) & ~BIT(MTK_CCIF_CH_CCB_WAKEUP))
 #define MTK_CCIF_EX_MASK		(BIT(MTK_CCIF_CH_EX_INIT) | \
@@ -405,6 +407,15 @@ struct mtk_ccci {
 	u32 ex_channels;
 	bool wdt_fired;
 
+	/* exception handshake and report, see mtk_ccci_ee.c */
+#define MTK_CCCI_EE_PKT_MAX	2048
+	u32 ee_stage;			/* EX channels seen */
+	u8 *ee_pkt;			/* MD_EX_REC_OK payload */
+	u32 ee_pkt_len;
+	bool ee_rec_ok;
+	bool ee_pass;
+	char ee_report[768];
+
 	/* shared memory mappings, while started */
 	void __iomem *ccism;		/* CCISM_MCU */
 	u32 ccism_size;			/* what the queues use of it */
@@ -500,6 +511,15 @@ void mtk_ccci_sys_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_status_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_fsm_exception(struct mtk_ccci *ccci, u32 channels);
 void mtk_ccci_fsm_hs2(struct mtk_ccci *ccci);
+
+/* mtk_ccci_ee.c */
+int mtk_ccci_ee_init(struct mtk_ccci *ccci);
+void mtk_ccci_ee_debugfs_init(struct mtk_ccci *ccci);
+void mtk_ccci_ee_reset(struct mtk_ccci *ccci);
+void mtk_ccci_ee_ccif(struct mtk_ccci *ccci, u32 channels);
+void mtk_ccci_ee_ctl(struct mtk_ccci *ccci, u32 msg, u32 id,
+		     const struct sk_buff *skb);
+void mtk_ccci_ee_report(struct mtk_ccci *ccci);
 
 /* mtk_ccci_rt.c */
 bool mtk_ccci_rt_enabled(void);
