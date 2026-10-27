@@ -116,8 +116,14 @@ static irqreturn_t mtk_gpueb_mbox_thread(int irq, void *data)
 
 		mtk_gpueb_mbox_read_rx(buf, ch);
 		writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
-		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
+		/*
+		 * The data is copied out, so the channel can send again. Do this
+		 * before the client sees the reply: a client that sends its next
+		 * message from there would get -EBUSY, and the mailbox core keeps
+		 * such a message queued without ever retrying it.
+		 */
 		atomic_set(&ch->rx_status, 0);
+		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
 		return IRQ_HANDLED;
 	}
 
