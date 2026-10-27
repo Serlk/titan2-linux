@@ -1344,6 +1344,7 @@ enum {
 enum {
 	MCU_CE_CMD_TEST_CTRL = 0x01,
 	MCU_CE_CMD_START_HW_SCAN = 0x03,
+	MCU_CE_CMD_BSS_ACTIVATE_CTRL = 0x11,
 	MCU_CE_CMD_SET_PS_PROFILE = 0x05,
 	MCU_CE_CMD_SET_RX_FILTER = 0x0a,
 	MCU_CE_CMD_SET_CHAN_DOMAIN = 0x0f,
@@ -2025,6 +2026,24 @@ int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option);
 
 void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev *mdev,
 					  struct cfg80211_scan_request *sreq);
+/* legacy commands (mt76_connac_mcu_legacy.c) */
+#define MT76_CONNAC_LEGACY_RX_FILTER_DIRECTED		BIT(0)
+#define MT76_CONNAC_LEGACY_RX_FILTER_MULTICAST		BIT(1)
+#define MT76_CONNAC_LEGACY_RX_FILTER_ALL_MULTICAST	BIT(2)
+#define MT76_CONNAC_LEGACY_RX_FILTER_BROADCAST		BIT(3)
+#define MT76_CONNAC_LEGACY_RX_FILTER_PROMISCUOUS	BIT(5)
+
+int mt76_connac_legacy_bss_activate(struct mt76_dev *dev,
+				    struct ieee80211_vif *vif,
+				    struct mt76_vif_link *mvif,
+				    u8 bmc_wcid, bool enable);
+int mt76_connac_legacy_set_rx_filter(struct mt76_dev *dev, u32 filter);
+int mt76_connac_legacy_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
+			       struct ieee80211_scan_request *scan_req);
+void mt76_connac_mcu_fill_hw_scan(struct mt76_phy *phy,
+				  struct ieee80211_vif *vif,
+				  struct ieee80211_scan_request *scan_req,
+				  struct mt76_connac_hw_scan_req *req);
 int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			    struct ieee80211_scan_request *scan_req);
 int mt76_connac_mcu_cancel_hw_scan(struct mt76_phy *phy,

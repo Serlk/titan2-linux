@@ -1749,30 +1749,20 @@ void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev *mdev,
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_build_rnr_scan_param);
 
 #define MT76_CONNAC_SCAN_CHANNEL_TIME		60
-int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
-			    struct ieee80211_scan_request *scan_req)
+/* fill a zeroed scan request; the caller sets MT76_HW_SCANNING */
+void mt76_connac_mcu_fill_hw_scan(struct mt76_phy *phy,
+				  struct ieee80211_vif *vif,
+				  struct ieee80211_scan_request *scan_req,
+				  struct mt76_connac_hw_scan_req *req)
 {
 	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct cfg80211_scan_request *sreq = &scan_req->req;
-	int n_ssids = 0, err, i, duration;
+	int n_ssids = 0, i, duration;
 	int ext_channels_num = max_t(int, sreq->n_channels - 32, 0);
 	struct ieee80211_channel **scan_list = sreq->channels;
-	struct mt76_dev *mdev = phy->dev;
 	struct mt76_connac_mcu_scan_channel *chan;
-	struct mt76_connac_hw_scan_req *req;
-	struct sk_buff *skb;
 
-	if (test_bit(MT76_HW_SCANNING, &phy->state))
-		return -EBUSY;
-
-	skb = mt76_mcu_msg_alloc(mdev, NULL, sizeof(*req));
-	if (!skb)
-		return -ENOMEM;
-
-	set_bit(MT76_HW_SCANNING, &phy->state);
 	mvif->scan_seq_num = (mvif->scan_seq_num + 1) & 0x7f;
-
-	req = (struct mt76_connac_hw_scan_req *)skb_put_zero(skb, sizeof(*req));
 
 	req->seq_num = mvif->scan_seq_num | mvif->band_idx << 7;
 	req->bss_idx = mvif->idx;
@@ -1845,6 +1835,28 @@ int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 				     sreq->mac_addr_mask);
 		req->scan_func |= SCAN_FUNC_RANDOM_MAC;
 	}
+}
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_fill_hw_scan);
+
+int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
+			    struct ieee80211_scan_request *scan_req)
+{
+	struct mt76_dev *mdev = phy->dev;
+	struct mt76_connac_hw_scan_req *req;
+	struct sk_buff *skb;
+	int err;
+
+	if (test_bit(MT76_HW_SCANNING, &phy->state))
+		return -EBUSY;
+
+	skb = mt76_mcu_msg_alloc(mdev, NULL, sizeof(*req));
+	if (!skb)
+		return -ENOMEM;
+
+	set_bit(MT76_HW_SCANNING, &phy->state);
+
+	req = (struct mt76_connac_hw_scan_req *)skb_put_zero(skb, sizeof(*req));
+	mt76_connac_mcu_fill_hw_scan(phy, vif, scan_req, req);
 
 	err = mt76_mcu_skb_send_msg(mdev, skb, MCU_CE_CMD(START_HW_SCAN),
 				    false);

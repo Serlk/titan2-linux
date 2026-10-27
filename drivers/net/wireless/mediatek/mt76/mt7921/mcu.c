@@ -357,7 +357,8 @@ void mt7921_mcu_rx_event(struct mt792x_dev *dev, struct sk_buff *skb)
 
 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
 
-	if (rxd->option & MCU_UNI_CMD_UNSOLICITED_EVENT) {
+	/* the SoC firmware has no unified events: that byte is a version */
+	if (!dev->soc_axi && (rxd->option & MCU_UNI_CMD_UNSOLICITED_EVENT)) {
 		mt7921_mcu_uni_rx_unsolicited_event(dev, skb);
 		return;
 	}
@@ -764,11 +765,14 @@ int mt7921_mcu_set_tx(struct mt792x_dev *dev, struct ieee80211_vif *vif)
 		.wmm_idx = mvif->bss_conf.mt76.wmm_idx,
 	};
 	static const int to_aci[] = { 1, 0, 2, 3 };
+	/* the SoC firmware orders them by ACI: BE, BK, VI, VO */
+	static const int to_aci_soc[] = { 3, 2, 0, 1 };
+	const int *aci = dev->soc_axi ? to_aci_soc : to_aci;
 	int ac, ret;
 
 	for (ac = 0; ac < IEEE80211_NUM_ACS; ac++) {
 		struct ieee80211_tx_queue_params *q = &mvif->bss_conf.queue_params[ac];
-		struct edca *e = &req.edca[to_aci[ac]];
+		struct edca *e = &req.edca[aci[ac]];
 
 		e->aifs = cpu_to_le16(q->aifs);
 		e->txop = cpu_to_le16(q->txop);
@@ -800,7 +804,7 @@ int mt7921_mcu_set_tx(struct mt792x_dev *dev, struct ieee80211_vif *vif)
 			break;
 
 		q = &mvif->bss_conf.queue_params[ac].mu_edca_param_rec;
-		e = &(req_mu.edca[to_aci[ac]]);
+		e = &(req_mu.edca[aci[ac]]);
 
 		e->cw_min = q->ecw_min_max & 0xf;
 		e->cw_max = (q->ecw_min_max & 0xf0) >> 4;
@@ -978,6 +982,10 @@ int mt7921_mcu_set_eeprom(struct mt792x_dev *dev)
 		.buffer_mode = EE_MODE_EFUSE,
 		.format = EE_FORMAT_WHOLE,
 	};
+
+	/* MediaTek's driver never selects the efuse mode on the SoC */
+	if (dev->soc_axi)
+		return 0;
 
 	return mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(EFUSE_BUFFER_MODE),
 				 &req, sizeof(req), true);

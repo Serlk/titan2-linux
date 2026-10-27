@@ -227,11 +227,20 @@ void mt7921_set_stream_he_caps(struct mt792x_phy *phy)
 int __mt7921_start(struct mt792x_phy *phy)
 {
 	struct mt76_phy *mphy = phy->mt76;
+	bool soc = phy->dev->soc_axi;
 	int err;
 
-	err = mt76_connac_mcu_set_mac_enable(mphy->dev, 0, true, false);
-	if (err)
-		return err;
+	/*
+	 * The SoC firmware knows none of the EXT commands for MAC enable, RX
+	 * path and radio LED: MAC_INIT_CTRL is not one of them, 0x4e reads
+	 * the efuse buffer and 0x05 switches the radio. It tunes the channel
+	 * itself for a scan, a channel request or the BSS.
+	 */
+	if (!soc) {
+		err = mt76_connac_mcu_set_mac_enable(mphy->dev, 0, true, false);
+		if (err)
+			return err;
+	}
 
 	if (mt7921_fw_regd_v2(phy->dev)) {
 		err = mt76_connac_mcu_set_channel_domain(mphy);
@@ -239,9 +248,11 @@ int __mt7921_start(struct mt792x_phy *phy)
 			return err;
 	}
 
-	err = mt7921_mcu_set_chan_info(phy, MCU_EXT_CMD(SET_RX_PATH));
-	if (err)
-		return err;
+	if (!soc) {
+		err = mt7921_mcu_set_chan_info(phy, MCU_EXT_CMD(SET_RX_PATH));
+		if (err)
+			return err;
+	}
 
 	err = mt7921_set_tx_sar_pwr(mphy->hw, NULL);
 	if (err)
@@ -252,7 +263,7 @@ int __mt7921_start(struct mt792x_phy *phy)
 
 	ieee80211_queue_delayed_work(mphy->hw, &mphy->mac_work,
 				     MT792x_WATCHDOG_TIME);
-	if (mt76_is_mmio(mphy->dev)) {
+	if (mt76_is_mmio(mphy->dev) && !soc) {
 		err = mt7921_mcu_radio_led_ctrl(phy->dev, EXT_CMD_RADIO_LED_CTRL_ENABLE);
 		if (err)
 			return err;
@@ -288,7 +299,7 @@ static void mt7921_stop(struct ieee80211_hw *hw, bool suspend)
 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
 	int err = 0;
 
-	if (mt76_is_mmio(&dev->mt76)) {
+	if (mt76_is_mmio(&dev->mt76) && !dev->soc_axi) {
 		mt792x_mutex_acquire(dev);
 		err = mt7921_mcu_radio_led_ctrl(dev, EXT_CMD_RADIO_OFF_LED);
 		mt792x_mutex_release(dev);
@@ -322,16 +333,21 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	mvif->bss_conf.mt76.band_idx = 0;
 	mvif->bss_conf.mt76.wmm_idx = mvif->bss_conf.mt76.idx % MT76_CONNAC_MAX_WMM_SETS;
 
-	ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
-					  &mvif->bss_conf.mt76,
-					  &mvif->sta.deflink.wcid, true);
+	idx = MT792x_WTBL_RESERVED - mvif->bss_conf.mt76.idx;
+
+	if (dev->soc_axi)
+		ret = mt76_connac_legacy_bss_activate(&dev->mt76, vif,
+						      &mvif->bss_conf.mt76,
+						      idx, true);
+	else
+		ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
+						  &mvif->bss_conf.mt76,
+						  &mvif->sta.deflink.wcid, true);
 	if (ret)
 		goto out;
 
 	dev->mt76.vif_mask |= BIT_ULL(mvif->bss_conf.mt76.idx);
 	phy->omac_mask |= BIT_ULL(mvif->bss_conf.mt76.omac_idx);
-
-	idx = MT792x_WTBL_RESERVED - mvif->bss_conf.mt76.idx;
 
 	INIT_LIST_HEAD(&mvif->sta.deflink.wcid.poll_list);
 	mvif->sta.deflink.wcid.idx = idx;
@@ -688,7 +704,19 @@ static void mt7921_configure_filter(struct ieee80211_hw *hw,
 	MT7921_FILTER(FIF_OTHER_BSS, OTHER_BSS);
 
 	mt792x_mutex_acquire(dev);
-	mt7921_mcu_set_rxfilter(dev, flags, 0, 0);
+	if (dev->soc_axi) {
+		/* the legacy filter is a mask of the frames to pass up */
+		u32 legacy = MT76_CONNAC_LEGACY_RX_FILTER_DIRECTED |
+			     MT76_CONNAC_LEGACY_RX_FILTER_MULTICAST |
+			     MT76_CONNAC_LEGACY_RX_FILTER_ALL_MULTICAST |
+			     MT76_CONNAC_LEGACY_RX_FILTER_BROADCAST;
+
+		if (*total_flags & FIF_OTHER_BSS)
+			legacy |= MT76_CONNAC_LEGACY_RX_FILTER_PROMISCUOUS;
+		mt76_connac_legacy_set_rx_filter(&dev->mt76, legacy);
+	} else {
+		mt7921_mcu_set_rxfilter(dev, flags, 0, 0);
+	}
 	mt792x_mutex_release(dev);
 
 	*total_flags &= (FIF_OTHER_BSS | FIF_FCSFAIL | FIF_CONTROL);
@@ -722,8 +750,12 @@ static void mt7921_bss_info_changed(struct ieee80211_hw *hw,
 	if (changed & (BSS_CHANGED_QOS | BSS_CHANGED_BEACON_ENABLED))
 		mt7921_mcu_set_tx(dev, vif);
 
-	if (changed & BSS_CHANGED_PS)
-		mt7921_mcu_uni_bss_ps(dev, vif);
+	if (changed & BSS_CHANGED_PS) {
+		if (dev->soc_axi)
+			mt76_connac_mcu_set_vif_ps(&dev->mt76, vif);
+		else
+			mt7921_mcu_uni_bss_ps(dev, vif);
+	}
 
 	if (changed & BSS_CHANGED_CQM)
 		mt7921_mcu_set_rssimonitor(dev, vif);
@@ -1038,7 +1070,9 @@ void mt7921_scan_work(struct work_struct *work)
 
 			skb_pull(skb, sizeof(*rxd));
 			event = (struct mt76_connac_hw_scan_done *)skb->data;
-			mt7921_regd_change(phy, event->alpha2);
+			/* reserved bytes on the SoC firmware */
+			if (!phy->dev->soc_axi)
+				mt7921_regd_change(phy, event->alpha2);
 		}
 
 		if (test_and_clear_bit(MT76_HW_SCANNING,
@@ -1062,7 +1096,10 @@ mt7921_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	int err;
 
 	mt792x_mutex_acquire(dev);
-	err = mt76_connac_mcu_hw_scan(mphy, vif, req);
+	if (dev->soc_axi)
+		err = mt76_connac_legacy_hw_scan(mphy, vif, req);
+	else
+		err = mt76_connac_mcu_hw_scan(mphy, vif, req);
 	mt792x_mutex_release(dev);
 
 	return err;

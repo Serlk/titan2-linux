@@ -77,6 +77,10 @@ int mt7921_mac_init(struct mt792x_dev *dev)
 	for (i = 0; i < 2; i++)
 		mt792x_mac_init_band(dev, i);
 
+	/* EXT PROTECT_CTRL is not a command of the SoC firmware */
+	if (dev->soc_axi)
+		return 0;
+
 	return mt76_connac_mcu_set_rts_thresh(&dev->mt76, 0x92b, 0);
 }
 EXPORT_SYMBOL_GPL(mt7921_mac_init);

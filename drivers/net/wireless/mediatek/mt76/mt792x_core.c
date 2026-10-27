@@ -152,7 +152,8 @@ void mt792x_stop(struct ieee80211_hw *hw, bool suspend)
 	cancel_work_sync(&dev->reset_work);
 	mt76_connac_free_pending_tx_skbs(&dev->pm, NULL);
 
-	if (is_connac2(&dev->mt76)) {
+	/* not a command of the SoC firmware */
+	if (is_connac2(&dev->mt76) && !dev->soc_axi) {
 		mt792x_mutex_acquire(dev);
 		mt76_connac_mcu_set_mac_enable(&dev->mt76, 0, false, false);
 		mt792x_mutex_release(dev);
@@ -174,8 +175,12 @@ void mt792x_mac_link_bss_remove(struct mt792x_dev *dev,
 	link_conf = mt792x_vif_to_bss_conf(vif, mconf->link_id);
 
 	mt76_connac_free_pending_tx_skbs(&dev->pm, &mlink->wcid);
-	mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf, &mconf->mt76,
-				    &mlink->wcid, false);
+	if (dev->soc_axi)
+		mt76_connac_legacy_bss_activate(&dev->mt76, vif, &mconf->mt76,
+						idx, false);
+	else
+		mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf,
+					    &mconf->mt76, &mlink->wcid, false);
 
 	rcu_assign_pointer(dev->mt76.wcid[idx], NULL);
 
