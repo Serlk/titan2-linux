@@ -21,6 +21,8 @@
 #include <linux/ioport.h>
 #include <linux/miscdevice.h>
 #include <linux/mutex.h>
+#include <linux/netdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -33,6 +35,10 @@ struct regmap;
 struct regulator;
 struct seq_file;
 struct mtk_ccci_dpmaif;
+
+/* network devices: ccmni0..20, the CCMNI index is the WWAN link id */
+#define MTK_CCCI_NET_LINKS	21
+
 struct wwan_port;
 
 /*
@@ -449,6 +455,8 @@ struct mtk_ccci {
 	struct mtk_ccci_cdev cdev_rpc;	/* /dev/ccci_rpc */
 
 	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */
+	/* WWAN links by CCMNI index, written under RTNL */
+	struct net_device __rcu *net_link[MTK_CCCI_NET_LINKS];
 	struct dentry *debugfs;
 };
 
@@ -540,12 +548,14 @@ void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s);
 /* mtk_ccci_rpc.c */
 int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 
-/* mtk_ccci_dpmaif.c, mtk_ccci_net.c: data path, hardware set up, no traffic */
+/* mtk_ccci_dpmaif.c, mtk_ccci_net.c: data path */
 int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci);
 int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_pre_stop(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci);
+netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
+				 struct sk_buff *skb, unsigned int ch);
 int mtk_ccci_net_init(struct mtk_ccci *ccci);
 
 /* mtk_ccci_fsm.c */

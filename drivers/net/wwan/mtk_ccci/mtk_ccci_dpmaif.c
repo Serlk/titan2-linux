@@ -954,3 +954,22 @@ void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci)
 		debugfs_create_file("dpmaif", 0400, ccci->debugfs,
 				    ccci->dpmaif, &mtk_ccci_dpmaif_fops);
 }
+
+/**
+ * mtk_ccci_dpmaif_xmit() - send an IP packet to the modem
+ * @ccci: driver state
+ * @dev: the WWAN link it comes from
+ * @skb: the packet, raw IP
+ * @ch: CCMNI index of the link
+ *
+ * TODO: the UL path; drops.
+ *
+ * Return: NETDEV_TX_OK.
+ */
+netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
+				 struct sk_buff *skb, unsigned int ch)
+{
+	dev->stats.tx_dropped++;
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
