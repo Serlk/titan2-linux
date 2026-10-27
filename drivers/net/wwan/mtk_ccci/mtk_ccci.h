@@ -342,6 +342,7 @@ struct mtk_ccci_cdev {
 	wait_queue_head_t wq;
 	atomic_t open;
 	unsigned long rx_pkts, tx_pkts, rx_full;
+	enum mtk_ccci_smem_id mmap_smem;	/* mmap() of it; DBM: none */
 };
 
 /* per-start statistics, for debugfs */
@@ -433,6 +434,7 @@ struct mtk_ccci {
 	unsigned int num_ports;
 	bool ports_registered;
 	struct mtk_ccci_cdev cdev_fs;	/* /dev/ccci_fs */
+	struct mtk_ccci_cdev cdev_rpc;	/* /dev/ccci_rpc */
 
 	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */
 	struct dentry *debugfs;

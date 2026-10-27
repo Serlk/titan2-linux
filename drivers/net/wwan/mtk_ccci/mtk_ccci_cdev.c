@@ -3,9 +3,10 @@
  * MediaTek CCCI: character device ports with a user supplied header.
  *
  * The MediaTek downstream driver hands the modem's file server requests (channel
- * FS_RX, queue 4) to userspace through /dev/ccci_fs, with the CCCI
- * header left in (PORT_F_USER_HEADER). The same minimal ABI here, for
- * an open file server in userspace:
+ * FS_RX, queue 4) to userspace through /dev/ccci_fs, and the RPC requests
+ * it does not answer itself (channel RPC_RX, queue 1) through
+ * /dev/ccci_rpc, with the CCCI header left in (PORT_F_USER_HEADER). The
+ * same minimal ABI here, for open servers in userspace:
  *
  *  - read(): one modem packet, 16-byte CCCI header included; a short
  *    buffer gets the start of it and the rest on the next read (as the
@@ -16,6 +17,10 @@
  *    reserved word (the request slot) are the caller's.
  *  - poll(): EPOLLIN with a packet queued, EPOLLOUT while writes are
  *    accepted (from HS1 on, as in the MediaTek downstream driver for FS and RPC).
+ *  - mmap() on /dev/ccci_rpc only: the DRDI shared memory region (from
+ *    offset 0, at most its page-rounded size), into which the RPC server
+ *    copies the modem's RF calibration sets on request. Write-combined,
+ *    not cached: the modem reads it without snooping.
  *  - one opener at a time; no ioctls.
  *
  * Packets are kept while nobody has the device open (stock
@@ -34,6 +39,7 @@
 #include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/poll.h>
 #include <linux/sched/signal.h>
 #include <linux/seq_file.h>
@@ -205,6 +211,31 @@ static __poll_t mtk_ccci_cdev_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
+static int mtk_ccci_cdev_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct mtk_ccci_cdev *cd = mtk_ccci_cdev_of(file);
+	const struct mtk_ccci_smem_region *r;
+	unsigned long size;
+
+	if (cd->mmap_smem == MTK_CCCI_SMEM_DBM)
+		return -ENODEV;
+	r = mtk_ccci_lk_smem(cd->ccci, cd->mmap_smem);
+	if (!r)
+		return -ENODEV;
+	size = le32_to_cpu(r->size) & PAGE_MASK;
+	if (!size || !PAGE_ALIGNED(le64_to_cpu(r->ap_phys)))
+		return -ENODEV;
+	if (vma->vm_pgoff || vma->vm_end - vma->vm_start > size)
+		return -EINVAL;
+	size = vma->vm_end - vma->vm_start;
+
+	vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start,
+			       PHYS_PFN(le64_to_cpu(r->ap_phys)), size,
+			       vma->vm_page_prot);
+}
+
 static const struct file_operations mtk_ccci_cdev_fops = {
 	.owner = THIS_MODULE,
 	.open = mtk_ccci_cdev_open,
@@ -212,6 +243,7 @@ static const struct file_operations mtk_ccci_cdev_fops = {
 	.read = mtk_ccci_cdev_read,
 	.write = mtk_ccci_cdev_write,
 	.poll = mtk_ccci_cdev_poll,
+	.mmap = mtk_ccci_cdev_mmap,
 	.llseek = noop_llseek,
 };
 
@@ -220,16 +252,23 @@ void mtk_ccci_cdev_reset(struct mtk_ccci *ccci)
 {
 	skb_queue_purge(&ccci->cdev_fs.rx);
 	wake_up_interruptible(&ccci->cdev_fs.wq);
+	skb_queue_purge(&ccci->cdev_rpc.rx);
+	wake_up_interruptible(&ccci->cdev_rpc.wq);
 }
 
-void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s)
+static void mtk_ccci_cdev_show(const struct mtk_ccci_cdev *cd,
+			       struct seq_file *s)
 {
-	const struct mtk_ccci_cdev *cd = &ccci->cdev_fs;
-
 	seq_printf(s, "/dev/%s: %s, rx %lu (queued %u, full %lu) tx %lu\n",
 		   cd->misc.name, atomic_read(&cd->open) ? "open" : "closed",
 		   cd->rx_pkts, skb_queue_len(&cd->rx), cd->rx_full,
 		   cd->tx_pkts);
+}
+
+void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s)
+{
+	mtk_ccci_cdev_show(&ccci->cdev_fs, s);
+	mtk_ccci_cdev_show(&ccci->cdev_rpc, s);
 }
 
 static void mtk_ccci_cdev_cleanup(void *data)
@@ -241,11 +280,13 @@ static void mtk_ccci_cdev_cleanup(void *data)
 }
 
 static int mtk_ccci_cdev_add(struct mtk_ccci *ccci, struct mtk_ccci_cdev *cd,
-			     const char *name, u16 tx_ch, u8 txq)
+			     const char *name, u16 tx_ch, u8 txq,
+			     enum mtk_ccci_smem_id mmap_smem)
 {
 	int ret;
 
 	cd->ccci = ccci;
+	cd->mmap_smem = mmap_smem;
 	cd->tx_ch = tx_ch;
 	cd->txq = txq;
 	skb_queue_head_init(&cd->rx);
@@ -265,6 +306,14 @@ static int mtk_ccci_cdev_add(struct mtk_ccci *ccci, struct mtk_ccci_cdev *cd,
 
 int mtk_ccci_cdev_init(struct mtk_ccci *ccci)
 {
-	return mtk_ccci_cdev_add(ccci, &ccci->cdev_fs, "ccci_fs",
-				 MTK_CCCI_CH_FS_TX, MTK_CCCI_Q_FS);
+	int ret;
+
+	ret = mtk_ccci_cdev_add(ccci, &ccci->cdev_fs, "ccci_fs",
+				MTK_CCCI_CH_FS_TX, MTK_CCCI_Q_FS,
+				MTK_CCCI_SMEM_DBM);
+	if (ret)
+		return ret;
+	return mtk_ccci_cdev_add(ccci, &ccci->cdev_rpc, "ccci_rpc",
+				 MTK_CCCI_CH_RPC_TX, MTK_CCCI_Q_RPC,
+				 MTK_CCCI_SMEM_DRDI);
 }

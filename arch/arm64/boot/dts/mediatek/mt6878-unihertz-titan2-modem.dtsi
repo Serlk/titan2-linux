@@ -18,8 +18,9 @@
 	mediatek,modem-power-domain = <&spm MT6878_POWER_DOMAIN_MD>;
 
 	/*
-	 * Pins the modem asks for over RPC (stock "gpio_usage_mapping",
-	 * second cell): SIM hot plug and interface, band detection.
+	 * Pins the modem asks for over RPC (downstream "gpio_usage_mapping"):
+	 * SIM hot plug and interface, band detection. The modem numbers
+	 * them as &pio does.
 	 */
 	mediatek,md-gpio-names = "GPIO_SIM1_HOT_PLUG", "GPIO_SIM2_HOT_PLUG",
 				 "GPIO_SIM1_SCLK", "GPIO_SIM1_SRST",
@@ -27,6 +28,19 @@
 				 "GPIO_SIM2_SRST", "GPIO_SIM2_SIO",
 				 "GPIO_FDD_Band_Support_Detection_1",
 				 "GPIO_FDD_Band_Support_Detection_2";
-	mediatek,md-gpio-pins = <46 47 83 84 85 86 87 88 186 187>;
+	mediatek,md-gpios = <&pio 46 GPIO_ACTIVE_HIGH>, <&pio 47 GPIO_ACTIVE_HIGH>,
+			    <&pio 83 GPIO_ACTIVE_HIGH>, <&pio 84 GPIO_ACTIVE_HIGH>,
+			    <&pio 85 GPIO_ACTIVE_HIGH>, <&pio 86 GPIO_ACTIVE_HIGH>,
+			    <&pio 87 GPIO_ACTIVE_HIGH>, <&pio 88 GPIO_ACTIVE_HIGH>,
+			    <&pio 186 GPIO_ACTIVE_HIGH>, <&pio 187 GPIO_ACTIVE_HIGH>;
+
+	/*
+	 * The board ADC the modem reads at boot: MT6363 AUXADC VIN1 without
+	 * pull-up, channel number 19 as the downstream driver reports it. The
+	 * mainline AUXADC driver reads VIN1 with the 100k pull-up only, so
+	 * the value is the one the factory firmware read on this board (raw
+	 * 1833..1921 over four boots, ~105 mV).
+	 */
+	mediatek,md-adc = <19 1860>;
 	status = "okay";
 };

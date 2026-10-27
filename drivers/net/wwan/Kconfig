@@ -109,7 +109,7 @@ config IOSM
 config MTK_CCCI
 	tristate "MediaTek SoC-integrated modem (CCCI)"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
-	depends on OF && HAS_IOMEM && HAVE_ARM_SMCCC
+	depends on OF && HAS_IOMEM && HAVE_ARM_SMCCC && GPIOLIB
 	select MFD_SYSCON
 	help
 	  Enables the driver for the modem built into MediaTek smartphone

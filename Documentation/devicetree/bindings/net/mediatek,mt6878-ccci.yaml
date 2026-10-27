@@ -102,12 +102,22 @@ properties:
       Names the modem firmware asks for when it looks up the pins of its
       SIM, band detection and other lines (e.g. "GPIO_SIM1_HOT_PLUG").
 
-  mediatek,md-gpio-pins:
-    $ref: /schemas/types.yaml#/definitions/uint32-array
+  mediatek,md-gpios:
     maxItems: 32
     description:
-      Pin numbers, as the modem numbers them, for the names in
-      mediatek,md-gpio-names, in the same order.
+      The pins for the names in mediatek,md-gpio-names, in the same
+      order, all on one controller. The modem numbers pins as that
+      controller does. The driver reads their levels for the modem but
+      never requests them: several stay muxed to the modem.
+
+  mediatek,md-adc:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    items:
+      - description: channel number reported to the modem
+      - description: raw reading reported for every sample
+    description:
+      The board ADC the modem reads at boot (on MediaTek boards a PMIC
+      AUXADC input sampled once by the AP).
 
   md-vmodem-supply:
     description: Modem core supply.
