@@ -159,6 +159,10 @@ module_param(runtime_pm, bool, 0444);
 MODULE_PARM_DESC(runtime_pm,
 		 "Hand the core to the firmware (fw own) when idle; CONN_INFRA stays awake");
 
+static bool mcu_trace;
+module_param(mcu_trace, bool, 0644);
+MODULE_PARM_DESC(mcu_trace, "Log every MCU command (id, sequence, length)");
+
 static bool phy_action = true;
 module_param(phy_action, bool, 0444);
 MODULE_PARM_DESC(phy_action,
@@ -395,6 +399,10 @@ static int mt7921_soc_mcu_send_message(struct mt76_dev *mdev,
 	if (cmd == MCU_CMD(FW_SCATTER))
 		txq = MT_MCUQ_FWDL;
 
+	if (mcu_trace)
+		dev_info(mdev->dev, "mcu cmd 0x%08x seq %d len %u\n", cmd,
+			 seq ? *seq : -1, skb->len);
+
 	return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[txq], skb, 0);
 }
 
@@ -552,6 +560,10 @@ static int mt7921_soc_phy_action(struct mt7921_soc_dev *soc)
 		return ret;
 
 	if (skb->len < sizeof(*hdr) + sizeof(*tlv) + sizeof(*rsp)) {
+		dev_err(dev->mt76.dev, "short calibration response (%u bytes)\n",
+			skb->len);
+		print_hex_dump(KERN_ERR, "cal: ", DUMP_PREFIX_OFFSET, 16, 1,
+			       skb->data, min_t(u32, skb->len, 64), false);
 		ret = -EINVAL;
 		goto out;
 	}
