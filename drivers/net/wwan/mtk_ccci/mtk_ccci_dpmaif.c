@@ -17,10 +17,17 @@
  *    length) followed by payload DRBs (address, length).
  *
  * The block is set up before the modem is released and reset after the
- * modem is powered off, as the downstream driver does it. So far the
- * rings are programmed but no buffer is lent and the DL queue stays
- * disabled: no packet moves. The interrupt is taken, counted and its
- * sources masked. Nothing here runs unless the module parameter data=1.
+ * modem is powered off, as the downstream driver does it.
+ *
+ * Receive follows t7xx (t7xx_hif_dpmaif_rx.c): NAPI on the one RX queue
+ * reads the PITs up to the hardware write index, checks their sequence
+ * numbers, puts a packet together from its skb buffer and fragment pages
+ * and hands it to the WWAN link of its CCMNI channel; the buffers handed
+ * back are lent again. A buffer slot is lent again only once its PIT has
+ * been read, so the hardware never writes into a buffer the AP owns, and
+ * all buffers are freed only after the block is reset.
+ *
+ * Nothing here runs unless the module parameter data=1.
  *
  * Copyright (C) 2016 MediaTek Inc.
  * Copyright (C) 2021 Intel Corporation (t7xx DPMAIF)
@@ -37,26 +44,34 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/mfd/syscon.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/netdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
+#include <linux/skbuff.h>
 
 #include "mtk_ccci.h"
 
 static bool data;
 module_param(data, bool, 0444);
 MODULE_PARM_DESC(data,
-		 "set up DPMAIF with the modem (default: no); no packets move yet");
+		 "set up DPMAIF with the modem: mobile data (default: no)");
 
 #define DPMAIF_TXQ_NUM		4
 #define DPMAIF_BAT_CNT		16384
 #define DPMAIF_FRG_CNT		16384
 #define DPMAIF_PIT_CNT		(DPMAIF_BAT_CNT * 2)
 #define DPMAIF_DRB_CNT		2048
+
+/* buffers lent to the hardware at a time (downstream: up to the ring size) */
+#define DPMAIF_BAT_LEND		2048
+#define DPMAIF_FRG_LEND		1024
 
 /* DL settings of the downstream driver */
 #define DPMAIF_BAT_BUF_SIZE	(128 * 13)	/* a BAT buffer */
@@ -80,6 +95,7 @@ MODULE_PARM_DESC(data,
 #define PD_UL_DBG_STA2		0x088
 #define  UL_DBG_IDLE		BIT(11)
 #define PD_DL_BAT_INIT		0x100
+#define PD_DL_BAT_ADD		0x104	/* buffers lent, BIT(16): fragment */
 #define PD_DL_BAT_INIT_CON0	0x108	/* BAT base 31:0 */
 #define PD_DL_BAT_INIT_CON1	0x10c
 #define  BAT_CON1_CNT		GENMASK(15, 0)
@@ -87,6 +103,7 @@ MODULE_PARM_DESC(data,
 #define  BAT_CON1_CACHE_PRI	BIT(22)
 #define  BAT_CON1_ADDR_HI	GENMASK(31, 24)
 #define PD_DL_PIT_INIT		0x120
+#define PD_DL_PIT_ADD		0x124	/* PITs read */
 #define PD_DL_PIT_INIT_CON0	0x128	/* PIT base 31:0 */
 #define PD_DL_PIT_INIT_CON1	0x12c
 #define  PIT_CON1_CNT		GENMASK(17, 0)
@@ -100,6 +117,9 @@ MODULE_PARM_DESC(data,
 #define  DL_INIT_ALLSET		BIT(0)
 #define  DL_INIT_FRG		BIT(16)
 #define  DL_INIT_EN		BIT(31)	/* reads 1 while the update runs */
+/* BAT_ADD, PIT_ADD */
+#define  DL_ADD_FRG		BIT(16)
+#define  DL_ADD_UPDATE		BIT(31)	/* reads 1 while the update runs */
 
 #define PD_AP_UL_L2TISAR0	0x400	/* UL interrupt status, write 1 to clear */
 #define PD_AP_L1TISAR0		0x410
@@ -131,6 +151,7 @@ MODULE_PARM_DESC(data,
 #define  FRG_BUF_SZ		GENMASK(15, 8)	/* in 128 bytes */
 #define  FRG_FEATURE_EN		BIT(28)
 #define PD_DL_PIT_WR_IDX	0xc60
+#define  DL_PIT_IDX		GENMASK(17, 0)
 #define PD_DL_FRG_RD_IDX	0xc78
 #define PD_DL_BAT_RD_IDX	0xcd8
 #define PD_DL_BAT_WR_IDX	0xcdc
@@ -223,6 +244,17 @@ struct dpmaif_bat {
 	__le32 addr_hi;
 };
 
+/* what is lent in a BAT slot */
+struct dpmaif_bat_skb {
+	struct sk_buff *skb;
+	dma_addr_t dma;
+};
+
+struct dpmaif_bat_frg {
+	void *data;			/* page fragment */
+	dma_addr_t dma;
+};
+
 /* DRB (8 bytes) */
 #define DRB0_TYPE		GENMASK(1, 0)	/* 0: payload, 1: message */
 #define DRB0_CONT		BIT(2)
@@ -262,6 +294,35 @@ struct mtk_ccci_dpmaif {
 	struct dpmaif_ring frg;
 	struct dpmaif_ring pit;
 	struct dpmaif_ring drb[DPMAIF_TXQ_NUM];
+
+	/* DL, only touched by NAPI while started */
+	struct net_device *napi_dev;
+	struct napi_struct napi;
+	struct dpmaif_bat_skb *bat_skb;	/* by BAT slot */
+	struct dpmaif_bat_frg *frg_buf;	/* by fragment BAT slot */
+	u32 bat_wr;			/* next slot to lend */
+	u32 bat_lent;
+	u32 frg_wr;
+	u32 frg_lent;
+	u32 pit_rd;
+	u8 pit_seq;			/* the one expected next */
+	bool rx_retry;			/* a PIT not written yet, poll again */
+	/* the packet being put together */
+	struct sk_buff *rx_skb;
+	bool rx_msg;			/* its message PIT seen */
+	bool rx_drop;
+	bool rx_csum_ok;
+	u8 rx_ch;
+
+	/* DL counters: per CCMNI channel, and what was dropped */
+	unsigned long dl_pkts[MTK_CCCI_NET_LINKS];
+	unsigned long dl_nolink[MTK_CCCI_NET_LINKS];
+	unsigned long dl_bad_ch;
+	u8 dl_last_bad_ch;
+	unsigned long dl_dropped;	/* the modem said so */
+	unsigned long dl_err;		/* PIT or buffer inconsistent */
+	unsigned long pit_seq_err;
+	unsigned long bat_nomem;
 
 	/* interrupt counters */
 	unsigned long irqs;
@@ -496,6 +557,364 @@ static void dpmaif_clear_ip_busy(struct mtk_ccci_dpmaif *dp)
 		writel(v, dp->pd + PD_AP_IP_BUSY);
 }
 
+/* BAT_ADD or PIT_ADD: wait until the last update is taken, write */
+static int dpmaif_dl_add(struct mtk_ccci_dpmaif *dp, u32 reg, u32 val,
+			 bool wait_done)
+{
+	int ret;
+
+	ret = dpmaif_wait_clear(dp, dp->pd + reg, DL_ADD_UPDATE, "DL add");
+	if (ret)
+		return ret;
+	writel(val, dp->pd + reg);
+	return wait_done ? dpmaif_wait_clear(dp, dp->pd + reg, DL_ADD_UPDATE,
+					     "DL add") : 0;
+}
+
+/*
+ * Lend skb buffers in ring order, as long as the next slot came back (its
+ * PIT was read) and fewer than DPMAIF_BAT_LEND are out.
+ */
+static void dpmaif_bat_refill(struct mtk_ccci_dpmaif *dp, gfp_t gfp)
+{
+	struct dpmaif_bat *bat = dp->bat.base;
+	u32 n = 0;
+
+	while (dp->bat_lent < DPMAIF_BAT_LEND) {
+		struct dpmaif_bat_skb *b = &dp->bat_skb[dp->bat_wr];
+		struct sk_buff *skb;
+		dma_addr_t dma;
+
+		if (b->skb)
+			break;
+		skb = __dev_alloc_skb(DPMAIF_BAT_BUF_SIZE, gfp);
+		if (!skb) {
+			dp->bat_nomem++;
+			break;
+		}
+		dma = dma_map_single(dp->dev, skb->data, DPMAIF_BAT_BUF_SIZE,
+				     DMA_FROM_DEVICE);
+		if (dma_mapping_error(dp->dev, dma)) {
+			dev_kfree_skb_any(skb);
+			dp->bat_nomem++;
+			break;
+		}
+		b->skb = skb;
+		b->dma = dma;
+		bat[dp->bat_wr].addr_lo = cpu_to_le32(lower_32_bits(dma));
+		bat[dp->bat_wr].addr_hi = cpu_to_le32(upper_32_bits(dma) & 0xff);
+		dp->bat_wr = (dp->bat_wr + 1) % dp->bat.cnt;
+		dp->bat_lent++;
+		n++;
+	}
+	/* writel() orders the BAT writes before the register */
+	if (n)
+		dpmaif_dl_add(dp, PD_DL_BAT_ADD, DL_ADD_UPDATE | n, false);
+}
+
+/* the same with page fragments for the fragment BAT */
+static void dpmaif_frg_refill(struct mtk_ccci_dpmaif *dp)
+{
+	struct dpmaif_bat *bat = dp->frg.base;
+	u32 n = 0;
+
+	while (dp->frg_lent < DPMAIF_FRG_LEND) {
+		struct dpmaif_bat_frg *f = &dp->frg_buf[dp->frg_wr];
+		struct page *page;
+		dma_addr_t dma;
+		void *data;
+
+		if (f->data)
+			break;
+		data = netdev_alloc_frag(DPMAIF_FRG_BUF_SIZE);
+		if (!data) {
+			dp->bat_nomem++;
+			break;
+		}
+		page = virt_to_head_page(data);
+		dma = dma_map_page(dp->dev, page, data - page_address(page),
+				   DPMAIF_FRG_BUF_SIZE, DMA_FROM_DEVICE);
+		if (dma_mapping_error(dp->dev, dma)) {
+			skb_free_frag(data);
+			dp->bat_nomem++;
+			break;
+		}
+		f->data = data;
+		f->dma = dma;
+		bat[dp->frg_wr].addr_lo = cpu_to_le32(lower_32_bits(dma));
+		bat[dp->frg_wr].addr_hi = cpu_to_le32(upper_32_bits(dma) & 0xff);
+		dp->frg_wr = (dp->frg_wr + 1) % dp->frg.cnt;
+		dp->frg_lent++;
+		n++;
+	}
+	if (n)
+		dpmaif_dl_add(dp, PD_DL_BAT_ADD, DL_ADD_UPDATE | DL_ADD_FRG | n,
+			      false);
+}
+
+/* lend the first buffers, enable both BAT rings (downstream order) */
+static int dpmaif_dl_start(struct mtk_ccci_dpmaif *dp)
+{
+	int ret;
+
+	dpmaif_frg_refill(dp);
+	dpmaif_bat_refill(dp, GFP_KERNEL);
+	if (!dp->frg_lent || !dp->bat_lent)
+		return -ENOMEM;
+
+	dpmaif_rmw(dp->pd + PD_DL_BAT_INIT_CON1, BAT_CON1_EN, BAT_CON1_EN);
+	ret = dpmaif_dl_init_cmd(dp, PD_DL_BAT_INIT, DL_INIT_EN | DL_INIT_FRG,
+				 "frag BAT enable");
+	if (ret)
+		return ret;
+	dpmaif_rmw(dp->pd + PD_DL_BAT_INIT_CON1, BAT_CON1_EN, BAT_CON1_EN);
+	return dpmaif_dl_init_cmd(dp, PD_DL_BAT_INIT, DL_INIT_EN, "BAT enable");
+}
+
+/* only with the block reset: nothing is lent to the hardware any more */
+static void dpmaif_dl_free(struct mtk_ccci_dpmaif *dp)
+{
+	u32 i;
+
+	for (i = 0; i < dp->bat.cnt; i++) {
+		struct dpmaif_bat_skb *b = &dp->bat_skb[i];
+
+		if (!b->skb)
+			continue;
+		dma_unmap_single(dp->dev, b->dma, DPMAIF_BAT_BUF_SIZE,
+				 DMA_FROM_DEVICE);
+		dev_kfree_skb_any(b->skb);
+		b->skb = NULL;
+	}
+	for (i = 0; i < dp->frg.cnt; i++) {
+		struct dpmaif_bat_frg *f = &dp->frg_buf[i];
+
+		if (!f->data)
+			continue;
+		dma_unmap_page(dp->dev, f->dma, DPMAIF_FRG_BUF_SIZE,
+			       DMA_FROM_DEVICE);
+		skb_free_frag(f->data);
+		f->data = NULL;
+	}
+	dev_kfree_skb_any(dp->rx_skb);
+	dp->rx_skb = NULL;
+	dp->rx_msg = false;
+	dp->bat_wr = 0;
+	dp->bat_lent = 0;
+	dp->frg_wr = 0;
+	dp->frg_lent = 0;
+	dp->pit_rd = 0;
+	dp->pit_seq = 0;
+	memset(dp->bat.base, 0, dp->bat.cnt * sizeof(struct dpmaif_bat));
+	memset(dp->frg.base, 0, dp->frg.cnt * sizeof(struct dpmaif_bat));
+	memset(dp->pit.base, 0, dp->pit.cnt * sizeof(struct dpmaif_pit));
+}
+
+/* hand a finished packet to the link of its channel */
+static void dpmaif_rx_deliver(struct mtk_ccci_dpmaif *dp)
+{
+	struct sk_buff *skb = dp->rx_skb;
+	struct net_device *ndev;
+	u8 ch = dp->rx_ch;
+
+	dp->rx_skb = NULL;
+	dp->rx_msg = false;
+	if (dp->rx_drop) {
+		dp->dl_dropped++;
+		goto drop;
+	}
+	if (ch >= MTK_CCCI_NET_LINKS) {
+		dp->dl_bad_ch++;
+		dp->dl_last_bad_ch = ch;
+		goto drop;
+	}
+	dp->dl_pkts[ch]++;
+	ndev = rcu_dereference(dp->ccci->net_link[ch]);
+	if (!ndev || !netif_running(ndev)) {
+		dp->dl_nolink[ch]++;
+		goto drop;
+	}
+	if (!skb_headlen(skb))
+		goto drop_dev;
+	switch (skb->data[0] >> 4) {
+	case 4:
+		skb->protocol = htons(ETH_P_IP);
+		break;
+	case 6:
+		skb->protocol = htons(ETH_P_IPV6);
+		break;
+	default:
+		goto drop_dev;
+	}
+	skb->dev = ndev;
+	if (dp->rx_csum_ok && (ndev->features & NETIF_F_RXCSUM))
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+	dev_sw_netstats_rx_add(ndev, skb->len);
+	napi_gro_receive(&dp->napi, skb);
+	return;
+
+drop_dev:
+	dev_core_stats_rx_dropped_inc(ndev);
+drop:
+	dev_kfree_skb_any(skb);
+}
+
+/*
+ * One PIT. Return 1 when it ends a packet (handed on or dropped). A buffer
+ * named by a PIT is taken back from the hardware in any case.
+ */
+static int dpmaif_rx_pit(struct mtk_ccci_dpmaif *dp,
+			 const struct dpmaif_pit *pit, u32 w0, u32 w3)
+{
+	u32 len = FIELD_GET(PIT0_DATA_LEN, w0);
+	u32 bid = FIELD_GET(PIT0_BUF_ID, w0) | FIELD_GET(PIT3_H_BID, w3) << 13;
+	u64 addr = le32_to_cpu(pit->w[1]) |
+		   (u64)le32_to_cpu(pit->w[2]) << 32;
+
+	if (w0 & PIT0_PACKET_TYPE) {
+		if (dp->rx_msg || dp->rx_skb) {
+			dp->dl_err++;
+			dev_kfree_skb_any(dp->rx_skb);
+			dp->rx_skb = NULL;
+		}
+		dp->rx_msg = true;
+		dp->rx_ch = FIELD_GET(MPIT0_CHANNEL_ID, w0);
+		dp->rx_drop = w0 & (MPIT0_DROP | MPIT0_ERROR);
+		dp->rx_csum_ok = !FIELD_GET(MPIT0_CHECKSUM, w0);
+		return 0;
+	}
+
+	if (!(w0 & PIT0_BUF_TYPE)) {
+		struct dpmaif_bat_skb *b;
+		struct sk_buff *skb;
+
+		if (bid >= dp->bat.cnt || !dp->bat_skb[bid].skb)
+			goto bad;
+		b = &dp->bat_skb[bid];
+		skb = b->skb;
+		b->skb = NULL;
+		dp->bat_lent--;
+		dma_unmap_single(dp->dev, b->dma, DPMAIF_BAT_BUF_SIZE,
+				 DMA_FROM_DEVICE);
+		if (!dp->rx_msg || dp->rx_skb || addr < b->dma ||
+		    addr - b->dma + len > DPMAIF_BAT_BUF_SIZE) {
+			dev_kfree_skb_any(skb);
+			goto bad;
+		}
+		skb_reserve(skb, addr - b->dma);
+		skb_put(skb, len);
+		dp->rx_skb = skb;
+	} else {
+		struct dpmaif_bat_frg *f;
+		struct page *page;
+		void *data;
+
+		if (bid >= dp->frg.cnt || !dp->frg_buf[bid].data)
+			goto bad;
+		f = &dp->frg_buf[bid];
+		data = f->data;
+		f->data = NULL;
+		dp->frg_lent--;
+		dma_unmap_page(dp->dev, f->dma, DPMAIF_FRG_BUF_SIZE,
+			       DMA_FROM_DEVICE);
+		if (!dp->rx_skb || addr < f->dma ||
+		    addr - f->dma + len > DPMAIF_FRG_BUF_SIZE ||
+		    skb_shinfo(dp->rx_skb)->nr_frags >= MAX_SKB_FRAGS) {
+			skb_free_frag(data);
+			goto bad;
+		}
+		page = virt_to_head_page(data);
+		skb_add_rx_frag(dp->rx_skb, skb_shinfo(dp->rx_skb)->nr_frags,
+				page, data - page_address(page) + (addr - f->dma),
+				len, DPMAIF_FRG_BUF_SIZE);
+	}
+	if (w0 & PIT0_CONT)
+		return 0;
+	dpmaif_rx_deliver(dp);
+	return 1;
+
+bad:
+	dp->dl_err++;
+	dev_kfree_skb_any(dp->rx_skb);
+	dp->rx_skb = NULL;
+	if (w0 & PIT0_CONT)
+		return 0;
+	dp->rx_msg = false;
+	return 1;
+}
+
+/*
+ * The write index can run ahead of the PIT contents: give the hardware a
+ * little time for the sequence number (t7xx does the same).
+ */
+static bool dpmaif_pit_ready(struct mtk_ccci_dpmaif *dp,
+			     const struct dpmaif_pit *pit, u32 *w3)
+{
+	unsigned int i;
+
+	for (i = 0; i < 20; i++) {
+		*w3 = le32_to_cpu(READ_ONCE(pit->w[3]));
+		if (FIELD_GET(PIT3_SEQ, *w3) == dp->pit_seq)
+			return true;
+		udelay(5);
+	}
+	return false;
+}
+
+/* read the PITs up to the write index; finish a packet once started */
+static int dpmaif_rx(struct mtk_ccci_dpmaif *dp, int budget)
+{
+	struct dpmaif_pit *pits = dp->pit.base;
+	u32 hw_wr, done = 0;
+	int pkts = 0;
+
+	dp->rx_retry = false;
+	hw_wr = readl(dp->pd + PD_DL_PIT_WR_IDX) & DL_PIT_IDX;
+	if (hw_wr >= dp->pit.cnt) {
+		dp->dl_err++;
+		return 0;
+	}
+
+	rcu_read_lock();
+	while (dp->pit_rd != hw_wr && (pkts < budget || dp->rx_msg)) {
+		const struct dpmaif_pit *pit = &pits[dp->pit_rd];
+		u32 w0, w3;
+
+		if (!dpmaif_pit_ready(dp, pit, &w3)) {
+			dp->pit_seq_err++;
+			dp->rx_retry = true;
+			break;
+		}
+		dma_rmb();
+		w0 = le32_to_cpu(READ_ONCE(pit->w[0]));
+		pkts += dpmaif_rx_pit(dp, pit, w0, w3);
+		dp->pit_seq = dp->pit_seq == PIT_SEQ_MAX ? 0 : dp->pit_seq + 1;
+		dp->pit_rd = (dp->pit_rd + 1) % dp->pit.cnt;
+		done++;
+	}
+	rcu_read_unlock();
+
+	if (done)
+		dpmaif_dl_add(dp, PD_DL_PIT_ADD, DL_ADD_UPDATE | done, true);
+	return min(pkts, budget);
+}
+
+static int dpmaif_napi_poll(struct napi_struct *napi, int budget)
+{
+	struct mtk_ccci_dpmaif *dp = container_of(napi, struct mtk_ccci_dpmaif,
+						  napi);
+	int done;
+
+	done = dpmaif_rx(dp, budget);
+	dpmaif_frg_refill(dp);
+	dpmaif_bat_refill(dp, GFP_ATOMIC);
+	if (dp->rx_retry)
+		return budget;
+	if (done < budget && napi_complete_done(napi, done))
+		writel(DL_INT_QDONE, dp->ao + AO_UL_APDL_L2TIMCR0);
+	return done;
+}
+
 /* stop UL arbitration and DL, wait for both to go idle */
 static void dpmaif_hw_quiesce(struct mtk_ccci_dpmaif *dp)
 {
@@ -548,8 +967,8 @@ static u32 dpmaif_dl_mask_to_sta(u32 mask)
 }
 
 /*
- * One line for TX done, RX queue 0 and the errors. No packet moves yet:
- * acknowledge, count, and mask what fired so that it cannot storm.
+ * One line for TX done, RX queue 0 and the errors: acknowledge, mask the
+ * queue that has work and schedule it; errors are counted.
  */
 static irqreturn_t dpmaif_irq(int irq, void *data)
 {
@@ -575,16 +994,20 @@ static irqreturn_t dpmaif_irq(int irq, void *data)
 		/* the modem sleeps: the downstream driver masks it too */
 		if (ul & UL_INT_PWR_NOTRDY)
 			dp->ul_pwr_notrdy++;
-		writel(ul & UL_INT_EN, dp->ao + AO_UL_AP_L2TIMSR0);
+		writel(ul & (UL_INT_QDONE | UL_INT_PWR_NOTRDY),
+		       dp->ao + AO_UL_AP_L2TIMSR0);
 	}
 	if (dl) {
 		dp->last_dl_sta = dl;
 		writel(dl, dp->pd + PD_AP_DL_L2TISAR0);
-		if (dl & DL_INT_QDONE)
-			dp->dl_done++;
 		if (dl & DL_INT_MTU_ERR)
 			dp->dl_mtu_err++;
-		writel(dl & DL_INT_EN, dp->ao + AO_UL_APDL_L2TIMSR0);
+		if (dl & DL_INT_QDONE) {
+			dp->dl_done++;
+			/* unmasked again when NAPI is done */
+			writel(DL_INT_QDONE, dp->ao + AO_UL_APDL_L2TIMSR0);
+			napi_schedule(&dp->napi);
+		}
 	}
 	return IRQ_HANDLED;
 }
@@ -594,9 +1017,9 @@ static irqreturn_t dpmaif_irq(int irq, void *data)
  * @ccci: driver state
  *
  * The downstream order: clocks, bus enable, SRAM clear, bank remap,
- * interrupts, RX queue (PIT), BAT rings, TX queues (DRB), SRAM sync and
- * "init done". On a failure the block is reset and left off; the modem
- * starts without a data path.
+ * interrupts, RX queue (PIT), BAT rings, the first buffers lent and DL
+ * enabled, TX queues (DRB), SRAM sync and "init done". On a failure the
+ * block is reset and left off; the modem starts without a data path.
  *
  * Return: 0 (also without DPMAIF) or a negative error.
  */
@@ -627,6 +1050,8 @@ int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci)
 		ret = dpmaif_hw_rxq(dp);
 	if (!ret)
 		ret = dpmaif_hw_bats(dp);
+	if (!ret)
+		ret = dpmaif_dl_start(dp);
 	if (!ret) {
 		dpmaif_hw_txqs(dp);
 		ret = dpmaif_hw_init_done(dp);
@@ -635,14 +1060,16 @@ int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci)
 		goto reset;
 
 	dpmaif_clear_ip_busy(dp);
+	napi_enable(&dp->napi);
 	enable_irq(dp->irq);
 	dp->started = true;
-	dev_info(ccci->dev, "DPMAIF up (coda %#x), no buffers lent yet\n",
-		 readl(dp->pd + PD_AP_CODA_VER));
+	dev_info(ccci->dev, "DPMAIF up (coda %#x), %u+%u buffers lent\n",
+		 readl(dp->pd + PD_AP_CODA_VER), dp->bat_lent, dp->frg_lent);
 	goto out;
 
 reset:
 	dpmaif_hw_reset(dp);
+	dpmaif_dl_free(dp);
 clk_off:
 	clk_bulk_disable_unprepare(ARRAY_SIZE(dp->clks), dp->clks);
 out:
@@ -679,9 +1106,12 @@ void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci)
 	mutex_lock(&dp->lock);
 	if (dp->started) {
 		disable_irq(dp->irq);
+		napi_disable(&dp->napi);
 		dpmaif_hw_quiesce(dp);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(dp->clks), dp->clks);
 		dpmaif_hw_reset(dp);
+		/* the block is reset: the buffers are the AP's again */
+		dpmaif_dl_free(dp);
 		dp->started = false;
 		dev_info(ccci->dev, "DPMAIF down\n");
 	}
@@ -708,6 +1138,24 @@ static int dpmaif_md_base(struct mtk_ccci_dpmaif *dp)
 		if (ccci->md_mem[i].start == dp->md_base)
 			return 0;
 	return -EINVAL;
+}
+
+static void dpmaif_napi_cleanup(void *data)
+{
+	struct mtk_ccci_dpmaif *dp = data;
+
+	netif_napi_del(&dp->napi);
+	free_netdev(dp->napi_dev);
+}
+
+/* NAPI needs a device; the links come and go, as in t7xx use a dummy one */
+static int dpmaif_napi_init(struct mtk_ccci_dpmaif *dp)
+{
+	dp->napi_dev = alloc_netdev_dummy(0);
+	if (!dp->napi_dev)
+		return -ENOMEM;
+	netif_napi_add(dp->napi_dev, &dp->napi, dpmaif_napi_poll);
+	return devm_add_action_or_reset(dp->dev, dpmaif_napi_cleanup, dp);
 }
 
 static void __iomem *dpmaif_map(struct device *dev, struct device_node *np,
@@ -829,6 +1277,17 @@ int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci)
 					sizeof(struct dpmaif_drb));
 	if (ret)
 		goto out;
+	dp->bat_skb = devm_kcalloc(dev, DPMAIF_BAT_CNT, sizeof(*dp->bat_skb),
+				   GFP_KERNEL);
+	dp->frg_buf = devm_kcalloc(dev, DPMAIF_FRG_CNT, sizeof(*dp->frg_buf),
+				   GFP_KERNEL);
+	if (!dp->bat_skb || !dp->frg_buf) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	ret = dpmaif_napi_init(dp);
+	if (ret)
+		goto out;
 
 	ccci->dpmaif = dp;
 	dev_info(dev, "DPMAIF: rings allocated, modem bank 0 at %#llx, set up with the modem\n",
@@ -933,6 +1392,16 @@ static int mtk_ccci_dpmaif_show(struct seq_file *s, void *unused)
 		   dp->irq, dp->irqs, dp->ul_done, dp->ul_pwr_notrdy,
 		   dp->ul_len_err, dp->dl_done, dp->dl_mtu_err,
 		   dp->last_ul_sta, dp->last_dl_sta);
+	seq_printf(s, "dl: pit rd %u seq %u, bat wr %u lent %u, frg wr %u lent %u; dropped %lu err %lu seq-err %lu nomem %lu bad-ch %lu (last %u)\n",
+		   dp->pit_rd, dp->pit_seq, dp->bat_wr, dp->bat_lent,
+		   dp->frg_wr, dp->frg_lent, dp->dl_dropped, dp->dl_err,
+		   dp->pit_seq_err, dp->bat_nomem, dp->dl_bad_ch,
+		   dp->dl_last_bad_ch);
+	/* the channel a PDN uses shows here, link or not */
+	for (i = 0; i < MTK_CCCI_NET_LINKS; i++)
+		if (dp->dl_pkts[i])
+			seq_printf(s, "dl ch %2u: %lu packets, %lu without a link\n",
+				   i, dp->dl_pkts[i], dp->dl_nolink[i]);
 
 	if (dp->started) {
 		dpmaif_show_regs(s, dp);
