@@ -249,6 +249,9 @@ static u32 rt_smem_size(struct mtk_ccci *ccci, enum mtk_ccci_smem_id id)
  * the LK block (on Titan 2: 0x17c000 of 0x1600000; the rest of the block
  * is the raw DHL/MDM logging memory).
  */
+/* the part of LK's CCB block the CCB users get; the rest is raw DHL/MDM */
+#define MTK_CCCI_CCB_SECTION_A		SZ_2M
+
 static u32 rt_ccb_data_size(struct mtk_ccci *ccci)
 {
 	u32 lk = 0, need = mtk_ccci_ccb_data_size();
@@ -448,7 +451,6 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 	/* most features are a shared memory region */
 	static const u8 region[][2] = {
 		{ FT_CCISM_SHARE_MEMORY, MTK_CCCI_SMEM_CCISM_SCP },
-		{ FT_DHL_RAW_SHARE_MEMORY, MTK_CCCI_SMEM_RAW_DHL },
 		{ FT_LWA_SHARE_MEMORY, MTK_CCCI_SMEM_RAW_LWA },
 		{ FT_DT_NETD_SHARE_MEMORY, MTK_CCCI_SMEM_RAW_NETD },
 		{ FT_DT_USB_SHARE_MEMORY, MTK_CCCI_SMEM_RAW_USB },
@@ -507,6 +509,26 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 			w[3] = cpu_to_le32(rt_ccb_data_size(ccci));
 		}
 		return 4 * sizeof(*w);
+	case FT_DHL_RAW_SHARE_MEMORY:
+		/*
+		 * LK sets aside one cached block for the CCB data; the
+		 * downstream driver keeps its first 2 MiB for the CCB users and
+		 * gives the rest to the raw DHL and MDM logs (no entries of
+		 * their own in LK's tables on Titan 2).
+		 */
+		if (mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_RAW_DHL)) {
+			rt_shm_of(ccci, MTK_CCCI_SMEM_RAW_DHL, shm);
+			return sizeof(*shm);
+		}
+		r = mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_CCB_DHL);
+		memset(shm, 0, sizeof(*shm));
+		if (r && le32_to_cpu(r->size) > MTK_CCCI_CCB_SECTION_A) {
+			shm->addr = cpu_to_le32(mtk_ccci_lk_smem_md_addr(r) +
+						MTK_CCCI_CCB_SECTION_A);
+			shm->size = cpu_to_le32(le32_to_cpu(r->size) -
+						MTK_CCCI_CCB_SECTION_A);
+		}
+		return sizeof(*shm);
 	case FT_MULTI_MD_MPU:
 		return 0;
 	case FT_MISC_INFO_RANDOM_SEED_NUM:
