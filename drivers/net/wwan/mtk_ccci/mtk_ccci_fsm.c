@@ -18,10 +18,11 @@
  * power_ctrl module parameter AND an explicit command written to the
  * debugfs file "fsm". Probing never powers, clocks or calls TF-A.
  *
- * The runtime data answer to HS1 (and so HS2 and READY) is not here yet:
- * the FSM reads HS1, records what the modem asked for and then powers
- * the modem off again the stock way, so that a start always ends with
- * the modem either off or as LK left it.
+ * With runtime_data=1 the FSM answers HS1 (mtk_ccci_rt.c) and waits for
+ * HS2: the modem is then READY and keeps running until "stop". Without
+ * it, the FSM reads HS1, records what the modem asked for and powers the
+ * modem off again the downstream way. Any failure on the way also ends with
+ * the modem powered off.
  *
  * Copyright (C) 2016 MediaTek Inc.
  * Copyright (C) 2026 serlk
@@ -83,6 +84,8 @@ enum {
 #define MTK_CCCI_POLL_MS		20
 #define MTK_CCCI_BROM_TIMEOUT_MS	2000
 #define MTK_CCCI_HS1_TIMEOUT_MS		30000
+/* as downstream: restarted while the modem asks for files or board data */
+#define MTK_CCCI_HS2_TIMEOUT_MS		30000
 
 static const char * const mtk_ccci_supply_names[MTK_CCCI_SUPPLY_NUM] = {
 	[MTK_CCCI_SUPPLY_VMODEM] = "md-vmodem",
@@ -353,6 +356,57 @@ static int mtk_ccci_wait_hs1(struct mtk_ccci *ccci)
 	return 0;
 }
 
+/*
+ * Answer HS1 and wait for HS2. The modem asks for files (FS, served from
+ * userspace through /dev/ccci_fs) and board data (RPC) before HS2; as the
+ * downstream driver, the timeout starts again while it does.
+ */
+static int mtk_ccci_boot_to_ready(struct mtk_ccci *ccci)
+{
+	unsigned long t0 = jiffies, deadline;
+	unsigned long fs_rpc;
+	int ret;
+
+	WRITE_ONCE(ccci->hs2_seen, false);
+	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_WAIT_HS2);
+	ret = mtk_ccci_rt_send(ccci);
+	if (ret) {
+		dev_err(ccci->dev, "runtime data: %d\n", ret);
+		return ret;
+	}
+
+	fs_rpc = READ_ONCE(ccci->stats.fs_rpc);
+	deadline = jiffies + msecs_to_jiffies(MTK_CCCI_HS2_TIMEOUT_MS);
+	for (;;) {
+		wait_event_timeout(ccci->hs_wq,
+				   READ_ONCE(ccci->hs2_seen) ||
+				   READ_ONCE(ccci->exception),
+				   msecs_to_jiffies(MTK_CCCI_POLL_MS * 10));
+		if (READ_ONCE(ccci->exception)) {
+			dev_err(ccci->dev, "modem exception before HS2\n");
+			return -EIO;
+		}
+		if (READ_ONCE(ccci->hs2_seen))
+			break;
+		if (READ_ONCE(ccci->stats.fs_rpc) != fs_rpc) {
+			fs_rpc = READ_ONCE(ccci->stats.fs_rpc);
+			deadline = jiffies +
+				   msecs_to_jiffies(MTK_CCCI_HS2_TIMEOUT_MS);
+		} else if (time_after(jiffies, deadline)) {
+			dev_err(ccci->dev, "no HS2 in %u ms (%lu FS/RPC packets)\n",
+				MTK_CCCI_HS2_TIMEOUT_MS, fs_rpc);
+			return -ETIMEDOUT;
+		}
+	}
+
+	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_READY);
+	dev_info(ccci->dev, "modem ready, HS2 %u ms after the runtime data (%lu FS/RPC packets)\n",
+		 jiffies_to_msecs(jiffies - t0), fs_rpc);
+	mtk_ccci_query_boot_status(ccci);
+	mtk_ccci_port_register(ccci);
+	return 0;
+}
+
 /* stop talking to the modem; it must be off (or never touched) */
 static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
 {
@@ -366,9 +420,9 @@ static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
 
 /*
  * The stock first start, in the stock order: CCIF taken over (while the
- * LK modem still runs), boot ROM wait, power off, power on, HS1. Then,
- * as the runtime data answer does not exist yet, the modem is powered
- * off again: the start reports -EOPNOTSUPP with the HS1 details kept.
+ * LK modem still runs), boot ROM wait, power off, power on, HS1, runtime
+ * data, HS2. Without runtime_data=1 the modem is powered off again at HS1:
+ * the start reports -EOPNOTSUPP with the HS1 details kept.
  */
 static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 {
@@ -384,6 +438,8 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 
 	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_STARTING);
 	ccci->hs1_valid = false;
+	ccci->rt_len = 0;
+	memset(ccci->rt_answer, 0, sizeof(ccci->rt_answer));
 	WRITE_ONCE(ccci->exception, false);
 	ccci->ex_channels = 0;
 
@@ -419,11 +475,18 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	WRITE_ONCE(ccci->state, MTK_CCCI_FSM_HS1);
 	mtk_ccci_query_boot_status(ccci);
 
+	if (mtk_ccci_rt_enabled()) {
+		ret = mtk_ccci_boot_to_ready(ccci);
+		if (!ret)
+			return 0;
+		goto fail;
+	}
+
 	/*
-	 * runtime data: not implemented. Without the answer the modem
-	 * would time out waiting and assert; power it off now instead.
+	 * Without the answer the modem would time out waiting and assert;
+	 * power it off now instead.
 	 */
-	dev_warn(ccci->dev, "runtime data: not implemented, stopping the modem at HS1\n");
+	dev_warn(ccci->dev, "runtime_data=0: stopping the modem at HS1\n");
 	ret = -EOPNOTSUPP;
 
 fail:
@@ -488,6 +551,7 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 					   ccci->hs1_query.feature[i]);
 		seq_puts(s, "\n");
 	}
+	mtk_ccci_rt_show(ccci, s);
 	mtk_ccci_fsm_check(ccci, &c);
 	mutex_unlock(&ccci->fsm_lock);
 
@@ -513,10 +577,13 @@ static void mtk_ccci_fsm_dry_run(struct mtk_ccci *ccci)
 	for (p = c.buf; (line = strsep(&p, "\n")) && *line;)
 		dev_info(ccci->dev, "  %s\n", line);
 	dev_info(ccci->dev,
-		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then (runtime data not implemented) MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off\n",
+		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then %s\n",
 		 !ccci->lk_modem_gone ?
 		 "; SIP CHECK_DONE poll; take the MD domain over, off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
-		 MTK_CCCI_HS1_TIMEOUT_MS);
+		 MTK_CCCI_HS1_TIMEOUT_MS,
+		 mtk_ccci_rt_enabled() ?
+		 "runtime data into RUNTIME_DATA and the CCIF SRAM, CCIF channel 15, wait for HS2 (FS/RPC served meanwhile), READY" :
+		 "(runtime_data=0) MD domain off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off");
 	kfree(c.buf);
 }
 

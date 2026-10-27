@@ -244,6 +244,9 @@ enum mtk_ccci_channel {
 #define MTK_CCCI_MD_FEATURE_PATTERN	0x49434343
 #define MTK_CCCI_AP_FEATURE_PATTERN	0x43434349
 
+/* the first half of the RUNTIME_DATA shared memory: the AP answer */
+#define MTK_CCCI_RT_AP_SIZE		0x800
+
 /* one feature byte: support mask in bits 3:0, version in 7:4 */
 #define MTK_CCCI_FT_MASK		GENMASK(3, 0)
 #define MTK_CCCI_FT_VER			GENMASK(7, 4)
@@ -306,7 +309,7 @@ enum mtk_ccci_fsm_state {
 	MTK_CCCI_FSM_LK_OWNED,	/* as LK left it, never touched */
 	MTK_CCCI_FSM_STARTING,
 	MTK_CCCI_FSM_WAIT_HS1,
-	MTK_CCCI_FSM_HS1,	/* HS1 seen; runtime data not implemented */
+	MTK_CCCI_FSM_HS1,	/* HS1 seen */
 	MTK_CCCI_FSM_WAIT_HS2,	/* runtime data sent */
 	MTK_CCCI_FSM_READY,
 	MTK_CCCI_FSM_EXCEPTION,	/* modem reported an exception */
@@ -393,6 +396,10 @@ struct mtk_ccci {
 	u32 boot_status[2];
 	struct mtk_ccci_md_feature_query hs1_query;
 	bool hs1_valid;
+	bool hs2_seen;			/* set from the RX path */
+	u8 rt_answer[MTK_CCCI_FEATURE_COUNT];	/* what was agreed on */
+	u8 rt_copy[MTK_CCCI_RT_AP_SIZE];	/* the runtime data sent */
+	u32 rt_len;
 	bool exception;			/* set from the RX path */
 	u32 ex_channels;
 	bool wdt_fired;
@@ -455,6 +462,8 @@ int mtk_ccci_ccif_notify(struct mtk_ccci *ccci, unsigned int channel);
 void mtk_ccci_ccif_read_hs(struct mtk_ccci *ccci,
 			   struct mtk_ccci_header *hdr,
 			   struct mtk_ccci_md_feature_query *query);
+void mtk_ccci_ccif_write_rt(struct mtk_ccci *ccci, const void *ap_feature,
+			    u32 size);
 int mtk_ccci_ccif_irq_start(struct mtk_ccci *ccci);
 void mtk_ccci_ccif_irq_stop(struct mtk_ccci *ccci);
 int mtk_ccci_wdt_irq_start(struct mtk_ccci *ccci);
@@ -488,6 +497,12 @@ void mtk_ccci_ctl_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_sys_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_status_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 void mtk_ccci_fsm_exception(struct mtk_ccci *ccci, u32 channels);
+void mtk_ccci_fsm_hs2(struct mtk_ccci *ccci);
+
+/* mtk_ccci_rt.c */
+bool mtk_ccci_rt_enabled(void);
+int mtk_ccci_rt_send(struct mtk_ccci *ccci);
+void mtk_ccci_rt_show(struct mtk_ccci *ccci, struct seq_file *s);
 
 /* mtk_ccci_cdev.c */
 int mtk_ccci_cdev_init(struct mtk_ccci *ccci);

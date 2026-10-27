@@ -512,6 +512,34 @@ void mtk_ccci_ccif_read_hs(struct mtk_ccci *ccci,
 		p[i] = cpu_to_le32(readl(sram + i * 4));
 }
 
+/**
+ * mtk_ccci_ccif_write_rt() - put the answer to HS1 into the SRAM
+ * @ccci: driver state
+ * @ap_feature: the AP feature block
+ * @size: its size
+ *
+ * After the modem's query: a control header (data[1] = the packet length,
+ * channel CONTROL_TX without a sequence number, reserved = the HS1 check
+ * id, as the MediaTek downstream driver writes it), then the AP feature
+ * block. The caller notifies the SRAM channel.
+ */
+void mtk_ccci_ccif_write_rt(struct mtk_ccci *ccci, const void *ap_feature,
+			    u32 size)
+{
+	void __iomem *sram = ccci->ccif_ap + CCIF_CHDATA;
+	void __iomem *ul = sram + MTK_CCIF_SRAM_AP_FEATURE -
+			   sizeof(struct mtk_ccci_header);
+	const __le32 *p = ap_feature;
+	u32 i;
+
+	writel(0, ul);
+	writel(sizeof(struct mtk_ccci_header) + size, ul + 4);
+	writel(MTK_CCCI_CH_CONTROL_TX, ul + 8);
+	writel(MTK_CCCI_CTL_MD_INIT_CHK_ID, ul + 12);
+	for (i = 0; i < size / 4; i++)
+		writel(le32_to_cpu(p[i]), sram + MTK_CCIF_SRAM_AP_FEATURE + i * 4);
+}
+
 static void mtk_ccci_ccif_sram_clear(void __iomem *base, u32 size)
 {
 	u32 off;

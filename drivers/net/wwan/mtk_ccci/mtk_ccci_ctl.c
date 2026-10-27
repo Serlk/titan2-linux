@@ -37,6 +37,13 @@ void mtk_ccci_fsm_exception(struct mtk_ccci *ccci, u32 channels)
 	wake_up_all(&ccci->hs_wq);
 }
 
+/* HS2: the modem took the runtime data and is ready (RX path) */
+void mtk_ccci_fsm_hs2(struct mtk_ccci *ccci)
+{
+	WRITE_ONCE(ccci->hs2_seen, true);
+	wake_up_all(&ccci->hs_wq);
+}
+
 static void mtk_ccci_hdr_words(const struct sk_buff *skb, u32 w[4])
 {
 	const struct mtk_ccci_header *hdr = (const void *)skb->data;
@@ -58,9 +65,10 @@ void mtk_ccci_ctl_recv(struct mtk_ccci *ccci, struct sk_buff *skb)
 	case MTK_CCCI_CTL_MD_INIT_START_BOOT:
 		if (w[3] == MTK_CCCI_CTL_MD_INIT_CHK_ID)
 			dev_warn(ccci->dev, "HS1 on a ring queue, ignored\n");
-		else
-			/* HS2; the FSM never sends the runtime data yet */
+		else if (READ_ONCE(ccci->state) != MTK_CCCI_FSM_WAIT_HS2)
 			dev_warn(ccci->dev, "HS2 without runtime data, ignored\n");
+		else
+			mtk_ccci_fsm_hs2(ccci);
 		break;
 	case MTK_CCCI_CTL_MD_EX:
 	case MTK_CCCI_CTL_MD_EX_REC_OK:
