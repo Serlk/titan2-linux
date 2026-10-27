@@ -42,5 +42,12 @@
 	 * 1833..1921 over four boots, ~105 mV).
 	 */
 	mediatek,md-adc = <19 1860>;
+	/*
+	 * SIM hot plug interrupts as the modem sees them, from the factory
+	 * MD1-SIM<n>-HOT-PLUG-EINT nodes: modem EINT 0/1, 10 ms debounce,
+	 * level low, socket type 0, not dedicated, source pin 1/2.
+	 */
+	mediatek,md-sim-eints = <0 10 0 0 0 0 1>,
+				<1 10 0 0 0 0 2>;
 	status = "okay";
 };

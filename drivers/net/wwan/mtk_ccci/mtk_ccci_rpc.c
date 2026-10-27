@@ -16,6 +16,8 @@
  *
  *  - 0x4002 GET_GPIO_NUM: modem pin number for a pin name, from the
  *    board's "mediatek,md-gpio-names"/"mediatek,md-gpios";
+ *  - 0x4005 GET_EINT_ATTR: one attribute of a SIM hot plug interrupt,
+ *    from the board's "mediatek,md-sim-eints";
  *  - 0x4009 GET_GPIO_ADC: pin numbers and levels for up to 3 (10 in the
  *    second version) pin names, and the board ADC ("mediatek,md-adc");
  *  - 0x400E DTSI_QUERY: a u32 property of the "mediatek,md_attr_node"
@@ -42,6 +44,7 @@
 #include "mtk_ccci.h"
 
 #define RPC_GET_GPIO_NUM	0x4002
+#define RPC_GET_EINT_ATTR	0x4005
 #define RPC_GET_GPIO_ADC	0x4009
 #define RPC_DTSI_QUERY		0x400e
 /* served by userspace */
@@ -60,6 +63,12 @@
 #define RPC_NO_OP		-1
 #define RPC_PARAM_ERROR		-2
 #define RPC_FUNC_FAIL		-5
+
+/* GET_EINT_ATTR: attributes per SIM, errors */
+#define RPC_EINT_ATTRS		7	/* eint, debounce, polarity, ... */
+#define RPC_EINT_SIMS		4
+#define RPC_EINT_BAD_TYPE	-12
+#define RPC_EINT_BAD_NAME	-11
 
 /* DTSI_QUERY */
 #define RPC_REQ_PROP_VALUE	1
@@ -232,6 +241,70 @@ static void mtk_ccci_rpc_gpio_num(struct mtk_ccci *ccci,
 	/* the stock answer carries the result twice */
 	rpc_reply_u32(r, val);
 	rpc_reply_u32(r, val);
+}
+
+/*
+ * The SIM a hot plug interrupt name stands for: the modem asks for
+ * "MD1_SIM<n>_HOT_PLUG_EINT" (the factory device tree node is named with
+ * dashes, which the downstream driver accepts too). Returns 0-based, or -1.
+ */
+static int mtk_ccci_rpc_eint_sim(const char *name, u32 len)
+{
+	char want[24];
+	int sim;
+
+	len = strnlen(name, len);
+	for (sim = 0; sim < RPC_EINT_SIMS; sim++) {
+		snprintf(want, sizeof(want), "MD1_SIM%d_HOT_PLUG_EINT", sim + 1);
+		if (len == strlen(want) && !memcmp(name, want, len))
+			return sim;
+		strreplace(want, '_', '-');
+		if (len == strlen(want) && !memcmp(name, want, len))
+			return sim;
+	}
+	return -1;
+}
+
+/*
+ * "mediatek,md-sim-eints" has one row per SIM of RPC_EINT_ATTRS values
+ * in the modem's order and units: interrupt number, debounce (ms),
+ * polarity (1 high), sensitivity (1 edge), socket type, dedicated, source
+ * pin. A negative value means "not set".
+ */
+static void mtk_ccci_rpc_eint_attr(struct mtk_ccci *ccci,
+				   const struct mtk_ccci_rpc_arg *arg,
+				   unsigned int num,
+				   struct mtk_ccci_rpc_reply *r)
+{
+	u32 type, val;
+	s32 ret;
+	int sim;
+
+	if (num < 3 || !arg[0].len || arg[2].len < 4) {
+		rpc_reply_u32(r, RPC_PARAM_ERROR);
+		rpc_reply_u32(r, RPC_PARAM_ERROR);
+		return;
+	}
+	type = get_unaligned_le32(arg[2].buf);
+	sim = mtk_ccci_rpc_eint_sim(arg[0].buf, arg[0].len);
+	if (type >= RPC_EINT_ATTRS)
+		ret = RPC_EINT_BAD_TYPE;
+	else if (sim < 0 ||
+		 of_property_read_u32_index(ccci->dev->of_node,
+					    "mediatek,md-sim-eints",
+					    sim * RPC_EINT_ATTRS + type, &val) ||
+		 (s32)val < 0)
+		ret = RPC_EINT_BAD_NAME;
+	else
+		ret = 0;
+	dev_info(ccci->dev, "RPC: EINT %.*s attribute %u -> %d%s\n",
+		 (int)strnlen(arg[0].buf, arg[0].len), (char *)arg[0].buf,
+		 type, ret ? ret : (s32)val, ret ? " (error)" : "");
+	rpc_reply_u32(r, ret);
+	if (ret)
+		rpc_reply_u32(r, ret);
+	else
+		rpc_reply_u32(r, val);
 }
 
 /* a GET_GPIO_ADC request of either version, and the answer to it */
@@ -522,6 +595,9 @@ int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb)
 	switch (op) {
 	case RPC_GET_GPIO_NUM:
 		mtk_ccci_rpc_gpio_num(ccci, arg, num, r);
+		break;
+	case RPC_GET_EINT_ATTR:
+		mtk_ccci_rpc_eint_attr(ccci, arg, num, r);
 		break;
 	case RPC_GET_GPIO_ADC:
 		mtk_ccci_rpc_gpio_adc(ccci, arg, num, r);

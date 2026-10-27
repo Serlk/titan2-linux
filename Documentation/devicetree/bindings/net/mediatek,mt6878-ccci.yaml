@@ -119,6 +119,22 @@ properties:
       The board ADC the modem reads at boot (on MediaTek boards a PMIC
       AUXADC input sampled once by the AP).
 
+  mediatek,md-sim-eints:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    maxItems: 4
+    items:
+      items:
+        - description: interrupt number in the modem's numbering
+        - description: debounce time in milliseconds
+        - description: polarity, 1 active high
+        - description: sensitivity, 1 edge
+        - description: SIM socket type
+        - description: 1 if the interrupt is dedicated to the SIM
+        - description: source pin
+    description:
+      The SIM hot plug interrupts the modem asks about at boot, one row
+      per SIM in order.
+
   md-vmodem-supply:
     description: Modem core supply.
 
