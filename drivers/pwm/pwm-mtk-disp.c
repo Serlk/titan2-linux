@@ -68,6 +68,23 @@ static void mtk_disp_pwm_update_bits(struct mtk_disp_pwm *mdp, u32 offset,
 	writel(value, address);
 }
 
+/*
+ * Write DISP_PWM_DEBUG, if the SoC has it, so that register writes reach the
+ * working registers at once instead of waiting in the shadow registers.
+ * Without a commit register this is the only way to apply a new setting; with
+ * one, the display mutex may still latch the shadow registers only on the
+ * next frame (MT6878, where the PWM is a member of the display mutex and a
+ * command mode panel gets no frame unless the picture changes).
+ * The clocks must be on.
+ */
+static void mtk_disp_pwm_bypass_shadow(struct mtk_disp_pwm *mdp)
+{
+	if (mdp->data->bls_debug)
+		mtk_disp_pwm_update_bits(mdp, mdp->data->bls_debug,
+					 mdp->data->bls_debug_mask,
+					 mdp->data->bls_debug_mask);
+}
+
 static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			      const struct pwm_state *state)
 {
@@ -82,6 +99,7 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (!state->enabled) {
 		/* nothing to do for a PWM that is already off */
 		if (mdp->enabled) {
+			mtk_disp_pwm_bypass_shadow(mdp);
 			mtk_disp_pwm_update_bits(mdp, DISP_PWM_EN,
 						 mdp->data->enable_mask, 0x0);
 			clk_disable_unprepare(mdp->clk_mm);
@@ -143,14 +161,12 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		high_width = high_width * mdp->duty_scale / 100;
 	value = period | (high_width << PWM_HIGH_WIDTH_SHIFT);
 
+	mtk_disp_pwm_bypass_shadow(mdp);
 	if (mdp->data->bls_debug && !mdp->data->has_commit) {
 		/*
 		 * For MT2701, disable double buffer before writing register
 		 * and select manual mode and use PWM_PERIOD/PWM_HIGH_WIDTH.
 		 */
-		mtk_disp_pwm_update_bits(mdp, mdp->data->bls_debug,
-					 mdp->data->bls_debug_mask,
-					 mdp->data->bls_debug_mask);
 		mtk_disp_pwm_update_bits(mdp, mdp->data->con0,
 					 mdp->data->con0_sel,
 					 mdp->data->con0_sel);
@@ -212,10 +228,7 @@ static int mtk_disp_pwm_get_state(struct pwm_chip *chip,
 	 * registers double buffer and manual commit to working register before
 	 * performing any read/write operation
 	 */
-	if (mdp->data->bls_debug)
-		mtk_disp_pwm_update_bits(mdp, mdp->data->bls_debug,
-					 mdp->data->bls_debug_mask,
-					 mdp->data->bls_debug_mask);
+	mtk_disp_pwm_bypass_shadow(mdp);
 
 	rate = clk_get_rate(mdp->clk_main);
 	con0 = readl(mdp->base + mdp->data->con0);
@@ -375,6 +388,8 @@ static const struct mtk_pwm_data mt6878_pwm_data = {
 	.has_commit = true,
 	.commit = 0xc,
 	.commit_mask = 0x1,
+	.bls_debug = 0x80,
+	.bls_debug_mask = 0x3,
 };
 
 static const struct of_device_id mtk_disp_pwm_of_match[] = {
