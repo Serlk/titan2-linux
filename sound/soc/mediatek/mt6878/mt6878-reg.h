@@ -776,6 +776,7 @@
 #define PDN_ETDM_IN4_SFT                              9
 #define PDN_DL0_DAC_TML_SFT                           7
 #define PDN_UL0_TML_SFT                               22
+#define PDN_PCM1_SFT                                  13
 #define AUDIO_F3P25M_EN_ON_SFT                        1
 #define AFE_DL_INPUT_MODE_CTL_SFT                     24
 #define AFE_DL_OUTPUT_SEL_CTL_SFT                     18
@@ -908,5 +909,32 @@
 #define AFE_CONN116_2                                 0x2f08
 #define AFE_CONN117_1                                 0x2f24
 #define AFE_CONN117_2                                 0x2f28
+
+/* PCM 1: the voice interface of the modem (MD1) */
+#define PCM1_TX_LCH_RPT_SFT                           13
+#define PCM1_VBT_16K_MODE_SFT                         12
+#define PCM1_BT_MODE_SFT                              7
+#define PCM1_AFIFO_SFT                                6
+#define PCM1_WLEN_SFT                                 5
+#define PCM1_MODE_SFT                                 3
+#define PCM1_FMT_SFT                                  1
+#define PCM1_EN_SFT                                   0
+#define PCM1_EN_MASK_SFT                              (0x1 << 0)
+#define PCM1_1X_EN_DOMAIN_SFT                         23
+#define PCM1_1X_EN_DOMAIN_MASK_SFT                    (0x7 << 23)
+#define PCM1_1X_EN_MODE_SFT                           18
+#define PCM1_1X_EN_MODE_MASK_SFT                      (0x1f << 18)
+#define AFE_PCM1_INTF_CON0                            0xd0
+#define AFE_PCM1_INTF_CON1                            0xd4
+#define AFE_CONN014_4                                 0x2250
+#define AFE_CONN015_4                                 0x2270
+#define AFE_CONN102_0                                 0x2d40
+#define AFE_CONN103_0                                 0x2d60
+#define AFE_CONN105_1                                 0x2da4
+#define AFE_CONN105_4                                 0x2db0
+#define AFE_CONN106_1                                 0x2dc4
+#define AFE_CONN106_4                                 0x2dd0
+#define AFE_CONN116_4                                 0x2f10
+#define AFE_CONN117_4                                 0x2f30
 
 #endif

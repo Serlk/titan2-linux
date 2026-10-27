@@ -879,13 +879,25 @@ static void mt6878_afe_pcm_free(struct snd_soc_component *component,
 	snd_pcm_lib_preallocate_free_for_all(pcm);
 }
 
+/* a hostless front end has no memory interface and no position */
+static snd_pcm_uframes_t mt6878_afe_pcm_pointer(struct snd_soc_component *component,
+						struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+
+	if (snd_soc_rtd_to_cpu(rtd, 0)->id >= MT6878_MEMIF_NUM)
+		return 0;
+
+	return mtk_afe_pcm_pointer(component, substream);
+}
+
 static const struct snd_soc_component_driver mt6878_afe_component = {
 	.name = AFE_PCM_NAME,
 	.probe = mt6878_afe_component_probe,
 	.pcm_new = mtk_afe_pcm_new,
 	.pcm_free = mt6878_afe_pcm_free,
 	.open = mt6878_afe_pcm_open,
-	.pointer = mtk_afe_pcm_pointer,
+	.pointer = mt6878_afe_pcm_pointer,
 };
 
 /* capture memif inputs: UL0 records the codec ADCs, UL1 the I2SIN4 data */
@@ -963,6 +975,8 @@ typedef int (*dai_register_cb)(struct mtk_base_afe *);
 static const dai_register_cb dai_register_cbs[] = {
 	mt6878_dai_adda_register,
 	mt6878_dai_i2s_register,
+	mt6878_dai_pcm_register,
+	mt6878_dai_hostless_register,
 	mt6878_dai_memif_register,
 };
 

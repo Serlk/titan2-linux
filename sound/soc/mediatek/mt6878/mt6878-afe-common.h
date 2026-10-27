@@ -83,6 +83,8 @@ enum {
 	MT6878_DAI_ADDA = MT6878_MEMIF_NUM,
 	MT6878_DAI_I2S_IN4,
 	MT6878_DAI_I2S_OUT4,
+	MT6878_DAI_PCM_1,
+	MT6878_DAI_HOSTLESS_SPEECH,
 	MT6878_DAI_NUM,
 };
 
@@ -162,5 +164,7 @@ struct mt6878_afe_private {
 
 int mt6878_dai_adda_register(struct mtk_base_afe *afe);
 int mt6878_dai_i2s_register(struct mtk_base_afe *afe);
+int mt6878_dai_pcm_register(struct mtk_base_afe *afe);
+int mt6878_dai_hostless_register(struct mtk_base_afe *afe);
 
 #endif
