@@ -961,8 +961,9 @@ void mt76_connac2_mac_decode_he_radiotap(struct mt76_dev *dev,
 EXPORT_SYMBOL_GPL(mt76_connac2_mac_decode_he_radiotap);
 
 /* The HW does not translate the mac header to 802.3 for mesh point */
-int mt76_connac2_reverse_frag0_hdr_trans(struct ieee80211_vif *vif,
-					 struct sk_buff *skb, u16 hdr_offset)
+static int __mt76_connac2_reverse_hdr_trans(struct ieee80211_vif *vif,
+					    struct sk_buff *skb, u16 hdr_offset,
+					    bool group)
 {
 	struct mt76_rx_status *status = (struct mt76_rx_status *)skb->cb;
 	struct ethhdr *eth_hdr = (struct ethhdr *)(skb->data + hdr_offset);
@@ -970,15 +971,15 @@ int mt76_connac2_reverse_frag0_hdr_trans(struct ieee80211_vif *vif,
 	struct ieee80211_sta *sta;
 	struct ieee80211_hdr hdr;
 	u16 frame_control;
+	bool u2m;
 
-	if (le32_get_bits(rxd[3], MT_RXD3_NORMAL_ADDR_TYPE) !=
-	    MT_RXD3_NORMAL_U2M)
+	u2m = le32_get_bits(rxd[3], MT_RXD3_NORMAL_ADDR_TYPE) ==
+	      MT_RXD3_NORMAL_U2M;
+	if (!u2m && !group)
 		return -EINVAL;
 
 	if (!(le32_to_cpu(rxd[1]) & MT_RXD1_NORMAL_GROUP_4))
 		return -EINVAL;
-
-	sta = container_of((void *)status->wcid, struct ieee80211_sta, drv_priv);
 
 	/* store the info from RXD and ethhdr to avoid being overridden */
 	frame_control = le32_get_bits(rxd[6], MT_RXD6_FRAME_CONTROL);
@@ -986,8 +987,22 @@ int mt76_connac2_reverse_frag0_hdr_trans(struct ieee80211_vif *vif,
 	hdr.seq_ctrl = cpu_to_le16(le32_get_bits(rxd[8], MT_RXD8_SEQ_CTRL));
 	hdr.duration_id = 0;
 
-	ether_addr_copy(hdr.addr1, vif->addr);
-	ether_addr_copy(hdr.addr2, sta->addr);
+	if (u2m) {
+		sta = container_of((void *)status->wcid, struct ieee80211_sta,
+				   drv_priv);
+		ether_addr_copy(hdr.addr1, vif->addr);
+		ether_addr_copy(hdr.addr2, sta->addr);
+	} else {
+		/*
+		 * A group frame comes with the vif's own WTBL entry, not
+		 * the AP's: take the destination from the 802.3 header and
+		 * the transmitter is the AP of the station.
+		 */
+		if (vif->type != NL80211_IFTYPE_STATION)
+			return -EINVAL;
+		ether_addr_copy(hdr.addr1, eth_hdr->h_dest);
+		ether_addr_copy(hdr.addr2, vif->bss_conf.bssid);
+	}
 	switch (frame_control & (IEEE80211_FCTL_TODS |
 				 IEEE80211_FCTL_FROMDS)) {
 	case 0:
@@ -1034,7 +1049,24 @@ int mt76_connac2_reverse_frag0_hdr_trans(struct ieee80211_vif *vif,
 
 	return 0;
 }
+
+int mt76_connac2_reverse_frag0_hdr_trans(struct ieee80211_vif *vif,
+					 struct sk_buff *skb, u16 hdr_offset)
+{
+	return __mt76_connac2_reverse_hdr_trans(vif, skb, hdr_offset, false);
+}
 EXPORT_SYMBOL_GPL(mt76_connac2_reverse_frag0_hdr_trans);
+
+/*
+ * As mt76_connac2_reverse_frag0_hdr_trans(), for every frame of a station
+ * whose firmware translates the headers itself, group frames included.
+ */
+int mt76_connac2_reverse_hdr_trans(struct ieee80211_vif *vif,
+				   struct sk_buff *skb, u16 hdr_offset)
+{
+	return __mt76_connac2_reverse_hdr_trans(vif, skb, hdr_offset, true);
+}
+EXPORT_SYMBOL_GPL(mt76_connac2_reverse_hdr_trans);
 
 int mt76_connac2_mac_fill_rx_rate(struct mt76_dev *dev,
 				  struct mt76_rx_status *status,

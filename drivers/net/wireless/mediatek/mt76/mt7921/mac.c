@@ -397,7 +397,11 @@ mt7921_mac_fill_rx(struct mt792x_dev *dev, struct sk_buff *skb)
 
 		vif = container_of((void *)msta->vif, struct ieee80211_vif,
 				   drv_priv);
-		err = mt76_connac2_reverse_frag0_hdr_trans(vif, skb, hdr_gap);
+		if (dev->soc_axi)
+			err = mt76_connac2_reverse_hdr_trans(vif, skb, hdr_gap);
+		else
+			err = mt76_connac2_reverse_frag0_hdr_trans(vif, skb,
+								   hdr_gap);
 		if (err)
 			return err;
 
