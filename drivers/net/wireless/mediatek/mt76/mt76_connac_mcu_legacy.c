@@ -91,6 +91,11 @@ EXPORT_SYMBOL_GPL(mt76_connac_legacy_set_rx_filter);
  */
 #define LEGACY_SCAN_REQ_LEN		1192
 #define LEGACY_SCAN_EXT_SSIDS		896
+/*
+ * ENUM_SCN_DBDC_SCAN_DIS: scan on one band at a time. gen4m sets it when
+ * DBDC is off; the host never sets DBDC up on the SoC (no SET_DBDC_PARMS).
+ */
+#define LEGACY_SCAN_FUNC_DBDC_DIS	BIT(1)
 
 int mt76_connac_legacy_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			       struct ieee80211_scan_request *scan_req)
@@ -120,6 +125,7 @@ int mt76_connac_legacy_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 
 	set_bit(MT76_HW_SCANNING, &phy->state);
 	mt76_connac_mcu_fill_hw_scan(phy, vif, scan_req, req);
+	req->scan_func |= LEGACY_SCAN_FUNC_DBDC_DIS;
 
 	/* ext SSIDs, BSSID and random MAC address move by the alignment */
 	buf = skb_put_zero(skb, LEGACY_SCAN_REQ_LEN);
