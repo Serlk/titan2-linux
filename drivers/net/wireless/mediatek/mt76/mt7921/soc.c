@@ -38,6 +38,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/soc/mediatek/mtk-conninfra.h>
+#include <linux/swiotlb.h>
 #include <linux/unaligned.h>
 
 #include "mt7921.h"
@@ -1065,14 +1066,22 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 		return irq;
 
 	/*
-	 * WFDMA rings: the pool LK carved out (memory-region, written by LK
-	 * into this node). Without it the rings would land in memory the
-	 * CONNSYS EMI MPU setup may not cover.
+	 * All DMA of the device stays in the pool LK carved out (memory-region,
+	 * written by LK into this node): the EMI MPU setup of LK lets CONNSYS
+	 * reach that pool only, and MediaTek's driver copies every command,
+	 * event and frame through it. The rings are allocated from it, and as
+	 * a restricted DMA pool it bounces the commands and frames mt76 maps
+	 * from anywhere else, which the WFDMA could not fetch or fill.
 	 */
 	ret = of_reserved_mem_device_init(pdev_dev);
 	if (ret)
 		return dev_err_probe(pdev_dev, ret,
 				     "no WFDMA pool (memory-region from the boot loader)\n");
+	if (!is_swiotlb_force_bounce(pdev_dev)) {
+		of_reserved_mem_device_release(pdev_dev);
+		return dev_err_probe(pdev_dev, -EINVAL,
+				     "WFDMA pool is not a restricted-dma-pool\n");
+	}
 
 	/*
 	 * The rings are device managed (dmam_alloc_coherent()) and are freed
