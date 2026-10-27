@@ -983,6 +983,11 @@ static void mt7921_soc_unregister_device(struct mt792x_dev *dev)
 	tasklet_disable(&dev->mt76.irq_tasklet);
 }
 
+static void mt7921_soc_release_rmem(void *data)
+{
+	of_reserved_mem_device_release(data);
+}
+
 static int mt7921_soc_probe(struct platform_device *pdev)
 {
 	static const struct mt76_driver_ops drv_ops = {
@@ -1069,11 +1074,21 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 		return dev_err_probe(pdev_dev, ret,
 				     "no WFDMA pool (memory-region from the boot loader)\n");
 
+	/*
+	 * The rings are device managed (dmam_alloc_coherent()) and are freed
+	 * after remove(): the pool must stay assigned until then, or they
+	 * would be freed as if they came from the page allocator.
+	 */
+	ret = devm_add_action_or_reset(pdev_dev, mt7921_soc_release_rmem,
+				       pdev_dev);
+	if (ret)
+		return ret;
+
 	ret = dma_set_mask(pdev_dev, DMA_BIT_MASK(36));
 	if (!ret)
 		ret = dma_set_coherent_mask(pdev_dev, DMA_BIT_MASK(32));
 	if (ret)
-		goto err_rmem;
+		return ret;
 
 	/*
 	 * mt792x_get_mac80211_ops() reads the offload capabilities from the
@@ -1082,10 +1097,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	 * (chanctx emulation, no ROC); fw_features overrides it.
 	 */
 	ops = devm_kmemdup(pdev_dev, &mt7921_ops, sizeof(*ops), GFP_KERNEL);
-	if (!ops) {
-		ret = -ENOMEM;
-		goto err_rmem;
-	}
+	if (!ops)
+		return -ENOMEM;
 	features = fw_features;
 	if (!(features & MT792x_FW_CAP_CNM)) {
 		ops->remain_on_channel = NULL;
@@ -1101,10 +1114,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	}
 
 	mdev = mt76_alloc_device(pdev_dev, sizeof(*soc), ops, &drv_ops);
-	if (!mdev) {
-		ret = -ENOMEM;
-		goto err_rmem;
-	}
+	if (!mdev)
+		return -ENOMEM;
 
 	dev = container_of(mdev, struct mt792x_dev, mt76);
 	soc = to_soc(dev);
@@ -1207,8 +1218,6 @@ err_power_off:
 	mt7921_soc_power_off(soc);
 err_free_dev:
 	mt76_free_device(&dev->mt76);
-err_rmem:
-	of_reserved_mem_device_release(pdev_dev);
 
 	return ret;
 }
@@ -1225,7 +1234,6 @@ static void mt7921_soc_remove(struct platform_device *pdev)
 	devm_free_irq(&pdev->dev, soc->irq, dev);
 	mt7921_soc_power_off(soc);
 	mt76_free_device(&dev->mt76);
-	of_reserved_mem_device_release(&pdev->dev);
 }
 
 static const struct of_device_id mt7921_soc_of_match[] = {
