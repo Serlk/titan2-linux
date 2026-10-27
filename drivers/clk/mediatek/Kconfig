@@ -373,6 +373,17 @@ config COMMON_CLK_MT6797_VENCSYS
 	help
 	  This driver supports MediaTek MT6797 vencsys clocks.
 
+config COMMON_CLK_MT6685_AUDCLK
+	tristate "Clock driver for the MediaTek MT6685 audio clock buffer"
+	depends on MFD_MT6685 || COMPILE_TEST
+	depends on REGMAP
+	help
+	  The MT6685 clock buffer chip provides the 26 MHz reference of the
+	  audio codec of MT6369 based phones on its software switched buffer
+	  BBCK5. Without it the codec's digital part and its MTKAIF link to
+	  the SoC have no clock and carry no audio.
+	  Say Y or M if your board has such a codec (MT6878).
+
 config COMMON_CLK_MT6878
 	bool "Clock driver for MediaTek MT6878"
 	depends on (ARCH_MEDIATEK && ARM64) || COMPILE_TEST
