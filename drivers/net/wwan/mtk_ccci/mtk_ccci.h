@@ -540,10 +540,12 @@ void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s);
 /* mtk_ccci_rpc.c */
 int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb);
 
-/* mtk_ccci_dpmaif.c, mtk_ccci_net.c: data path skeleton, not started */
+/* mtk_ccci_dpmaif.c, mtk_ccci_net.c: data path, hardware set up, no traffic */
 int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci);
 int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_pre_stop(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci);
 int mtk_ccci_net_init(struct mtk_ccci *ccci);
 
 /* mtk_ccci_fsm.c */

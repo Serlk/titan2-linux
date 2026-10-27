@@ -11,10 +11,11 @@
  *  - the CCIF0 windows, clocks, supplies (got, never switched).
  *
  * Probing does not power, clock, reset or start the modem, issues no
- * TF-A calls, requests no interrupt and writes no register or shared
- * memory. With ccif_regs=1 it reads CCIF0 to tell what state LK left the
- * modem in. Restarting the modem the stock way is a debugfs command,
- * refused unless power_ctrl=1 and the DT describes everything it needs.
+ * TF-A calls, enables no interrupt (with data=1 the DPMAIF one is
+ * requested, disabled) and writes no register or shared memory. With
+ * ccif_regs=1 it reads CCIF0 to tell what state LK left the modem in.
+ * Restarting the modem the downstream way is a debugfs command, refused unless
+ * power_ctrl=1 and the DT describes everything it needs.
  *
  * Copyright (C) 2015 MediaTek Inc.
  * Copyright (C) 2026 serlk
@@ -157,7 +158,7 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/* only with data=1; allocates, never starts */
+	/* only with data=1; allocates, set up only with the modem start */
 	ret = mtk_ccci_dpmaif_init(ccci);
 	if (ret)
 		return ret;
@@ -171,6 +172,7 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	mtk_ccci_hif_debugfs_init(ccci);
 	mtk_ccci_port_debugfs_init(ccci);
 	mtk_ccci_ee_debugfs_init(ccci);
+	mtk_ccci_dpmaif_debugfs_init(ccci);
 
 	/* only with ccif_regs=1: reads, logs what LK left */
 	mtk_ccci_ccif_log_state(ccci);

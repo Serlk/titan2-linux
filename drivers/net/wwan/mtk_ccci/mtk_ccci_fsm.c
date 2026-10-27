@@ -412,6 +412,7 @@ static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
 {
 	struct arm_smccc_res res;
 
+	mtk_ccci_dpmaif_stop(ccci);
 	mtk_ccci_ccif_irq_stop(ccci);
 	mtk_ccci_hif_stop(ccci);
 	mtk_ccci_ccif_stop(ccci);
@@ -473,6 +474,14 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	if (ret)
 		dev_warn(ccci->dev, "CCB ring headers not written: %d\n", ret);
 
+	/*
+	 * The data path, set up before the modem runs as downstream does
+	 * (only with data=1); the modem boots without it if that fails.
+	 */
+	ret = mtk_ccci_dpmaif_start(ccci);
+	if (ret)
+		dev_warn(ccci->dev, "no data path, DPMAIF setup: %d\n", ret);
+
 	ret = mtk_ccci_power_on(ccci);
 	if (ret)
 		goto fail;
@@ -505,6 +514,7 @@ fail:
 	}
 	if (ret != -EOPNOTSUPP)
 		mtk_ccci_query_boot_status(ccci);
+	mtk_ccci_dpmaif_pre_stop(ccci);
 	if (ccci->md_domain_held)
 		mtk_ccci_power_off(ccci);
 	mtk_ccci_hif_down(ccci);
@@ -534,6 +544,7 @@ static int mtk_ccci_fsm_stop(struct mtk_ccci *ccci)
 		return -EINVAL;
 
 	mtk_ccci_port_unregister(ccci);
+	mtk_ccci_dpmaif_pre_stop(ccci);
 	ret = mtk_ccci_power_off(ccci);
 	mtk_ccci_hif_down(ccci);
 	WRITE_ONCE(ccci->state, ret ? MTK_CCCI_FSM_FAILED :
