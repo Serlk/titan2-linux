@@ -673,7 +673,9 @@ mt7921_sniffer_interface_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
 	struct mt76_connac_pm *pm = &dev->pm;
 	bool monitor = !!(hw->conf.flags & IEEE80211_CONF_MONITOR);
 
-	mt7921_mcu_set_sniffer(dev, vif, monitor);
+	/* TODO: the legacy monitor command of the SoC firmware (0xfc) */
+	if (!dev->soc_axi)
+		mt7921_mcu_set_sniffer(dev, vif, monitor);
 	pm->enable = pm->enable_user && !monitor;
 	pm->ds_enable = pm->ds_enable_user && !monitor;
 
@@ -822,7 +824,8 @@ static void mt7921_bss_info_changed(struct ieee80211_hw *hw,
 		}
 	}
 
-	if (changed & BSS_CHANGED_ARP_FILTER) {
+	/* TODO: the legacy IP address command of the SoC firmware (0x10) */
+	if ((changed & BSS_CHANGED_ARP_FILTER) && !dev->soc_axi) {
 		struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
 
 		mt76_connac_mcu_update_arp_filter(&dev->mt76, &mvif->bss_conf.mt76,
@@ -1336,6 +1339,10 @@ static void mt7921_set_rekey_data(struct ieee80211_hw *hw,
 {
 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
 
+	/* unified command, the SoC firmware does not have it */
+	if (dev->soc_axi)
+		return;
+
 	mt792x_mutex_acquire(dev);
 	mt76_connac_mcu_update_gtk_rekey(hw, vif, data);
 	mt792x_mutex_release(dev);
@@ -1618,6 +1625,12 @@ void mt7921_csa_work(struct work_struct *work)
 						csa_work);
 	dev = mvif->phy->dev;
 	vif = container_of((void *)mvif, struct ieee80211_vif, drv_priv);
+
+	/* no legacy channel switch on the SoC yet: let mac80211 reconnect */
+	if (dev->soc_axi) {
+		ieee80211_chswitch_done(vif, false, 0);
+		return;
+	}
 
 	mt792x_mutex_acquire(dev);
 	ret = mt76_connac_mcu_uni_set_chctx(mvif->phy->mt76, &mvif->bss_conf.mt76,
