@@ -153,6 +153,14 @@
 #define GPUEB_MBOX_MAX_RX_SIZE		32 /* in bytes */
 
 /*
+ * How long to wait for a GPUFreq reply. Downstream waits 10 s (IPI_TIMEOUT_MS)
+ * and then gives up on the GPU; a power request can take longer than the usual
+ * few ms, so log the ones that are slow.
+ */
+#define GPUFREQ_IPI_TIMEOUT_MS		10000
+#define GPUFREQ_IPI_SLOW_MS		500
+
+/*
  * This enum is part of the ABI of the GPUEB firmware. Don't change the
  * numbering, as you would wreak havoc.
  */
@@ -269,6 +277,7 @@ struct mtk_mfg_mbox {
 	struct completion rx_done;
 	struct mtk_mfg *mfg;
 	struct mbox_chan *ch;
+	void *tx_data;
 	void *rx_data;
 };
 
@@ -523,43 +532,76 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
 }
 
 /**
- * mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
+ * __mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
  * @mfg: pointer to this driver instance's private &struct mtk_mfg
- * @msg: pointer to a message to send; will have magic filled and response assigned
+ * @msg: pointer to a message to send; will have magic filled and response copied
  *
  * Send an IPI message on the gpufreq channel, and wait for a response. Once a
- * response is received, assign a pointer to the response buffer (valid until
- * next response is received) to @msg.
+ * response is received, copy it into @msg, whatever its return value.
  *
  * Returns 0 on success, negative errno on failure.
  */
-static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 {
+	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
 	struct device *dev = &mfg->pdev->dev;
-	unsigned long wait;
+	unsigned long timeout, left;
+	unsigned int ms;
 	int ret;
+
+	BUILD_BUG_ON(sizeof(*msg) > GPUEB_MBOX_MAX_RX_SIZE);
 
 	msg->magic = mfg->ipi_magic;
 
-	/* a reply that came after an earlier timeout isn't the answer to this */
-	reinit_completion(&mfg->gf_mbox->rx_done);
+	/*
+	 * The mailbox core holds on to the message until the EB took it, which
+	 * may be after we gave up waiting: don't let it point into our stack.
+	 */
+	memcpy(gf->tx_data, msg, sizeof(*msg));
 
-	ret = mbox_send_message(mfg->gf_mbox->ch, msg);
+	/* a reply that came after an earlier timeout isn't the answer to this */
+	reinit_completion(&gf->rx_done);
+
+	ret = mbox_send_message(gf->ch, gf->tx_data);
 	if (ret < 0) {
 		dev_err(dev, "Cannot send GPUFreq IPI command: %pe\n", ERR_PTR(ret));
 		return ret;
 	}
 
-	wait = wait_for_completion_timeout(&mfg->gf_mbox->rx_done, msecs_to_jiffies(500));
-	if (!wait) {
+	timeout = msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS);
+	left = wait_for_completion_timeout(&gf->rx_done, timeout);
+	if (!left) {
 		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
 		return -ETIMEDOUT;
 	}
 
-	msg = mfg->gf_mbox->rx_data;
+	ms = jiffies_to_msecs(timeout - left);
+	if (ms > GPUFREQ_IPI_SLOW_MS)
+		dev_warn(dev, "GPUFreq IPI command %u took %u ms\n",
+			 le32_to_cpu(msg->cmd), ms);
+
+	memcpy(msg, gf->rx_data, sizeof(*msg));
+
+	return 0;
+}
+
+/**
+ * mtk_mfg_send_ipi - synchronously send an IPI message, fail on an error reply
+ * @mfg: pointer to this driver instance's private &struct mtk_mfg
+ * @msg: pointer to a message to send; will have magic filled and response copied
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+{
+	int ret;
+
+	ret = __mtk_mfg_send_ipi(mfg, msg);
+	if (ret)
+		return ret;
 
 	if (msg->u.return_value < 0) {
-		dev_err(dev, "IPI return: %d\n", msg->u.return_value);
+		dev_err(&mfg->pdev->dev, "IPI return: %d\n", msg->u.return_value);
 		return -EPROTO;
 	}
 
@@ -923,6 +965,10 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
 
 	gf = devm_kzalloc(dev, sizeof(*gf), GFP_KERNEL);
 	if (!gf)
+		return -ENOMEM;
+
+	gf->tx_data = devm_kzalloc(dev, sizeof(struct mtk_mfg_ipi_msg), GFP_KERNEL);
+	if (!gf->tx_data)
 		return -ENOMEM;
 
 	gf->rx_data = devm_kzalloc(dev, GPUEB_MBOX_MAX_RX_SIZE, GFP_KERNEL);
