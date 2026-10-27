@@ -202,6 +202,17 @@ extern const struct ieee80211_ops mt7921_ops;
 u32 mt7921_reg_map(struct mt792x_dev *dev, u32 addr);
 
 int __mt7921_start(struct mt792x_phy *phy);
+
+/*
+ * The channel domain (V2) and per-rate power limit commands of mt76. The
+ * MediaTek driver sends these only to firmware that reports its single
+ * SKU info; the SOC7_0 firmware asserts on them otherwise (it takes the
+ * channel domain for the older, fixed size layout).
+ */
+static inline bool mt7921_fw_regd_v2(struct mt792x_dev *dev)
+{
+	return !dev->soc_axi || dev->fw_single_sku;
+}
 int mt7921_register_device(struct mt792x_dev *dev);
 void mt7921_unregister_device(struct mt792x_dev *dev);
 int mt7921_run_firmware(struct mt792x_dev *dev);

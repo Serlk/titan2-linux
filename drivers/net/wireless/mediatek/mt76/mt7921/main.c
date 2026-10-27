@@ -233,9 +233,11 @@ int __mt7921_start(struct mt792x_phy *phy)
 	if (err)
 		return err;
 
-	err = mt76_connac_mcu_set_channel_domain(mphy);
-	if (err)
-		return err;
+	if (mt7921_fw_regd_v2(phy->dev)) {
+		err = mt76_connac_mcu_set_channel_domain(mphy);
+		if (err)
+			return err;
+	}
 
 	err = mt7921_mcu_set_chan_info(phy, MCU_EXT_CMD(SET_RX_PATH));
 	if (err)
@@ -1295,6 +1297,9 @@ int mt7921_set_tx_sar_pwr(struct ieee80211_hw *hw,
 			return err;
 	}
 	mt792x_init_acpi_sar_power(mt792x_hw_phy(hw), !sar);
+
+	if (!mt7921_fw_regd_v2(mt792x_hw_dev(hw)))
+		return 0;
 
 	return mt76_connac_mcu_set_rate_txpower(mphy);
 }

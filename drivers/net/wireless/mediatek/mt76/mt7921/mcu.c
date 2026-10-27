@@ -560,7 +560,10 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
 	} __packed * hdr;
 	struct sk_buff *skb;
 	struct mt76_phy *phy = mphy->mt76;
+	u64 tags = 0;
 	int ret, i;
+
+	mphy->dev->fw_single_sku = false;
 
 	ret = mt76_mcu_send_and_get_msg(phy->dev, MCU_CE_CMD(GET_NIC_CAPAB),
 					NULL, 0, true, &skb);
@@ -591,9 +594,15 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
 		if (skb->len < len)
 			break;
 
+		if (mphy->dev->soc_axi && le32_to_cpu(tlv->type) < 64)
+			tags |= BIT_ULL(le32_to_cpu(tlv->type));
+
 		switch (le32_to_cpu(tlv->type)) {
 		case MT_NIC_CAP_6G:
 			phy->cap.has_6ghz = skb->data[0];
+			break;
+		case MT_NIC_CAP_SINGLE_SKU:
+			mphy->dev->fw_single_sku = true;
 			break;
 		case MT_NIC_CAP_MAC_ADDR:
 			memcpy(phy->macaddr, (void *)skb->data, ETH_ALEN);
@@ -614,6 +623,10 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
 		}
 		skb_pull(skb, len);
 	}
+
+	if (mphy->dev->soc_axi)
+		dev_info(phy->dev->dev, "firmware capabilities 0x%llx%s\n", tags,
+			 mphy->dev->fw_single_sku ? "" : ", no single SKU");
 out:
 	dev_kfree_skb(skb);
 

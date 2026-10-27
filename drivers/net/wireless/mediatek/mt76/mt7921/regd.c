@@ -89,9 +89,11 @@ int __mt7921_mcu_regd_update(struct mt792x_dev *dev, u8 *alpha2,
 
 	mt7921_regd_channel_update(wiphy, dev);
 
-	ret = mt76_connac_mcu_set_channel_domain(hw->priv);
-	if (ret < 0)
-		return ret;
+	if (mt7921_fw_regd_v2(dev)) {
+		ret = mt76_connac_mcu_set_channel_domain(hw->priv);
+		if (ret < 0)
+			return ret;
+	}
 
 	ret = mt7921_set_tx_sar_pwr(hw, NULL);
 
