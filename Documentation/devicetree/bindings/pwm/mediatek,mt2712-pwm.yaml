@@ -35,6 +35,7 @@ properties:
           - const: mediatek,mt8183-pwm
       - items:
           - enum:
+              - mediatek,mt6878-pwm
               - mediatek,mt8196-pwm
           - const: mediatek,mt6991-pwm
 

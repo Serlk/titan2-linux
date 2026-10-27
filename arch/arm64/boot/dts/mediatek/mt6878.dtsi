@@ -533,6 +533,22 @@
 			status = "disabled";
 		};
 
+		/* channels at 0x100 apart, as MT6991 (downstream "pwm-version 3") */
+		pwm: pwm@11008000 {
+			compatible = "mediatek,mt6878-pwm", "mediatek,mt6991-pwm";
+			reg = <0x11008000 0x1000>;
+			interrupts = <GIC_SPI 469 IRQ_TYPE_LEVEL_HIGH 0>;
+			#pwm-cells = <2>;
+			clocks = <&pericfg_ao CLK_PERAOP_PWM_H>,
+				 <&pericfg_ao CLK_PERAOP_PWM_B>,
+				 <&pericfg_ao CLK_PERAOP_PWM_FB1>,
+				 <&pericfg_ao CLK_PERAOP_PWM_FB2>,
+				 <&pericfg_ao CLK_PERAOP_PWM_FB3>,
+				 <&pericfg_ao CLK_PERAOP_PWM_FB4>;
+			clock-names = "top", "main", "pwm1", "pwm2", "pwm3", "pwm4";
+			status = "disabled";
+		};
+
 		disp_pwm1: pwm@1100f000 {
 			compatible = "mediatek,mt6878-disp-pwm";
 			reg = <0x1100f000 0x1000>;
