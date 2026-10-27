@@ -57,6 +57,11 @@ module_param(rat_bitmap, uint, 0444);
 MODULE_PARM_DESC(rat_bitmap,
 		 "radio technologies the modem may use, modem bit order (default 0x7d: N/C/Lf/Lt/W/G)");
 
+static bool ccb_data_lk;
+module_param(ccb_data_lk, bool, 0444);
+MODULE_PARM_DESC(ccb_data_lk,
+		 "announce the whole CCB data LK set aside (default: what the CCB buffers use)");
+
 /* modem side RAT bits (0 | N | Lf | Lt | W | C | T | G) */
 #define MTK_CCCI_RAT_CDMA2000		BIT(2)
 
@@ -235,6 +240,30 @@ static u32 rt_smem_size(struct mtk_ccci *ccci, enum mtk_ccci_smem_id id)
 	const struct mtk_ccci_smem_region *r = mtk_ccci_lk_smem(ccci, id);
 
 	return r ? le32_to_cpu(r->size) : 0;
+}
+
+/*
+ * The CCB data announced. The downstream driver places the CCB users back
+ * to back at the start of the CCB data LK handed over, each as large as
+ * its buffers (mtk_ccci_ccb.c), and announces their sum, not the size of
+ * the LK block (on Titan 2: 0x17c000 of 0x1600000; the rest of the block
+ * is the raw DHL/MDM logging memory).
+ */
+static u32 rt_ccb_data_size(struct mtk_ccci *ccci)
+{
+	u32 lk = 0, need = mtk_ccci_ccb_data_size();
+	unsigned int id;
+
+	for (id = MTK_CCCI_SMEM_CCB_DHL; id <= MTK_CCCI_SMEM_CCB_META; id++)
+		lk += rt_smem_size(ccci, id);
+	if (ccb_data_lk)
+		return lk;
+	if (need > lk) {
+		dev_warn(ccci->dev, "CCB data of %#x bytes, %#x needed\n",
+			 lk, need);
+		return lk;
+	}
+	return need;
 }
 
 /* what this AP supports, as the downstream driver configures it */
@@ -474,13 +503,8 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 		}
 		r = mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_CCB_DHL);
 		if (r) {
-			u32 total = 0;
-
 			w[2] = cpu_to_le32(mtk_ccci_lk_smem_md_addr(r));
-			for (j = MTK_CCCI_SMEM_CCB_DHL;
-			     j <= MTK_CCCI_SMEM_CCB_META; j++)
-				total += rt_smem_size(ccci, j);
-			w[3] = cpu_to_le32(total);
+			w[3] = cpu_to_le32(rt_ccb_data_size(ccci));
 		}
 		return 4 * sizeof(*w);
 	case FT_MULTI_MD_MPU:

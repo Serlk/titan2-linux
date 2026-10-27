@@ -465,6 +465,14 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 			goto fail;
 	}
 
+	/*
+	 * The CCB ring headers the modem expects to find when it starts;
+	 * the start goes on without them.
+	 */
+	ret = mtk_ccci_ccb_init(ccci);
+	if (ret)
+		dev_warn(ccci->dev, "CCB ring headers not written: %d\n", ret);
+
 	ret = mtk_ccci_power_on(ccci);
 	if (ret)
 		goto fail;
@@ -582,9 +590,10 @@ static void mtk_ccci_fsm_dry_run(struct mtk_ccci *ccci)
 	for (p = c.buf; (line = strsep(&p, "\n")) && *line;)
 		dev_info(ccci->dev, "  %s\n", line);
 	dev_info(ccci->dev,
-		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then %s\n",
+		 "  would: SIP CCIF_CLK_REQUEST; CCIF clocks on, rings in CCISM, CCIF reset, CCIF interrupts%s%s; topckgen md1 clocks on; SIP FLIGHT_MODE 0; MD domain on; SIP KERNEL_BOOT_UP; wait for HS1 up to %u ms; then %s\n",
 		 !ccci->lk_modem_gone ?
 		 "; SIP CHECK_DONE poll; take the MD domain over, off, 4 ms, SIP FLIGHT_MODE 1, topckgen md1 clocks off" : "",
+		 !ccci->ccb_ctrl_init ? "; CCB ring headers into CCB_CTRL" : "",
 		 MTK_CCCI_HS1_TIMEOUT_MS,
 		 mtk_ccci_rt_enabled() ?
 		 "runtime data into RUNTIME_DATA and the CCIF SRAM, CCIF channel 15, wait for HS2 (FS/RPC served meanwhile), READY" :

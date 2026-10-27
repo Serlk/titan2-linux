@@ -394,6 +394,7 @@ struct mtk_ccci {
 	bool md_domain;			/* MD power domain attached */
 	bool md_domain_held;		/* runtime PM reference taken */
 	bool lk_modem_gone;		/* the LK-started modem was powered off */
+	bool ccb_ctrl_init;		/* CCB ring headers written */
 	struct mutex fsm_lock;		/* FSM commands */
 	enum mtk_ccci_fsm_state state;	/* written under fsm_lock */
 	u32 boot_status[2];
@@ -520,6 +521,10 @@ void mtk_ccci_ee_ccif(struct mtk_ccci *ccci, u32 channels);
 void mtk_ccci_ee_ctl(struct mtk_ccci *ccci, u32 msg, u32 id,
 		     const struct sk_buff *skb);
 void mtk_ccci_ee_report(struct mtk_ccci *ccci);
+
+/* mtk_ccci_ccb.c */
+int mtk_ccci_ccb_init(struct mtk_ccci *ccci);
+u32 mtk_ccci_ccb_data_size(void);
 
 /* mtk_ccci_rt.c */
 bool mtk_ccci_rt_enabled(void);

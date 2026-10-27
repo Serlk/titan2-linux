@@ -12,6 +12,7 @@ mtk_ccci-y := \
 	mtk_ccci_ee.o \
 	mtk_ccci_cdev.o \
 	mtk_ccci_rpc.o \
+	mtk_ccci_ccb.o \
 	mtk_ccci_rt.o \
 	mtk_ccci_fsm.o \
 	mtk_ccci_port.o \
