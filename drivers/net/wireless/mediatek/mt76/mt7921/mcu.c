@@ -293,6 +293,47 @@ mt7921_mcu_rssi_monitor_event(struct mt792x_dev *dev, struct sk_buff *skb)
 						   mt7921_mcu_rssi_monitor_iter, event);
 }
 
+/* EVENT_CH_PRIVILEGE of the SoC firmware: the channel is granted */
+static void
+mt7921_mcu_legacy_roc_event(struct mt792x_dev *dev, struct sk_buff *skb)
+{
+	struct {
+		u8 bss_idx;
+		u8 token;
+		u8 status;	/* 0: granted */
+		u8 primary_ch;
+		u8 sco;
+		u8 band;
+		u8 width;
+		u8 center_ch1;
+		u8 center_ch2;
+		u8 req_type;
+		u8 dbdc_band;
+		u8 rsv;
+		__le32 grant_interval;
+		u8 rsv2[8];
+	} __packed *grant;
+
+	skb_pull(skb, sizeof(struct mt76_connac2_mcu_rxd));
+	if (skb->len < sizeof(*grant))
+		return;
+
+	grant = (void *)skb->data;
+	if (grant->status) {
+		dev_warn(dev->mt76.dev, "channel %u not granted: %u\n",
+			 grant->primary_ch, grant->status);
+		return;
+	}
+
+	if (grant->req_type == MT7921_ROC_REQ_ROC)
+		ieee80211_ready_on_channel(dev->mt76.phy.hw);
+
+	dev->phy.roc_grant = true;
+	wake_up(&dev->phy.roc_wait);
+	mod_timer(&dev->phy.roc_timer,
+		  jiffies + msecs_to_jiffies(le32_to_cpu(grant->grant_interval)));
+}
+
 static void
 mt7921_mcu_rx_unsolicited_event(struct mt792x_dev *dev, struct sk_buff *skb)
 {
@@ -323,6 +364,10 @@ mt7921_mcu_rx_unsolicited_event(struct mt792x_dev *dev, struct sk_buff *skb)
 		break;
 	case MCU_EVENT_RSSI_NOTIFY:
 		mt7921_mcu_rssi_monitor_event(dev, skb);
+		break;
+	case MCU_EVENT_ROC:
+		if (dev->soc_axi)
+			mt7921_mcu_legacy_roc_event(dev, skb);
 		break;
 	default:
 		break;
@@ -862,6 +907,13 @@ int mt7921_mcu_set_roc(struct mt792x_phy *phy, struct mt792x_vif *vif,
 		},
 	};
 
+	/* the SoC firmware has the legacy channel request (CH_PRIVILEGE) */
+	if (dev->soc_axi)
+		return mt76_connac_legacy_ch_privilege(&dev->mt76,
+						       vif->bss_conf.mt76.idx,
+						       token_id, false, chan,
+						       type, duration);
+
 	if (chan->hw_value < center_ch)
 		req.roc.sco = 1; /* SCA */
 	else if (chan->hw_value > center_ch)
@@ -908,6 +960,12 @@ int mt7921_mcu_abort_roc(struct mt792x_phy *phy, struct mt792x_vif *vif,
 			.dbdcband = 0xff, /* auto*/
 		},
 	};
+
+	if (dev->soc_axi)
+		return mt76_connac_legacy_ch_privilege(&dev->mt76,
+						       vif->bss_conf.mt76.idx,
+						       token_id, true, NULL,
+						       0, 0);
 
 	return mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD(ROC),
 				 &req, sizeof(req), false);

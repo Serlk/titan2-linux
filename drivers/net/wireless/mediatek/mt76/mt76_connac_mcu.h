@@ -1344,7 +1344,11 @@ enum {
 enum {
 	MCU_CE_CMD_TEST_CTRL = 0x01,
 	MCU_CE_CMD_START_HW_SCAN = 0x03,
+	MCU_CE_CMD_ADD_REMOVE_KEY = 0x07,
 	MCU_CE_CMD_BSS_ACTIVATE_CTRL = 0x11,
+	MCU_CE_CMD_SET_BSS_INFO = 0x12,
+	MCU_CE_CMD_UPDATE_STA_RECORD = 0x13,
+	MCU_CE_CMD_REMOVE_STA_RECORD = 0x14,
 	MCU_CE_CMD_SET_PS_PROFILE = 0x05,
 	MCU_CE_CMD_SET_RX_FILTER = 0x0a,
 	MCU_CE_CMD_SET_CHAN_DOMAIN = 0x0f,
@@ -2040,6 +2044,21 @@ int mt76_connac_legacy_bss_activate(struct mt76_dev *dev,
 int mt76_connac_legacy_set_rx_filter(struct mt76_dev *dev, u32 filter);
 int mt76_connac_legacy_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			       struct ieee80211_scan_request *scan_req);
+int mt76_connac_legacy_ch_privilege(struct mt76_dev *dev, u8 bss_idx,
+				    u8 token, bool abort,
+				    struct ieee80211_channel *chan,
+				    u8 req_type, u32 duration);
+int mt76_connac_legacy_sta_rec(struct mt76_dev *dev, struct ieee80211_vif *vif,
+			       struct mt76_vif_link *mvif,
+			       struct ieee80211_sta *sta, u8 wlan_idx, bool assoc);
+int mt76_connac_legacy_remove_sta(struct mt76_dev *dev, u8 sta_idx, u8 bss_idx);
+int mt76_connac_legacy_bss_info(struct mt76_dev *dev, struct ieee80211_vif *vif,
+				struct mt76_vif_link *mvif,
+				struct ieee80211_sta *ap, u8 ap_wlan_idx,
+				u8 bmc_wlan_idx, bool connected);
+int mt76_connac_legacy_add_key(struct mt76_dev *dev, struct mt76_vif_link *mvif,
+			       struct ieee80211_key_conf *key, const u8 *peer,
+			       u8 wlan_idx, bool add);
 void mt76_connac_mcu_fill_hw_scan(struct mt76_phy *phy,
 				  struct ieee80211_vif *vif,
 				  struct ieee80211_scan_request *scan_req,

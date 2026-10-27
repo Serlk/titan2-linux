@@ -517,6 +517,50 @@ out:
 }
 EXPORT_SYMBOL_GPL(mt7921_set_channel);
 
+static int mt7921_soc_set_key(struct mt792x_dev *dev, enum set_key_cmd cmd,
+			      struct ieee80211_vif *vif,
+			      struct ieee80211_sta *sta,
+			      struct ieee80211_key_conf *key)
+{
+	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+	struct mt792x_sta *msta = sta ? (struct mt792x_sta *)sta->drv_priv :
+				  &mvif->sta;
+	struct mt76_wcid *wcid = &msta->deflink.wcid;
+	int err = 0;
+
+	switch (key->cipher) {
+	case WLAN_CIPHER_SUITE_TKIP:
+	case WLAN_CIPHER_SUITE_CCMP:
+	case WLAN_CIPHER_SUITE_GCMP:
+	case WLAN_CIPHER_SUITE_GCMP_256:
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	mt792x_mutex_acquire(dev);
+
+	if (cmd == SET_KEY) {
+		wcid->hw_key_idx = key->keyidx;
+	} else {
+		if (key->keyidx == wcid->hw_key_idx)
+			wcid->hw_key_idx = -1;
+		/* as on the other buses: keep the keys while reassociating */
+		if (vif->type != NL80211_IFTYPE_STATION || vif->cfg.assoc)
+			goto out;
+	}
+
+	mt76_wcid_key_setup(&dev->mt76, wcid, key);
+	/* a group key goes to the BSS's group entry, both name the AP */
+	err = mt76_connac_legacy_add_key(&dev->mt76, &mvif->bss_conf.mt76, key,
+					 sta ? sta->addr : vif->bss_conf.bssid,
+					 wcid->idx, cmd == SET_KEY);
+out:
+	mt792x_mutex_release(dev);
+
+	return err;
+}
+
 static int mt7921_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 			  struct ieee80211_vif *vif, struct ieee80211_sta *sta,
 			  struct ieee80211_key_conf *key)
@@ -538,6 +582,10 @@ static int mt7921_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 	     key->cipher == WLAN_CIPHER_SUITE_CCMP) &&
 	    !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
 		return -EOPNOTSUPP;
+
+	/* the SoC firmware takes the keys with the legacy command */
+	if (dev->soc_axi)
+		return mt7921_soc_set_key(dev, cmd, vif, sta, key);
 
 	/* fall back to sw encryption for unsupported ciphers */
 	switch (key->cipher) {
@@ -761,9 +809,17 @@ static void mt7921_bss_info_changed(struct ieee80211_hw *hw,
 		mt7921_mcu_set_rssimonitor(dev, vif);
 
 	if (changed & BSS_CHANGED_ASSOC) {
-		mt7921_mcu_sta_update(dev, NULL, vif, true,
-				      MT76_STA_INFO_STATE_ASSOC);
-		mt7921_mcu_set_beacon_filter(dev, vif, vif->cfg.assoc);
+		/*
+		 * The SoC firmware has no record of the own STA, and tracks
+		 * the beacons itself once it knows the BSS is connected.
+		 */
+		if (dev->soc_axi) {
+			mt7921_mcu_set_bss_pm(dev, vif, vif->cfg.assoc);
+		} else {
+			mt7921_mcu_sta_update(dev, NULL, vif, true,
+					      MT76_STA_INFO_STATE_ASSOC);
+			mt7921_mcu_set_beacon_filter(dev, vif, vif->cfg.assoc);
+		}
 	}
 
 	if (changed & BSS_CHANGED_ARP_FILTER) {
@@ -876,8 +932,13 @@ int mt7921_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	mt7921_mac_wtbl_update(dev, idx,
 			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
 
-	ret = mt7921_mcu_sta_update(dev, sta, vif, true,
-				    MT76_STA_INFO_STATE_NONE);
+	if (dev->soc_axi)
+		ret = mt76_connac_legacy_sta_rec(&dev->mt76, vif,
+						 &mvif->bss_conf.mt76, sta,
+						 idx, false);
+	else
+		ret = mt7921_mcu_sta_update(dev, sta, vif, true,
+					    MT76_STA_INFO_STATE_NONE);
 	if (ret)
 		return ret;
 
@@ -903,6 +964,28 @@ int mt7921_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	    return 0;
 
 	mt792x_mutex_acquire(dev);
+
+	if (dev->soc_axi) {
+		u8 idx = msta->deflink.wcid.idx;
+		int ret;
+
+		/*
+		 * As MediaTek's driver joins: the BSS connected with the AP's
+		 * record, then the record in state 3, which the firmware
+		 * answers once the AP's WTBL entry passes data.
+		 */
+		mt76_connac_legacy_bss_info(mdev, vif, &mvif->bss_conf.mt76,
+					    sta, idx,
+					    mvif->sta.deflink.wcid.idx, true);
+		ret = mt76_connac_legacy_sta_rec(mdev, vif,
+						 &mvif->bss_conf.mt76, sta,
+						 idx, true);
+		if (ret)
+			dev_warn(mdev->dev, "AP record not activated: %d\n",
+				 ret);
+		mt792x_mutex_release(dev);
+		return 0;
+	}
 
 	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
 		mt76_connac_mcu_uni_add_bss(&dev->mphy, vif, &mvif->sta.deflink.wcid,
@@ -932,7 +1015,15 @@ void mt7921_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	mt76_connac_free_pending_tx_skbs(&dev->pm, &msta->deflink.wcid);
 	mt76_connac_pm_wake(&dev->mphy, &dev->pm);
 
-	mt7921_mcu_sta_update(dev, sta, vif, false, MT76_STA_INFO_STATE_NONE);
+	if (dev->soc_axi) {
+		struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+
+		mt76_connac_legacy_remove_sta(mdev, msta->deflink.wcid.idx,
+					      mvif->bss_conf.mt76.idx);
+	} else {
+		mt7921_mcu_sta_update(dev, sta, vif, false,
+				      MT76_STA_INFO_STATE_NONE);
+	}
 	mt7921_mac_wtbl_update(dev, msta->deflink.wcid.idx,
 			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
 
@@ -941,7 +1032,12 @@ void mt7921_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 
 		mvif->wep_sta = NULL;
 		ewma_rssi_init(&mvif->bss_conf.rssi);
-		if (!sta->tdls)
+		if (!sta->tdls && dev->soc_axi)
+			mt76_connac_legacy_bss_info(mdev, vif,
+						    &mvif->bss_conf.mt76, NULL, 0,
+						    mvif->sta.deflink.wcid.idx,
+						    false);
+		else if (!sta->tdls)
 			mt76_connac_mcu_uni_add_bss(&dev->mphy, vif,
 						    &mvif->sta.deflink.wcid, false,
 						    mvif->bss_conf.mt76.ctx);
@@ -986,6 +1082,14 @@ mt7921_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	if (!txq)
 		return -EINVAL;
+
+	/*
+	 * The SoC firmware negotiates block ack itself (its STA record
+	 * enables A-MPDU); mac80211 must not set up a session as well.
+	 */
+	if (dev->soc_axi)
+		return action == IEEE80211_AMPDU_TX_START ||
+		       action == IEEE80211_AMPDU_RX_START ? -EOPNOTSUPP : 0;
 
 	mtxq = (struct mt76_txq *)txq->drv_priv;
 
@@ -1459,7 +1563,9 @@ mt7921_change_chanctx(struct ieee80211_hw *hw,
 	vif = container_of((void *)mvif, struct ieee80211_vif, drv_priv);
 
 	mt792x_mutex_acquire(phy->dev);
-	if (vif->type == NL80211_IFTYPE_MONITOR) {
+	if (phy->dev->soc_axi) {
+		/* no legacy RLM update yet: the BSS info carries the channel */
+	} else if (vif->type == NL80211_IFTYPE_MONITOR) {
 		mt7921_mcu_set_sniffer(mvif->phy->dev, vif, true);
 		mt7921_mcu_config_sniffer(mvif, ctx);
 	} else {

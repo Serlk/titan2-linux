@@ -156,7 +156,8 @@ struct mt7921_soc_phy_rsp {
 	__le32 temperature;
 } __packed;
 
-static u8 fw_features;
+/* the legacy channel request (CH_PRIVILEGE) needs the CNM mode */
+static u8 fw_features = MT792x_FW_CAP_CNM;
 module_param(fw_features, byte, 0444);
 MODULE_PARM_DESC(fw_features,
 		 "Firmware offload capabilities (BIT(7): CNM), not readable from the EMI image");
@@ -1169,8 +1170,8 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	/*
 	 * mt792x_get_mac80211_ops() reads the offload capabilities from the
 	 * firmware file, which does not exist here: the image in EMI is a
-	 * raw memory image without the feature tag. Default to no CNM
-	 * (chanctx emulation, no ROC); fw_features overrides it.
+	 * raw memory image without the feature tag. Default to CNM, which
+	 * the legacy channel request needs; fw_features overrides it.
 	 */
 	ops = devm_kmemdup(pdev_dev, &mt7921_ops, sizeof(*ops), GFP_KERNEL);
 	if (!ops)
