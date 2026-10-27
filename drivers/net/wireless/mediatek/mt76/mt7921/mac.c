@@ -387,7 +387,8 @@ mt7921_mac_fill_rx(struct mt792x_dev *dev, struct sk_buff *skb)
 	}
 
 	hdr_gap = (u8 *)rxd - skb->data + 2 * remove_pad;
-	if (hdr_trans && ieee80211_has_morefrags(fc)) {
+	/* the SoC firmware translates the headers itself: undo it there */
+	if (hdr_trans && (ieee80211_has_morefrags(fc) || dev->soc_axi)) {
 		struct ieee80211_vif *vif;
 		int err;
 

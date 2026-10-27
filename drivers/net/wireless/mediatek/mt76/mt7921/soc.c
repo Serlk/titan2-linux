@@ -411,6 +411,13 @@ static int mt7921_soc_mcu_send_message(struct mt76_dev *mdev,
 		dev_info(mdev->dev, "mcu cmd 0x%08x seq %d len %u\n", cmd,
 			 seq ? *seq : -1, skb->len);
 
+	/*
+	 * Nothing says that the command ring has moved on (MediaTek's driver
+	 * does not enable a TX done interrupt for it either): free what the
+	 * WFDMA has taken before queueing the next one.
+	 */
+	mt76_queue_tx_cleanup(dev, mdev->q_mcu[txq], false);
+
 	return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[txq], skb, 0);
 }
 
