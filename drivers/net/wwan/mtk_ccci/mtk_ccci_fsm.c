@@ -201,16 +201,18 @@ static void mtk_ccci_fsm_check(struct mtk_ccci *ccci,
 /*
  * The rails as the downstream power-on sets them: vmodem and digital RF
  * first, the modem SRAM 2 ms later (the downstream driver's order). The
- * supplies stay enabled throughout; only the voltages are written.
+ * supplies stay enabled throughout; only the voltages are written. A
+ * rail that cannot be set is reported and left as it is, as downstream
+ * does: at the first start LK has already set these voltages.
  */
-static int mtk_ccci_supplies_set(struct mtk_ccci *ccci)
+static void mtk_ccci_supplies_set(struct mtk_ccci *ccci)
 {
 	static const unsigned int order[MTK_CCCI_SUPPLY_NUM] = {
 		MTK_CCCI_SUPPLY_VMODEM, MTK_CCCI_SUPPLY_VDIGRF,
 		MTK_CCCI_SUPPLY_VSRAM,
 	};
 	unsigned int i, s;
-	int ret;
+	int ret, uv;
 
 	for (i = 0; i < ARRAY_SIZE(order); i++) {
 		s = order[i];
@@ -218,17 +220,19 @@ static int mtk_ccci_supplies_set(struct mtk_ccci *ccci)
 			continue;
 		if (s == MTK_CCCI_SUPPLY_VSRAM)
 			usleep_range(2000, 3000);
+		uv = regulator_get_voltage(ccci->supply[s]);
 		ret = regulator_set_voltage(ccci->supply[s],
 					    mtk_ccci_supply_uv[s],
 					    mtk_ccci_supply_uv[s]);
-		if (ret) {
-			dev_err(ccci->dev, "%s-supply to %d uV: %d\n",
-				mtk_ccci_supply_names[s],
-				mtk_ccci_supply_uv[s], ret);
-			return ret;
-		}
+		if (ret)
+			dev_warn(ccci->dev, "%s-supply: %d uV, setting %d uV failed: %d\n",
+				 mtk_ccci_supply_names[s], uv,
+				 mtk_ccci_supply_uv[s], ret);
+		else if (uv != mtk_ccci_supply_uv[s])
+			dev_info(ccci->dev, "%s-supply: %d -> %d uV\n",
+				 mtk_ccci_supply_names[s], uv,
+				 mtk_ccci_supply_uv[s]);
 	}
-	return 0;
 }
 
 /* SPM PWR_CON of the modem: 1 = powered, 0 = off, < 0 unknown */
@@ -323,9 +327,7 @@ static int mtk_ccci_power_on(struct mtk_ccci *ccci)
 	struct arm_smccc_res res;
 	int ret;
 
-	ret = mtk_ccci_supplies_set(ccci);
-	if (ret)
-		return ret;
+	mtk_ccci_supplies_set(ccci);
 	ret = mtk_ccci_topckgen_md_clk(ccci, true);
 	if (ret)
 		return ret;
