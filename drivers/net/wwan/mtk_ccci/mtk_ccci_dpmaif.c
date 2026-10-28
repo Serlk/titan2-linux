@@ -59,6 +59,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
 #include <linux/regmap.h>
@@ -216,6 +217,9 @@ MODULE_PARM_DESC(data,
 /* infracfg_ao */
 #define INFRA_AO_DPMAIF_CTRL	0x208
 #define  INFRA_AO_DPMAIF_EN	BIT(15)	/* set before the setup, cleared before reset */
+#define INFRA_AO_DPMAIF_WAKE	0xc00
+#define  INFRA_AO_DPMAIF_IP_BUSY_MASK	BIT(12)
+#define  INFRA_AO_DPMAIF_MD_WAKE_MASK	BIT(13)	/* the modem-to-AP wakeup event */
 #define INFRA_AO_RST_SET	0x130
 #define INFRA_AO_RST_CLR	0x134
 #define  INFRA_AO_DPMAIF_RST	BIT(0)
@@ -380,6 +384,11 @@ struct mtk_ccci_dpmaif {
 	u32 last_ul_sta;
 	u32 last_dl_sta;
 };
+
+static void dpmaif_rmem_release(void *dev)
+{
+	of_reserved_mem_device_release(dev);
+}
 
 static int dpmaif_ring_alloc(struct device *dev, struct dpmaif_ring *r,
 			     u32 cnt, size_t entry)
@@ -1219,6 +1228,12 @@ int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci)
 		goto out;
 	ret = regmap_set_bits(dp->infracfg_ao, INFRA_AO_DPMAIF_CTRL,
 			      INFRA_AO_DPMAIF_EN);
+	if (!ret)
+		/* as the downstream driver: 0x1000 there, 0x3000 out of LK */
+		ret = regmap_update_bits(dp->infracfg_ao, INFRA_AO_DPMAIF_WAKE,
+					 INFRA_AO_DPMAIF_IP_BUSY_MASK |
+					 INFRA_AO_DPMAIF_MD_WAKE_MASK,
+					 INFRA_AO_DPMAIF_IP_BUSY_MASK);
 	if (ret)
 		goto clk_off;
 
@@ -1445,6 +1460,14 @@ int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci)
 
 	/* BAT and DRB addresses have 40 bits */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+	if (ret)
+		goto out;
+	/* the rings from the DT pool if there is one, as downstream */
+	ret = of_reserved_mem_device_init(dev);
+	if (!ret)
+		ret = devm_add_action_or_reset(dev, dpmaif_rmem_release, dev);
+	else if (ret == -ENODEV)
+		ret = 0;
 	if (ret)
 		goto out;
 	ret = dpmaif_ring_alloc(dev, &dp->bat, DPMAIF_BAT_CNT,

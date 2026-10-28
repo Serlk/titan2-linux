@@ -115,6 +115,8 @@ enum {
 /* BOOT_INFO */
 #define MTK_CCCI_BOOT_MODE_NORMAL	0
 #define MTK_CCCI_BOOT_ATTR_PHONE	BIT(1)	/* not an EVB */
+/* the upper half of mdlg_mode, as a normal boot of the phone sends it */
+#define MTK_CCCI_BOOT_MDLG_NORMAL	0x000f0000
 
 /* MISC_INFO_CCCI */
 #define MTK_CCCI_MISC_SEQ_CHECK		BIT(0)
@@ -470,6 +472,14 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 	for (j = 0; j < ARRAY_SIZE(region); j++) {
 		if (region[j][0] == id) {
 			rt_shm_of(ccci, region[j][1], shm);
+			/*
+			 * LWA is announced as an empty region at the address
+			 * that follows (that of DRDI); LK has no LWA entry.
+			 */
+			if (id == FT_LWA_SHARE_MEMORY && !shm->addr) {
+				rt_shm_of(ccci, MTK_CCCI_SMEM_DRDI, shm);
+				shm->size = 0;
+			}
 			return sizeof(*shm);
 		}
 	}
@@ -481,7 +491,7 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 	case FT_BOOT_INFO:
 		w[0] = cpu_to_le32(MTK_CCCI_CH_CONTROL_RX);
 		/* log mode 0, normal boot, no wait time for a memory dump */
-		w[1] = cpu_to_le32(MTK_CCCI_BOOT_MODE_NORMAL);
+		w[1] = cpu_to_le32(MTK_CCCI_BOOT_MODE_NORMAL | MTK_CCCI_BOOT_MDLG_NORMAL);
 		w[2] = cpu_to_le32(MTK_CCCI_BOOT_ATTR_PHONE);
 		return 4 * sizeof(*w);
 	case FT_EXCEPTION_SHARE_MEMORY:
@@ -566,11 +576,15 @@ static int rt_data_of(struct mtk_ccci *ccci, u8 id, u8 support, void *buf)
 	case FT_MISC_INFO_GPS_COCLOCK:
 	case FT_EE_AFTER_EPOF:
 		return 4 * sizeof(*w);
-	case FT_MD_IMAGE_START_MEMORY:
-		/* the downstream driver: address 0, the raw image size from LK */
-		shm->addr = 0;
+	case FT_MD_IMAGE_START_MEMORY: {
+		/* where LK loaded the image (0xd0000000 on the Titan 2), its raw size */
+		const struct mtk_ccci_lk_hdr_tbl *md;
+
+		md = rt_tag(ccci, "hdr_tbl_inf", sizeof(*md));
+		shm->addr = cpu_to_le32(md ? lower_32_bits(le64_to_cpu(md->base)) : 0);
 		shm->size = cpu_to_le32(rt_tag_u32(ccci, "md1img", 0));
 		return sizeof(*shm);
+	}
 	case FT_AP_CCMNI_MTU:
 		w[0] = cpu_to_le32(MTK_CCCI_CCMNI_MTU);
 		return sizeof(*w);

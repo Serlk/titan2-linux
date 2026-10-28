@@ -76,6 +76,18 @@
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
+
+		/*
+		 * The DPMAIF rings, as the factory ccci-dpmaif-*-memory pools:
+		 * placed by the kernel, above 4 GiB like there.
+		 */
+		dpmaif_mem: dpmaif-memory {
+			compatible = "shared-dma-pool";
+			size = <0x0 0x400000>;
+			alignment = <0x0 0x1000>;
+			alloc-ranges = <0x1 0x0 0x0 0x30000000>;
+			no-map;
+		};
 	};
 
 	/*
@@ -880,6 +892,7 @@
 
 /* still disabled in mt6878.dtsi: the supplies are only checked */
 &modem {
+	memory-region = <&dpmaif_mem>;
 	md-vmodem-supply = <&mt6363_vbuck2>;
 	md-vsram-supply = <&mt6363_vsram_modem>;
 	md-vdigrf-supply = <&mt6363_vbuck1>;

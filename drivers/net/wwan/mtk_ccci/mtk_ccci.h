@@ -191,6 +191,8 @@ enum mtk_ccci_channel {
 	MTK_CCCI_CH_FS_TX = 15,
 	MTK_CCCI_CH_RPC_RX = 32,
 	MTK_CCCI_CH_RPC_TX = 33,
+	MTK_CCCI_CH_MD_DIRC_RX = 200,	/* MD direct path (mddp/WFPM), downstream ccci_0_200 */
+	MTK_CCCI_CH_MD_DIRC_TX = 201,
 	MTK_CCCI_CH_STATUS_RX = 67,
 	MTK_CCCI_CH_STATUS_TX = 68,
 	MTK_CCCI_CH_MIPC0_RX = 214,	/* MIPC0..9: 214 + 2 * n */
@@ -457,6 +459,7 @@ struct mtk_ccci {
 	struct mtk_ccci_cdev cdev_fs;	/* /dev/ccci_fs */
 	struct mtk_ccci_cdev cdev_rpc;	/* /dev/ccci_rpc */
 	struct mtk_ccci_cdev cdev_aud;	/* /dev/ccci_aud */
+	struct mtk_ccci_cdev cdev_dirc;	/* /dev/ccci_0_200 */
 	struct mtk_ccci_cdev cdev_raw_audio;	/* /dev/ccci_raw_audio, mmap only */
 
 	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */

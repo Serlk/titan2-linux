@@ -259,6 +259,8 @@ void mtk_ccci_cdev_reset(struct mtk_ccci *ccci)
 	wake_up_interruptible(&ccci->cdev_rpc.wq);
 	skb_queue_purge(&ccci->cdev_aud.rx);
 	wake_up_interruptible(&ccci->cdev_aud.wq);
+	skb_queue_purge(&ccci->cdev_dirc.rx);
+	wake_up_interruptible(&ccci->cdev_dirc.wq);
 }
 
 static void mtk_ccci_cdev_show(const struct mtk_ccci_cdev *cd,
@@ -275,6 +277,7 @@ void mtk_ccci_cdev_debugfs(struct mtk_ccci *ccci, struct seq_file *s)
 	mtk_ccci_cdev_show(&ccci->cdev_fs, s);
 	mtk_ccci_cdev_show(&ccci->cdev_rpc, s);
 	mtk_ccci_cdev_show(&ccci->cdev_aud, s);
+	mtk_ccci_cdev_show(&ccci->cdev_dirc, s);
 }
 
 static void mtk_ccci_cdev_cleanup(void *data)
@@ -327,6 +330,12 @@ int mtk_ccci_cdev_init(struct mtk_ccci *ccci)
 	/* the speech control of the audio HAL, as the downstream ccci_aud port */
 	ret = mtk_ccci_cdev_add(ccci, &ccci->cdev_aud, "ccci_aud",
 				MTK_CCCI_CH_PCM_TX, MTK_CCCI_Q_CTRL,
+				MTK_CCCI_SMEM_DBM);
+	if (ret)
+		return ret;
+	/* the MD direct path control (the downstream mddp answers it), queue 1 */
+	ret = mtk_ccci_cdev_add(ccci, &ccci->cdev_dirc, "ccci_0_200",
+				MTK_CCCI_CH_MD_DIRC_TX, MTK_CCCI_Q_RPC,
 				MTK_CCCI_SMEM_DBM);
 	if (ret)
 		return ret;
