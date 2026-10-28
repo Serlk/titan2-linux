@@ -208,6 +208,9 @@ static bool aw9523_keypad_report(struct aw9523_keypad *kp, const u16 *state)
 		changed = state[col] ^ kp->state[col];
 		for_each_set_bit(row, &changed, kp->rows) {
 			code = MATRIX_SCAN_CODE(row, col, kp->row_shift);
+			/* No key there (a row wired to a single key reads low on every column) */
+			if (keycodes[code] == KEY_RESERVED)
+				continue;
 			input_event(input, EV_MSC, MSC_SCAN, code);
 			input_report_key(input, keycodes[code],
 					 state[col] & BIT(row));
