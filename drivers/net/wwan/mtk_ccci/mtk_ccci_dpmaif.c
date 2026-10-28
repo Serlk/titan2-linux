@@ -204,6 +204,7 @@ MODULE_PARM_DESC(data,
 
 /* UL interrupts */
 #define UL_INT_QDONE		GENMASK(3, 0)	/* per TX queue */
+#define UL_INT_MD_NOTRDY	GENMASK(14, 10)	/* the modem side of the queue is not up */
 #define UL_INT_PWR_NOTRDY	GENMASK(19, 15)	/* the modem is asleep */
 #define UL_INT_LEN_ERR		GENMASK(24, 20)
 #define UL_INT_EN		(UL_INT_QDONE | UL_INT_PWR_NOTRDY | UL_INT_LEN_ERR)
@@ -378,6 +379,7 @@ struct mtk_ccci_dpmaif {
 	unsigned long irqs;
 	unsigned long ul_done;
 	unsigned long ul_pwr_notrdy;
+	unsigned long ul_md_notrdy;
 	unsigned long ul_len_err;
 	unsigned long dl_done;
 	unsigned long dl_mtu_err;
@@ -1148,10 +1150,20 @@ static u32 dpmaif_dl_mask_to_sta(u32 mask)
 static irqreturn_t dpmaif_irq(int irq, void *data)
 {
 	struct mtk_ccci_dpmaif *dp = data;
-	u32 ul, ul_mask, dl, mask;
+	u32 ul, ul_raw, ul_mask, dl, mask;
 
 	ul_mask = readl(dp->ao + AO_UL_AP_L2TIMR0);
-	ul = readl(dp->pd + PD_AP_UL_L2TISAR0) & ~ul_mask;
+	ul_raw = readl(dp->pd + PD_AP_UL_L2TISAR0);
+	ul = ul_raw & ~ul_mask;
+	/*
+	 * MD_NOTRDY is never enabled (as downstream), so nothing would ever
+	 * acknowledge it and the status would keep showing it: acknowledged
+	 * and counted whenever the line is handled for something else.
+	 */
+	if (ul_raw & UL_INT_MD_NOTRDY) {
+		writel(ul_raw & UL_INT_MD_NOTRDY, dp->pd + PD_AP_UL_L2TISAR0);
+		dp->ul_md_notrdy++;
+	}
 	dl = readl(dp->pd + PD_AP_DL_L2TISAR0) &
 	     ~dpmaif_dl_mask_to_sta(readl(dp->ao + AO_UL_APDL_L2TIMR0));
 	dpmaif_clear_ip_busy(dp);
@@ -1607,9 +1619,9 @@ static int mtk_ccci_dpmaif_show(struct seq_file *s, void *unused)
 	for (i = 0; i < DPMAIF_TXQ_NUM; i++)
 		seq_printf(s, "       drb%u %pad+%u\n", i, &dp->drb[i].dma,
 			   dp->drb[i].cnt);
-	seq_printf(s, "irq %d: %lu; ul done %lu pwr-notrdy %lu len-err %lu, dl done %lu mtu-err %lu; last ul %#x dl %#x\n",
+	seq_printf(s, "irq %d: %lu; ul done %lu pwr-notrdy %lu md-notrdy %lu len-err %lu, dl done %lu mtu-err %lu; last ul %#x dl %#x\n",
 		   dp->irq, dp->irqs, dp->ul_done, dp->ul_pwr_notrdy,
-		   dp->ul_len_err, dp->dl_done, dp->dl_mtu_err,
+		   dp->ul_md_notrdy, dp->ul_len_err, dp->dl_done, dp->dl_mtu_err,
 		   dp->last_ul_sta, dp->last_dl_sta);
 	seq_printf(s, "dl: pit rd %u seq %u, bat wr %u lent %u, frg wr %u lent %u; dropped %lu err %lu seq-err %lu nomem %lu bad-ch %lu (last %u)\n",
 		   dp->pit_rd, dp->pit_seq, dp->bat_wr, dp->bat_lent,
