@@ -1065,6 +1065,8 @@ static void dpmaif_tx_free(struct mtk_ccci_dpmaif *dp)
 	unsigned int q;
 	u32 i;
 
+	/* the modem maps its CCMNIs to the queues again after a restart */
+	memset(dp->ccci->net_txq, 0, sizeof(dp->ccci->net_txq));
 	for (q = 0; q < DPMAIF_TXQ_NUM; q++) {
 		struct dpmaif_txq *txq = &dp->txq[q];
 
@@ -1725,7 +1727,10 @@ netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
 	if (!dp || skb_linearize(skb) || skb->len > FIELD_MAX(DRB0_DATA_LEN))
 		goto drop;
 	len = skb->len;
-	q = dpmaif_tx_is_ack(skb) ? DPMAIF_TXQ_ACK : DPMAIF_TXQ_DATA;
+	/* the queue the modem mapped the CCMNI to (RPC), ACKs apart from data */
+	q = READ_ONCE(ccci->net_txq[ch]);
+	if (q == DPMAIF_TXQ_DATA && dpmaif_tx_is_ack(skb))
+		q = DPMAIF_TXQ_ACK;
 	txq = &dp->txq[q];
 	drb = dp->drb[q].base;
 	cnt = dp->drb[q].cnt;

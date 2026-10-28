@@ -465,6 +465,8 @@ struct mtk_ccci {
 	struct mtk_ccci_dpmaif *dpmaif;	/* NULL unless data=1 */
 	/* WWAN links by CCMNI index, written under RTNL */
 	struct net_device __rcu *net_link[MTK_CCCI_NET_LINKS];
+	/* DPMAIF UL queue of each CCMNI, set by the modem's LHIF mapping RPC */
+	u8 net_txq[MTK_CCCI_NET_LINKS];
 	struct dentry *debugfs;
 };
 

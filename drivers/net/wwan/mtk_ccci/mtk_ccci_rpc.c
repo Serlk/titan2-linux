@@ -21,7 +21,13 @@
  *  - 0x4009 GET_GPIO_ADC: pin numbers and levels for up to 3 (10 in the
  *    second version) pin names, and the board ADC ("mediatek,md-adc");
  *  - 0x400E DTSI_QUERY: a u32 property of the "mediatek,md_attr_node"
- *    node LK creates.
+ *    node LK creates;
+ *  - 0x400D CCCI_LHIF_MAPPING: once the modem is up, and again when it
+ *    activates a PDN, it tells which DPMAIF UL queue a CCMNI sends on
+ *    (its "logical HIF" queue); the downstream driver records the queue and
+ *    answers 0, and the modem repeats the request until it does;
+ *  - 0x4016 RF_ECID_DATA: the RF chips' ECIDs; the downstream driver only
+ *    acknowledges them.
  *
  * The four operations the kernel does not answer itself
  * (system property, SAR table, DRDI copy, crystal calibration) go to
@@ -46,7 +52,9 @@
 #define RPC_GET_GPIO_NUM	0x4002
 #define RPC_GET_EINT_ATTR	0x4005
 #define RPC_GET_GPIO_ADC	0x4009
+#define RPC_LHIF_MAPPING	0x400d
 #define RPC_DTSI_QUERY		0x400e
+#define RPC_RF_ECID_DATA	0x4016
 /* served by userspace */
 #define RPC_QUERY_AP_SYS_PROP	0x400f
 #define RPC_SAR_TABLE_IDX	0x4010
@@ -130,6 +138,20 @@ struct mtk_ccci_rpc_arg {
 	u32 len;
 	const void *buf;
 };
+
+/* CCCI_LHIF_MAPPING: the modem's logical HIF queues */
+enum {
+	RPC_LHIF_HWQ_SW_DL,
+	RPC_LHIF_HWQ_SW_UL,
+	RPC_LHIF_HWQ_AP_UL_Q0,		/* DPMAIF UL queue 0: data */
+	RPC_LHIF_HWQ_AP_UL_Q1,		/* DPMAIF UL queue 3: IMS */
+	RPC_LHIF_HWQ_DIRECT_DL,
+};
+
+struct mtk_ccci_rpc_lhif_map {
+	__le32 net_if;			/* CCMNI index */
+	__le32 lhif_q;
+} __packed;
 
 struct mtk_ccci_rpc_reply {
 	unsigned int num;
@@ -491,6 +513,48 @@ static void mtk_ccci_rpc_dtsi(struct mtk_ccci *ccci,
 	r->num = 2;
 }
 
+/*
+ * The modem binds a CCMNI to one of the DPMAIF UL queues: the downstream
+ * driver puts normal data on queue 0 and the IMS CCMNI on queue 3. The
+ * answer is 0 whatever the mapping, as in the MediaTek downstream driver,
+ * which only logs a CCMNI or queue it does not know.
+ */
+static void mtk_ccci_rpc_lhif_map(struct mtk_ccci *ccci,
+				  const struct mtk_ccci_rpc_arg *arg,
+				  unsigned int num,
+				  struct mtk_ccci_rpc_reply *r)
+{
+	struct mtk_ccci_rpc_lhif_map map;
+	u32 net_if, lhif_q;
+	int txq = -1;
+
+	if (num != 1 || arg[0].len < sizeof(map)) {
+		rpc_reply_u32(r, RPC_PARAM_ERROR);
+		rpc_reply_u32(r, RPC_PARAM_ERROR);
+		return;
+	}
+	memcpy(&map, arg[0].buf, sizeof(map));
+	net_if = le32_to_cpu(map.net_if);
+	lhif_q = le32_to_cpu(map.lhif_q);
+
+	if (lhif_q == RPC_LHIF_HWQ_AP_UL_Q0)
+		txq = 0;
+	else if (lhif_q == RPC_LHIF_HWQ_AP_UL_Q1)
+		txq = 3;
+
+	if (net_if >= MTK_CCCI_NET_LINKS || txq < 0)
+		dev_warn(ccci->dev, "RPC: LHIF mapping of CCMNI %u to queue %u ignored\n",
+			 net_if, lhif_q);
+	else {
+		WRITE_ONCE(ccci->net_txq[net_if], txq);
+		dev_info(ccci->dev, "RPC: CCMNI %u sends on DPMAIF UL queue %d (LHIF queue %u)\n",
+			 net_if, txq, lhif_q);
+	}
+
+	rpc_reply_u32(r, 0);
+	rpc_reply_u32(r, 0);
+}
+
 static int mtk_ccci_rpc_send(struct mtk_ccci *ccci,
 			     const struct mtk_ccci_header *req_hdr, u32 op,
 			     const struct mtk_ccci_rpc_reply *r)
@@ -604,6 +668,21 @@ int mtk_ccci_rpc_recv(struct mtk_ccci *ccci, struct sk_buff *skb)
 		break;
 	case RPC_DTSI_QUERY:
 		mtk_ccci_rpc_dtsi(ccci, arg, num, r);
+		break;
+	case RPC_LHIF_MAPPING:
+		mtk_ccci_rpc_lhif_map(ccci, arg, num, r);
+		break;
+	case RPC_RF_ECID_DATA:
+		/* acknowledged, not kept, as in the MediaTek downstream driver */
+		if (num == 1) {
+			dev_info(ccci->dev, "RPC: RF ECID data, %u bytes\n",
+				 arg[0].len);
+			rpc_reply_u32(r, 0);
+			rpc_reply_u32(r, 0);
+		} else {
+			rpc_reply_u32(r, RPC_PARAM_ERROR);
+			rpc_reply_u32(r, RPC_PARAM_ERROR);
+		}
 		break;
 	default:
 		dev_info(ccci->dev, "RPC %#x (%u args) not handled\n", op, num);
