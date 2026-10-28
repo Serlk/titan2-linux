@@ -597,20 +597,28 @@
 			 * Modem rails, always on in stock: vbuck1 digital RF
 			 * (0.7 V), vbuck2 modem core, vsram-modem modem SRAM
 			 * (0.8 V). LK sets them up and starts the modem; the
-			 * modem driver only checks the voltages.
+			 * modem driver sets the voltages again at every start,
+			 * as the running modem lowers them itself. Limits as
+			 * in the factory device tree.
 			 */
 			mt6363_vbuck1: vbuck1 {
 				regulator-name = "mt6363_vbuck1";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
 				regulator-always-on;
 			};
 
 			mt6363_vbuck2: vbuck2 {
 				regulator-name = "mt6363_vbuck2";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
 				regulator-always-on;
 			};
 
 			mt6363_vsram_modem: vsram-modem {
 				regulator-name = "mt6363_vsram_modem";
+				regulator-min-microvolt = <400000>;
+				regulator-max-microvolt = <1193750>;
 				regulator-always-on;
 			};
 
