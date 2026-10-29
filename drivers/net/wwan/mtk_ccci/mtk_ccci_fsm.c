@@ -473,7 +473,18 @@ static int mtk_ccci_wait_hs1(struct mtk_ccci *ccci)
 		return -EIO;
 	}
 	if (!left) {
+		struct mtk_ccci_ccif_snap *snap;
+
 		dev_err(ccci->dev, "no HS1 in %u ms\n", MTK_CCCI_HS1_TIMEOUT_MS);
+		/* what the modem left in CCIF0, if anything */
+		snap = kzalloc(sizeof(*snap), GFP_KERNEL);
+		if (snap && !mtk_ccci_ccif_snapshot(ccci, snap))
+			dev_err(ccci->dev, "CCIF0 at the timeout: ap busy %#x tchnum %#x rchnum %#x, md busy %#x tchnum %#x rchnum %#x, sram %08x %08x %08x %08x\n",
+				snap->ap.busy, snap->ap.tchnum, snap->ap.rchnum,
+				snap->md.busy, snap->md.tchnum, snap->md.rchnum,
+				snap->sram[0], snap->sram[1], snap->sram[2],
+				snap->sram[3]);
+		kfree(snap);
 		return -ETIMEDOUT;
 	}
 
