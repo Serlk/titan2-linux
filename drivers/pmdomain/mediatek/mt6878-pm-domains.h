@@ -204,8 +204,15 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 				    MT6878_NEMICFG_AO_MEM_PROT_EN_CLR,
 				    MT6878_NEMICFG_AO_MEM_PROT_EN_STA),
 		},
+		/*
+		 * ACTIVE_WAKEUP: the modem wakes the AP from system sleep
+		 * (incoming call, SMS, data), so the domain stays on across
+		 * suspend while the modem driver's device is on the wakeup
+		 * path; the downstream kernel never switches this domain in suspend.
+		 */
 		.caps = MTK_SCPD_MODEM_PWRSEQ | MTK_SCPD_EXT_BUCK_ISO |
-			MTK_SCPD_SKIP_RESET_B | MTK_SCPD_KEEP_DEFAULT_OFF,
+			MTK_SCPD_SKIP_RESET_B | MTK_SCPD_KEEP_DEFAULT_OFF |
+			MTK_SCPD_ACTIVE_WAKEUP,
 	},
 	[MT6878_POWER_DOMAIN_CONN] = {
 		.name = "conn",
