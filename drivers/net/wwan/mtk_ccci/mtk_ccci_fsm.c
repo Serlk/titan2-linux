@@ -719,12 +719,17 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 		return -ENOMEM;
 
 	if (!mutex_trylock(&ccci->fsm_lock)) {
-		/* a start or stop is running: say so instead of waiting for it */
-		seq_printf(s, "state: %s (busy)\n",
+		/*
+		 * Another reader, or a start/stop, holds the lock: say so on
+		 * a line of its own. The first line keeps its exact form, the
+		 * userspace daemons read it to see whether the modem is ready.
+		 */
+		seq_printf(s, "state: %s\n",
 			   mtk_ccci_fsm_state_name(READ_ONCE(ccci->state)));
-		seq_printf(s, "boot status: %#x %#x (last read)\n",
+		seq_printf(s, "boot status: %#x %#x\n",
 			   READ_ONCE(ccci->boot_status[0]),
 			   READ_ONCE(ccci->boot_status[1]));
+		seq_puts(s, "busy: a command or another reader holds the lock, details skipped\n");
 		kfree(c.buf);
 		return 0;
 	}
