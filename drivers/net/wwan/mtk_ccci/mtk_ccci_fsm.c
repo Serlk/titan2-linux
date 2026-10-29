@@ -38,6 +38,7 @@
 #include <linux/of.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/seq_file.h>
@@ -62,6 +63,11 @@ enum {
 	CCCI_SIP_MD_FLIGHT_MODE_SET = 7,
 	CCCI_SIP_CCIF_CLK_REQUEST = 14,
 	CCCI_SIP_CCIF_CLK_RELEASE = 15,
+};
+
+/* sub-commands of CCCI_SIP_MD_CLOCK_REQUEST */
+enum {
+	CCCI_SIP_CLK_WAKEUP_AP_SRC = 3,
 };
 
 /* sub-commands of CCCI_SIP_MD_POWER_CONFIG */
@@ -134,6 +140,37 @@ static void mtk_ccci_sip(struct mtk_ccci *ccci, unsigned long cmd,
 		      res);
 	dev_dbg(ccci->dev, "sip %lu/%lu/%lu: %#lx %#lx %#lx %#lx\n", cmd, a1,
 		a2, res->a0, res->a1, res->a2, res->a3);
+}
+
+/**
+ * mtk_ccci_wake_src_query() - did this modem interface wake the AP?
+ * @ccci: driver state
+ * @src: the interface asked about
+ * @res: the raw TF-A answer (a0..a3), kept for debugfs
+ *
+ * As the downstream resume_noirq of CCIF and DPMAIF: TF-A answers 0 in a0 and
+ * the interface in a1 when the AP was woken by it. Only called while the
+ * driver runs the modem (power_ctrl=1 was needed to start it); without
+ * power_ctrl TF-A is not called.
+ *
+ * Return: true if @src woke the AP.
+ */
+bool mtk_ccci_wake_src_query(struct mtk_ccci *ccci, enum mtk_ccci_wake_src src,
+			     unsigned long res[4])
+{
+	struct arm_smccc_res r;
+
+	if (!power_ctrl)
+		return false;
+	mtk_ccci_sip(ccci, CCCI_SIP_MD_CLOCK_REQUEST, CCCI_SIP_CLK_WAKEUP_AP_SRC,
+		     src, &r);
+	res[0] = r.a0;
+	res[1] = r.a1;
+	res[2] = r.a2;
+	res[3] = r.a3;
+	dev_info(ccci->dev, "TF-A wake source for %u: %#lx %#lx %#lx %#lx\n",
+		 src, r.a0, r.a1, r.a2, r.a3);
+	return !r.a0 && r.a1 == src;
 }
 
 static void mtk_ccci_query_boot_status(struct mtk_ccci *ccci)
@@ -615,6 +652,12 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 		seq_puts(s, "\n");
 	}
 	mtk_ccci_rt_show(ccci, s);
+	seq_printf(s, "sleep: %lu suspends with the modem up, %lu woken by CCIF0 (channels %#x), last resume channels %#x, last TF-A answer %#lx %#lx %#lx %#lx, wakeup %s\n",
+		   ccci->sleep.suspends, ccci->sleep.ccif_wakeups,
+		   ccci->sleep.last_wake_ch, ccci->sleep.last_rch,
+		   ccci->sleep.wake_query[0], ccci->sleep.wake_query[1],
+		   ccci->sleep.wake_query[2], ccci->sleep.wake_query[3],
+		   device_may_wakeup(ccci->dev) ? "enabled" : "DISABLED (suspend refused)");
 	mtk_ccci_fsm_check(ccci, &c);
 	mutex_unlock(&ccci->fsm_lock);
 

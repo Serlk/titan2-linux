@@ -17,6 +17,14 @@
  * Restarting the modem the downstream way is a debugfs command, refused unless
  * power_ctrl=1 and the DT describes everything it needs.
  *
+ * System sleep (s2idle) works with the modem running, as on the downstream
+ * kernel: the modem keeps its network registration and wakes the AP for
+ * an incoming call, SMS or downlink data. The modem power domain is left
+ * alone by genpd because the device is a wakeup device in an active-wakeup
+ * domain; the CCIF and watchdog interrupts are armed as wakeup interrupts;
+ * the FSM is locked for the duration. The per-block work is in
+ * mtk_ccci_ccif.c and mtk_ccci_hif.c.
+ *
  * Copyright (C) 2015 MediaTek Inc.
  * Copyright (C) 2026 serlk
  */
@@ -29,6 +37,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeup.h>
 #include <linux/seq_file.h>
 
 #include "mtk_ccci.h"
@@ -163,6 +172,18 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	/*
+	 * The modem wakes the AP from system sleep. Being a wakeup device
+	 * also puts this device on the wakeup path in suspend, which keeps
+	 * genpd from switching the modem power domain (GENPD_FLAG_ACTIVE_WAKEUP
+	 * on the MD domain): off behind the running modem, or on again after
+	 * a stop. Userspace can turn it off in power/wakeup; suspend is then
+	 * refused while the domain is attached, see mtk_ccci_prepare().
+	 */
+	ret = devm_device_init_wakeup(dev);
+	if (ret)
+		return ret;
+
 	ccci->debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	debugfs_create_file("md_mem", 0400, ccci->debugfs, ccci,
 			    &mtk_ccci_md_mem_fops);
@@ -189,23 +210,111 @@ static void mtk_ccci_remove(struct platform_device *pdev)
 }
 
 /*
- * genpd switches a domain off for system suspend and on again on resume
- * whatever its runtime state: that would stop the modem LK started, or
- * power the modem domain up after a stop. Until suspend is handled, a
- * board with the modem power domain does not suspend.
+ * System sleep, modelled on the downstream kernel, which keeps the modem running
+ * and never touches the MTCMOS in suspend:
+ *
+ *  prepare       the FSM is locked, no command switches the modem until
+ *                complete; refused if the device may not wake the system
+ *                (genpd would then switch the domain, see below)
+ *  suspend       nothing; the PM core puts the device on the wakeup path
+ *                because it may wake the system, so genpd's noirq callbacks
+ *                leave the modem power domain as it is (active wakeup)
+ *  suspend_late  the CCIF and watchdog interrupts become wakeup interrupts
+ *  suspend_noirq the CCIF poll timer stops
+ *  resume_noirq  TF-A is asked whether CCIF0 woke the AP; the RX worker
+ *                takes what arrived
+ *  resume_early  wakeup interrupts disarmed
+ *
+ * With the modem stopped or never started nothing but the lock happens:
+ * the domain, off (or LK's, which genpd sees as off), stays as it is.
  */
 static int mtk_ccci_prepare(struct device *dev)
 {
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
-	if (!ccci->md_domain)
-		return 0;
-	dev_warn(dev, "system suspend with the modem power domain is not supported\n");
-	return -EBUSY;
+	if (!mutex_trylock(&ccci->fsm_lock)) {
+		dev_warn(dev, "modem command in progress, not suspending\n");
+		return -EBUSY;
+	}
+	if (ccci->md_domain && !device_may_wakeup(dev)) {
+		dev_warn(dev, "wakeup disabled: genpd would switch the modem power domain, not suspending\n");
+		mutex_unlock(&ccci->fsm_lock);
+		return -EBUSY;
+	}
+	return 0;
+}
+
+static void mtk_ccci_complete(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	mutex_unlock(&ccci->fsm_lock);
+}
+
+static int mtk_ccci_suspend(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	dev_info(dev, "suspending, modem %s%s\n",
+		 mtk_ccci_fsm_state_name(ccci->state),
+		 ccci->md_domain_held ? " (power domain held)" : "");
+	return 0;
+}
+
+static int mtk_ccci_suspend_late(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	mtk_ccci_irq_wake(ccci, true);
+	return 0;
+}
+
+static int mtk_ccci_suspend_noirq(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	if (READ_ONCE(ccci->hif_on))
+		ccci->sleep.suspends++;
+	mtk_ccci_hif_suspend(ccci);
+	return 0;
+}
+
+static int mtk_ccci_resume_noirq(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	mtk_ccci_ccif_resume_noirq(ccci);
+	mtk_ccci_hif_resume(ccci);
+	return 0;
+}
+
+static int mtk_ccci_resume_early(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	mtk_ccci_irq_wake(ccci, false);
+	return 0;
+}
+
+static int mtk_ccci_resume(struct device *dev)
+{
+	struct mtk_ccci *ccci = dev_get_drvdata(dev);
+
+	dev_info(dev, "resumed, modem %s%s\n",
+		 mtk_ccci_fsm_state_name(ccci->state),
+		 READ_ONCE(ccci->exception) ? ", EXCEPTION flagged" : "");
+	return 0;
 }
 
 static const struct dev_pm_ops mtk_ccci_pm_ops = {
 	.prepare = mtk_ccci_prepare,
+	.complete = mtk_ccci_complete,
+	.suspend = mtk_ccci_suspend,
+	.resume = mtk_ccci_resume,
+	.suspend_late = mtk_ccci_suspend_late,
+	.resume_early = mtk_ccci_resume_early,
+	.suspend_noirq = mtk_ccci_suspend_noirq,
+	.resume_noirq = mtk_ccci_resume_noirq,
 };
 
 static const struct of_device_id mtk_ccci_of_match[] = {

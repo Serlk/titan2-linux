@@ -793,3 +793,66 @@ void mtk_ccci_wdt_irq_stop(struct mtk_ccci *ccci)
 	irq_set_irqchip_state(ccci->irq_wdt, IRQCHIP_STATE_PENDING, false);
 	ccci->wdt_on = false;
 }
+
+/**
+ * mtk_ccci_irq_wake() - let the modem interrupts wake the system
+ * @ccci: driver state
+ * @on: arm (suspend_late) or disarm (resume_early)
+ *
+ * The CCIF0 lines (a channel raised by the modem: incoming call, SMS,
+ * downlink notification, CCB wakeup) and the modem watchdog stay enabled
+ * through system sleep as wakeup interrupts; one that fires in sleep
+ * aborts or ends it and is handled once interrupts are resumed (they are
+ * level interrupts: the line still stands). Only the interrupts in use
+ * are armed, and exactly those are disarmed again.
+ */
+void mtk_ccci_irq_wake(struct mtk_ccci *ccci, bool on)
+{
+	unsigned int i;
+
+	if (on) {
+		ccci->sleep.wake_irqs = 0;
+		for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++)
+			if (ccci->irqs_on && ccci->irq_ccif[i] > 0 &&
+			    !enable_irq_wake(ccci->irq_ccif[i]))
+				ccci->sleep.wake_irqs |= BIT(i);
+		if (ccci->wdt_on && !enable_irq_wake(ccci->irq_wdt))
+			ccci->sleep.wake_irqs |= BIT(2);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++)
+		if (ccci->sleep.wake_irqs & BIT(i))
+			disable_irq_wake(ccci->irq_ccif[i]);
+	if (ccci->sleep.wake_irqs & BIT(2))
+		disable_irq_wake(ccci->irq_wdt);
+	ccci->sleep.wake_irqs = 0;
+}
+
+/**
+ * mtk_ccci_ccif_resume_noirq() - what woke the AP, as TF-A and CCIF see it
+ * @ccci: driver state
+ *
+ * As the downstream CCIF resume_noirq: ask TF-A whether CCIF0 woke the AP and,
+ * if so, log the channels the modem raised. The channels are only read
+ * here, not acknowledged: the interrupt, still pending, and the RX worker
+ * take them once interrupts are resumed.
+ */
+void mtk_ccci_ccif_resume_noirq(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_sleep *sl = &ccci->sleep;
+	u32 rch;
+
+	if (!READ_ONCE(ccci->hif_on))
+		return;
+
+	rch = readl(ccci->ccif_ap + CCIF_RCHNUM);
+	sl->last_rch = rch;
+	if (!mtk_ccci_wake_src_query(ccci, MTK_CCCI_WAKE_SRC_CCIF0,
+				     sl->wake_query))
+		return;
+	sl->ccif_wakeups++;
+	sl->last_wake_ch = rch;
+	dev_info(ccci->dev, "woken by CCIF0 (%lu): channels %#x%s\n",
+		 sl->ccif_wakeups, rch,
+		 rch & BIT(MTK_CCIF_CH_CCB_WAKEUP) ? " (CCB)" : "");
+}

@@ -334,6 +334,38 @@ void mtk_ccci_hif_stop(struct mtk_ccci *ccci)
 	mtk_ccci_cdev_reset(ccci);
 }
 
+/**
+ * mtk_ccci_hif_suspend() - stop the poll timer for system sleep
+ * @ccci: driver state
+ *
+ * From suspend_noirq. The rings and CCIF stay as they are; the RX worker
+ * is not cancelled, a run in progress finishes before the CPUs go idle.
+ */
+void mtk_ccci_hif_suspend(struct mtk_ccci *ccci)
+{
+	if (!READ_ONCE(ccci->hif_on))
+		return;
+	cancel_delayed_work_sync(&ccci->poll_work);
+}
+
+/**
+ * mtk_ccci_hif_resume() - take what the modem sent while the AP slept
+ * @ccci: driver state
+ *
+ * From resume_noirq, after the wake source was read: the RX worker runs
+ * now (it acknowledges the pending CCIF channels itself, the interrupt
+ * that may still stand then finds nothing) and the poll timer is started
+ * again.
+ */
+void mtk_ccci_hif_resume(struct mtk_ccci *ccci)
+{
+	if (!READ_ONCE(ccci->hif_on))
+		return;
+	queue_work(ccci->wq, &ccci->rx_work);
+	queue_delayed_work(ccci->wq, &ccci->poll_work,
+			   msecs_to_jiffies(MTK_CCCI_POLL_BOOT_MS));
+}
+
 static int mtk_ccci_queues_show(struct seq_file *s, void *unused)
 {
 	struct mtk_ccci *ccci = s->private;

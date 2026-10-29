@@ -358,6 +358,28 @@ struct mtk_ccci_cdev {
 	enum mtk_ccci_smem_id mmap_smem;	/* mmap() of it; DBM: none */
 };
 
+/*
+ * Who woke the AP, as TF-A reports it (SIP MD_CLOCK_REQUEST /
+ * MD_WAKEUP_AP_SRC, the downstream enum MD_WAKEUP_SOURCE).
+ */
+enum mtk_ccci_wake_src {
+	MTK_CCCI_WAKE_SRC_NONE = 0,	/* not the modem */
+	MTK_CCCI_WAKE_SRC_CCIF0 = 1,
+	MTK_CCCI_WAKE_SRC_CCIF1 = 2,
+	MTK_CCCI_WAKE_SRC_CLDMA = 3,
+	MTK_CCCI_WAKE_SRC_DPMAIF = 4,
+};
+
+/* system sleep with the modem running, see mtk_ccci_md.c */
+struct mtk_ccci_sleep {
+	unsigned long suspends;		/* noirq suspends with the modem up */
+	unsigned long ccif_wakeups;	/* TF-A: CCIF0 woke the AP */
+	u32 last_wake_ch;		/* CCIF channels pending at that resume */
+	u32 last_rch;			/* CCIF channels pending at the last resume */
+	unsigned long wake_query[4];	/* the last TF-A answer, a0..a3 */
+	u32 wake_irqs;			/* bit i: irq_ccif[i] armed; bit 2: wdt */
+};
+
 /* per-start statistics, for debugfs */
 struct mtk_ccci_stats {
 	unsigned long irqs;
@@ -451,6 +473,7 @@ struct mtk_ccci {
 	struct work_struct rx_work;
 	struct delayed_work poll_work;
 	struct mtk_ccci_stats stats;
+	struct mtk_ccci_sleep sleep;
 
 	/* ports */
 	struct mtk_ccci_port *ports;
@@ -500,6 +523,8 @@ int mtk_ccci_ccif_irq_start(struct mtk_ccci *ccci);
 void mtk_ccci_ccif_irq_stop(struct mtk_ccci *ccci);
 int mtk_ccci_wdt_irq_start(struct mtk_ccci *ccci);
 void mtk_ccci_wdt_irq_stop(struct mtk_ccci *ccci);
+void mtk_ccci_irq_wake(struct mtk_ccci *ccci, bool on);
+void mtk_ccci_ccif_resume_noirq(struct mtk_ccci *ccci);
 
 /* mtk_ccci_ring.c */
 int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size);
@@ -517,6 +542,8 @@ int mtk_ccci_hif_init(struct mtk_ccci *ccci);
 void mtk_ccci_hif_start(struct mtk_ccci *ccci);
 void mtk_ccci_hif_stop(struct mtk_ccci *ccci);
 void mtk_ccci_hif_kick(struct mtk_ccci *ccci);
+void mtk_ccci_hif_suspend(struct mtk_ccci *ccci);
+void mtk_ccci_hif_resume(struct mtk_ccci *ccci);
 int mtk_ccci_send_skb(struct mtk_ccci *ccci, unsigned int qno,
 		      struct sk_buff *skb);
 int mtk_ccci_send_msg(struct mtk_ccci *ccci, unsigned int qno,
@@ -572,6 +599,8 @@ int mtk_ccci_net_init(struct mtk_ccci *ccci);
 int mtk_ccci_fsm_init(struct mtk_ccci *ccci);
 void mtk_ccci_fsm_debugfs_init(struct mtk_ccci *ccci);
 const char *mtk_ccci_fsm_state_name(enum mtk_ccci_fsm_state state);
+bool mtk_ccci_wake_src_query(struct mtk_ccci *ccci, enum mtk_ccci_wake_src src,
+			     unsigned long res[4]);
 
 /* mtk_ccci_port.c */
 int mtk_ccci_port_init(struct mtk_ccci *ccci);
