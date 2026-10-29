@@ -261,6 +261,13 @@ static void mtk_ccci_supplies_set(struct mtk_ccci *ccci)
 		ret = regulator_set_voltage(ccci->supply[s],
 					    mtk_ccci_supply_uv[s],
 					    mtk_ccci_supply_uv[s]);
+		/*
+		 * The same request as last time is not written again by the
+		 * regulator core, but the modem changed the rail behind its
+		 * back: write it anyway.
+		 */
+		if (!ret)
+			ret = regulator_sync_voltage(ccci->supply[s]);
 		if (ret)
 			dev_warn(ccci->dev, "%s-supply: %d uV, setting %d uV failed: %d\n",
 				 mtk_ccci_supply_names[s], uv,
