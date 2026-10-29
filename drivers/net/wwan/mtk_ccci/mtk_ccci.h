@@ -374,6 +374,8 @@ enum mtk_ccci_wake_src {
 struct mtk_ccci_sleep {
 	unsigned long suspends;		/* noirq suspends with the modem up */
 	unsigned long ccif_wakeups;	/* TF-A: CCIF0 woke the AP */
+	long md_sleep[4];		/* last MD_GET_SLEEP_MODE answer */
+	unsigned int md_sleep_ms;	/* how long the stop waited for it */
 	u32 last_wake_ch;		/* CCIF channels pending at that resume */
 	u32 last_rch;			/* CCIF channels pending at the last resume */
 	unsigned long wake_query[4];	/* the last TF-A answer, a0..a3 */

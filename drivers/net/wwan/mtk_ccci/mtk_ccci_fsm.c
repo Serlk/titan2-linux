@@ -68,7 +68,11 @@ enum {
 /* sub-commands of CCCI_SIP_MD_CLOCK_REQUEST */
 enum {
 	CCCI_SIP_CLK_WAKEUP_AP_SRC = 3,
+	CCCI_SIP_CLK_GET_SLEEP_MODE = 4,
 };
+
+/* the downstream driver waits this long for the modem to sleep before a power off */
+#define MTK_CCCI_MD_SLEEP_TIMEOUT_MS	4000
 
 /* sub-commands of CCCI_SIP_MD_POWER_CONFIG */
 enum {
@@ -321,6 +325,52 @@ static int mtk_ccci_wait_brom(struct mtk_ccci *ccci)
 	return waited < MTK_CCCI_BROM_TIMEOUT_MS ? 0 : -ETIMEDOUT;
 }
 
+/*
+ * Is the modem asleep? TF-A answers a0 = 0 and a1 = 1 (asleep) or 0;
+ * another a0 means the query is not supported. The downstream driver
+ * polls this after userspace sent AT+EPOF, for up to 4 s, and powers the
+ * modem off only then (or after a dump on timeout).
+ */
+static int mtk_ccci_md_sleep_mode(struct mtk_ccci *ccci)
+{
+	struct arm_smccc_res res;
+
+	mtk_ccci_sip(ccci, CCCI_SIP_MD_CLOCK_REQUEST,
+		     CCCI_SIP_CLK_GET_SLEEP_MODE, 0, &res);
+	ccci->sleep.md_sleep[0] = res.a0;
+	ccci->sleep.md_sleep[1] = res.a1;
+	ccci->sleep.md_sleep[2] = res.a2;
+	ccci->sleep.md_sleep[3] = res.a3;
+	if (res.a0)
+		return -EOPNOTSUPP;
+	return res.a1 ? 1 : 0;
+}
+
+/* as downstream before a power off: wait for the modem to be asleep */
+static void mtk_ccci_wait_md_sleep(struct mtk_ccci *ccci)
+{
+	unsigned int waited;
+	int asleep = 0;
+
+	for (waited = 0; waited < MTK_CCCI_MD_SLEEP_TIMEOUT_MS;
+	     waited += 100) {
+		asleep = mtk_ccci_md_sleep_mode(ccci);
+		if (asleep)
+			break;
+		msleep(100);
+	}
+	ccci->sleep.md_sleep_ms = waited;
+	if (asleep == 1)
+		dev_info(ccci->dev, "modem asleep after %u ms\n", waited);
+	else if (asleep < 0)
+		dev_info(ccci->dev, "modem sleep state not reported by TF-A (%#lx %#lx)\n",
+			 ccci->sleep.md_sleep[0], ccci->sleep.md_sleep[1]);
+	else
+		dev_warn(ccci->dev, "modem not asleep after %u ms, powering off anyway (%#lx %#lx %#lx %#lx)\n",
+			 waited, ccci->sleep.md_sleep[0], ccci->sleep.md_sleep[1],
+			 ccci->sleep.md_sleep[2], ccci->sleep.md_sleep[3]);
+}
+
 static int mtk_ccci_power_off(struct mtk_ccci *ccci)
 {
 	struct arm_smccc_res res;
@@ -384,6 +434,14 @@ static int mtk_ccci_power_on(struct mtk_ccci *ccci)
 		return ret;
 	}
 	ccci->md_domain_held = true;
+
+	/*
+	 * The boot ROM runs from the power on; the first start waited for it
+	 * on the modem LK had started. Wait here too, before the release: a
+	 * restart that released at once left the modem booted but silent.
+	 */
+	if (mtk_ccci_wait_brom(ccci))
+		dev_warn(ccci->dev, "boot ROM not done, releasing anyway\n");
 
 	/* make the boot vector take effect: the modem starts */
 	mtk_ccci_sip(ccci, CCCI_SIP_MD_POWER_CONFIG,
@@ -628,6 +686,9 @@ static int mtk_ccci_fsm_stop(struct mtk_ccci *ccci)
 
 	mtk_ccci_port_unregister(ccci);
 	mtk_ccci_dpmaif_pre_stop(ccci);
+	/* as downstream: a running modem is powered off asleep (userspace sent AT+EPOF) */
+	if (ccci->state == MTK_CCCI_FSM_READY)
+		mtk_ccci_wait_md_sleep(ccci);
 	ret = mtk_ccci_power_off(ccci);
 	mtk_ccci_hif_down(ccci);
 	WRITE_ONCE(ccci->state, ret ? MTK_CCCI_FSM_FAILED :
@@ -646,7 +707,16 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 	if (!c.buf)
 		return -ENOMEM;
 
-	mutex_lock(&ccci->fsm_lock);
+	if (!mutex_trylock(&ccci->fsm_lock)) {
+		/* a start or stop is running: say so instead of waiting for it */
+		seq_printf(s, "state: %s (busy)\n",
+			   mtk_ccci_fsm_state_name(READ_ONCE(ccci->state)));
+		seq_printf(s, "boot status: %#x %#x (last read)\n",
+			   READ_ONCE(ccci->boot_status[0]),
+			   READ_ONCE(ccci->boot_status[1]));
+		kfree(c.buf);
+		return 0;
+	}
 	seq_printf(s, "state: %s\n", mtk_ccci_fsm_state_name(ccci->state));
 	seq_printf(s, "boot status: %#x %#x\n", ccci->boot_status[0],
 		   ccci->boot_status[1]);
@@ -665,11 +735,15 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 		   ccci->sleep.wake_query[0], ccci->sleep.wake_query[1],
 		   ccci->sleep.wake_query[2], ccci->sleep.wake_query[3],
 		   device_may_wakeup(ccci->dev) ? "enabled" : "DISABLED (suspend refused)");
+	seq_printf(s, "md sleep: last answer %#lx %#lx %#lx %#lx, last stop waited %u ms\n",
+		   ccci->sleep.md_sleep[0], ccci->sleep.md_sleep[1],
+		   ccci->sleep.md_sleep[2], ccci->sleep.md_sleep[3],
+		   ccci->sleep.md_sleep_ms);
 	mtk_ccci_fsm_check(ccci, &c);
 	mutex_unlock(&ccci->fsm_lock);
 
 	seq_printf(s, "start needs:\n%s", c.buf);
-	seq_puts(s, "commands: dry-run | query | start | stop\n");
+	seq_puts(s, "commands: dry-run | query | sleep | start | stop\n");
 	kfree(c.buf);
 	return 0;
 }
@@ -726,6 +800,18 @@ static ssize_t mtk_ccci_fsm_write(struct file *file, const char __user *ubuf,
 			mtk_ccci_query_boot_status(ccci);
 		else
 			ret = -EPERM;
+	} else if (!strcmp(cmd, "sleep")) {
+		/* ask TF-A whether the modem sleeps; the answer is in the file */
+		if (power_ctrl) {
+			ret = mtk_ccci_md_sleep_mode(ccci);
+			dev_info(ccci->dev, "modem sleep mode: %d (%#lx %#lx %#lx %#lx)\n",
+				 ret, ccci->sleep.md_sleep[0],
+				 ccci->sleep.md_sleep[1], ccci->sleep.md_sleep[2],
+				 ccci->sleep.md_sleep[3]);
+			ret = ret < 0 ? ret : 0;
+		} else {
+			ret = -EPERM;
+		}
 	} else if (!strcmp(cmd, "start")) {
 		c.size = PAGE_SIZE;
 		c.buf = kzalloc(c.size, GFP_KERNEL);
