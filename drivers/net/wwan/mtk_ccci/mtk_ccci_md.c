@@ -21,9 +21,9 @@
  * kernel: the modem keeps its network registration and wakes the AP for
  * an incoming call, SMS or downlink data. The modem power domain is left
  * alone by genpd because the device is a wakeup device in an active-wakeup
- * domain; the CCIF and watchdog interrupts are armed as wakeup interrupts;
- * the FSM is locked for the duration. The per-block work is in
- * mtk_ccci_ccif.c and mtk_ccci_hif.c.
+ * domain; the CCIF, DPMAIF and watchdog interrupts are armed as wakeup
+ * interrupts; the FSM is locked for the duration. The per-block work is in
+ * mtk_ccci_ccif.c, mtk_ccci_hif.c and mtk_ccci_dpmaif.c.
  *
  * Copyright (C) 2015 MediaTek Inc.
  * Copyright (C) 2026 serlk
@@ -219,11 +219,14 @@ static void mtk_ccci_remove(struct platform_device *pdev)
  *  suspend       nothing; the PM core puts the device on the wakeup path
  *                because it may wake the system, so genpd's noirq callbacks
  *                leave the modem power domain as it is (active wakeup)
- *  suspend_late  the CCIF and watchdog interrupts become wakeup interrupts
- *  suspend_noirq the CCIF poll timer stops
- *  resume_noirq  TF-A is asked whether CCIF0 woke the AP; the RX worker
- *                takes what arrived
+ *  suspend_late  the CCIF, watchdog and DPMAIF interrupts become wakeup
+ *                interrupts; DPMAIF transmit is held
+ *  suspend_noirq the CCIF poll timer stops; DPMAIF backs up its DL mask
+ *  resume_noirq  TF-A is asked whether CCIF0 or the DPMAIF woke the AP;
+ *                DPMAIF restores its masks if its PD block lost power;
+ *                the RX worker takes what arrived
  *  resume_early  wakeup interrupts disarmed
+ *  resume        DPMAIF transmit resumes
  *
  * With the modem stopped or never started nothing but the lock happens:
  * the domain, off (or LK's, which genpd sees as off), stays as it is.
@@ -266,6 +269,7 @@ static int mtk_ccci_suspend_late(struct device *dev)
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
 	mtk_ccci_irq_wake(ccci, true);
+	mtk_ccci_dpmaif_suspend_late(ccci);
 	return 0;
 }
 
@@ -276,6 +280,7 @@ static int mtk_ccci_suspend_noirq(struct device *dev)
 	if (READ_ONCE(ccci->hif_on))
 		ccci->sleep.suspends++;
 	mtk_ccci_hif_suspend(ccci);
+	mtk_ccci_dpmaif_suspend_noirq(ccci);
 	return 0;
 }
 
@@ -284,6 +289,7 @@ static int mtk_ccci_resume_noirq(struct device *dev)
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
 	mtk_ccci_ccif_resume_noirq(ccci);
+	mtk_ccci_dpmaif_resume_noirq(ccci);
 	mtk_ccci_hif_resume(ccci);
 	return 0;
 }
@@ -292,6 +298,7 @@ static int mtk_ccci_resume_early(struct device *dev)
 {
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
+	mtk_ccci_dpmaif_resume_early(ccci);
 	mtk_ccci_irq_wake(ccci, false);
 	return 0;
 }
@@ -300,6 +307,7 @@ static int mtk_ccci_resume(struct device *dev)
 {
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
+	mtk_ccci_dpmaif_resume(ccci);
 	dev_info(dev, "resumed, modem %s%s\n",
 		 mtk_ccci_fsm_state_name(ccci->state),
 		 READ_ONCE(ccci->exception) ? ", EXCEPTION flagged" : "");

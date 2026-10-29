@@ -385,6 +385,15 @@ struct mtk_ccci_dpmaif {
 	unsigned long dl_mtu_err;
 	u32 last_ul_sta;
 	u32 last_dl_sta;
+
+	/* system sleep */
+	bool suspended;			/* transmit held: suspend_late..resume */
+	bool wake_armed;		/* irq is a wakeup interrupt */
+	u32 sleep_dl_mask;		/* DL interrupt mask backed up at suspend */
+	unsigned long suspends;
+	unsigned long wakeups;		/* TF-A: the DPMAIF woke the AP */
+	unsigned long pd_lost;		/* resumes with the PD block powered down */
+	unsigned long wake_query[4];	/* the last TF-A answer */
 };
 
 static void dpmaif_rmem_release(void *dev)
@@ -1330,6 +1339,152 @@ void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci)
 	mutex_unlock(&dp->lock);
 }
 
+/*
+ * Did the PD block lose power? The marker written at the setup reads 0
+ * then (the AO block, with the settings and their SRAM copy, keeps its
+ * state). Written again either way, as the downstream check does.
+ */
+static bool dpmaif_pd_lost(struct mtk_ccci_dpmaif *dp)
+{
+	if (readl(dp->pd + PD_DL_RESERVE_RW))
+		return false;
+	writel(0xff, dp->pd + PD_DL_RESERVE_RW);
+	return true;
+}
+
+/*
+ * The downstream v3 resume after a power-down of the PD block: the interrupts
+ * that are not wanted are masked again and their status bits dropped, the
+ * rings and queues are left alone (their settings live in the AO block).
+ * The indices are logged so that a block that forgot them would show.
+ */
+static void dpmaif_hw_resume(struct mtk_ccci_dpmaif *dp)
+{
+	u32 pit_wr, pit_rd, bat_rd, bat_wr;
+
+	writel(~(u32)UL_INT_EN, dp->ao + AO_UL_AP_L2TIMSR0);
+	writel(~(u32)UL_INT_EN, dp->pd + PD_AP_UL_L2TISAR0);
+	writel(~(u32)DL_INT_EN, dp->ao + AO_UL_APDL_L2TIMSR0);
+	writel(~(u32)DL_INT_EN, dp->pd + PD_AP_DL_L2TISAR0);
+
+	pit_wr = readl(dp->pd + PD_DL_PIT_WR_IDX) & DL_PIT_IDX;
+	pit_rd = readl(dp->pd + PD_DL_PIT_RD_IDX) & DL_PIT_IDX;
+	bat_rd = readl(dp->pd + PD_DL_BAT_RD_IDX);
+	bat_wr = readl(dp->pd + PD_DL_BAT_WR_IDX);
+	dev_info(dp->dev, "DPMAIF PD block was down in sleep (%lu); masks ul %#x dl %#x (was %#x); pit wr/rd %u/%u (driver rd %u), bat rd/wr %u/%u (driver wr %u)\n",
+		 dp->pd_lost, readl(dp->ao + AO_UL_AP_L2TIMR0),
+		 readl(dp->ao + AO_UL_APDL_L2TIMR0), dp->sleep_dl_mask, pit_wr,
+		 pit_rd, dp->pit_rd, bat_rd, bat_wr, dp->bat_wr);
+	if (!pit_wr && !pit_rd && !bat_rd && dp->pit_rd)
+		dev_warn(dp->dev, "DPMAIF indices read 0 after sleep: the block may have lost its rings\n");
+}
+
+/**
+ * mtk_ccci_dpmaif_suspend_late() - hold transmit, arm the wakeup interrupt
+ * @ccci: driver state
+ *
+ * The downstream driver makes a transmit wait while the block is suspended;
+ * here the links are told the queue is busy and woken again at resume.
+ * Downlink data arriving in sleep raises the DPMAIF interrupt, which wakes
+ * the AP.
+ */
+void mtk_ccci_dpmaif_suspend_late(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+
+	if (!dp)
+		return;
+	mutex_lock(&dp->lock);
+	if (dp->started) {
+		WRITE_ONCE(dp->suspended, true);
+		dp->wake_armed = !enable_irq_wake(dp->irq);
+	}
+	mutex_unlock(&dp->lock);
+}
+
+/**
+ * mtk_ccci_dpmaif_suspend_noirq() - as the downstream suspend_noirq
+ * @ccci: driver state
+ *
+ * Backs up the DL interrupt mask (the downstream driver does, and shows it) and
+ * checks the power-down marker, re-arming it.
+ */
+void mtk_ccci_dpmaif_suspend_noirq(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+
+	if (!dp)
+		return;
+	mutex_lock(&dp->lock);
+	if (dp->started) {
+		dp->suspends++;
+		dp->sleep_dl_mask = readl(dp->ao + AO_UL_APDL_L2TIMR0);
+		if (dpmaif_pd_lost(dp))
+			dev_info(dp->dev, "DPMAIF PD block was down before suspend\n");
+	}
+	mutex_unlock(&dp->lock);
+}
+
+/**
+ * mtk_ccci_dpmaif_resume_noirq() - as the downstream resume_noirq
+ * @ccci: driver state
+ *
+ * Asks TF-A whether the DPMAIF woke the AP, then restores the interrupt
+ * masks if the PD block lost power meanwhile; otherwise nothing is
+ * touched. A downlink interrupt that stands is handled once interrupts
+ * are resumed.
+ */
+void mtk_ccci_dpmaif_resume_noirq(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+
+	if (!dp)
+		return;
+	mutex_lock(&dp->lock);
+	if (!dp->started)
+		goto out;
+	if (mtk_ccci_wake_src_query(ccci, MTK_CCCI_WAKE_SRC_DPMAIF,
+				    dp->wake_query)) {
+		dp->wakeups++;
+		dev_info(dp->dev, "woken by the DPMAIF (%lu): dl status %#x\n",
+			 dp->wakeups, readl(dp->pd + PD_AP_DL_L2TISAR0));
+	}
+	if (dpmaif_pd_lost(dp)) {
+		dp->pd_lost++;
+		dpmaif_hw_resume(dp);
+	}
+out:
+	mutex_unlock(&dp->lock);
+}
+
+void mtk_ccci_dpmaif_resume_early(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+
+	if (!dp)
+		return;
+	mutex_lock(&dp->lock);
+	if (dp->wake_armed) {
+		disable_irq_wake(dp->irq);
+		dp->wake_armed = false;
+	}
+	mutex_unlock(&dp->lock);
+}
+
+/* transmit again: the links held in suspend_late are woken */
+void mtk_ccci_dpmaif_resume(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_dpmaif *dp = ccci->dpmaif;
+
+	if (!dp)
+		return;
+	mutex_lock(&dp->lock);
+	WRITE_ONCE(dp->suspended, false);
+	if (dp->started)
+		dpmaif_tx_wake(dp);
+	mutex_unlock(&dp->lock);
+}
+
 /* the base of modem bank 0 as LK reports it, checked against the carveouts */
 static int dpmaif_md_base(struct mtk_ccci_dpmaif *dp)
 {
@@ -1623,6 +1778,10 @@ static int mtk_ccci_dpmaif_show(struct seq_file *s, void *unused)
 		   dp->irq, dp->irqs, dp->ul_done, dp->ul_pwr_notrdy,
 		   dp->ul_md_notrdy, dp->ul_len_err, dp->dl_done, dp->dl_mtu_err,
 		   dp->last_ul_sta, dp->last_dl_sta);
+	seq_printf(s, "sleep: %lu suspends, %lu woken by the DPMAIF, %lu with the PD block down, dl mask at suspend %#x, last TF-A answer %#lx %#lx %#lx %#lx\n",
+		   dp->suspends, dp->wakeups, dp->pd_lost, dp->sleep_dl_mask,
+		   dp->wake_query[0], dp->wake_query[1], dp->wake_query[2],
+		   dp->wake_query[3]);
 	seq_printf(s, "dl: pit rd %u seq %u, bat wr %u lent %u, frg wr %u lent %u; dropped %lu err %lu seq-err %lu nomem %lu bad-ch %lu (last %u)\n",
 		   dp->pit_rd, dp->pit_seq, dp->bat_wr, dp->bat_lent,
 		   dp->frg_wr, dp->frg_lent, dp->dl_dropped, dp->dl_err,
@@ -1746,6 +1905,12 @@ netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
 	txq = &dp->txq[q];
 	drb = dp->drb[q].base;
 	cnt = dp->drb[q].cnt;
+
+	if (READ_ONCE(dp->suspended)) {
+		/* the system is going to sleep: kept, the resume wakes the link */
+		netif_stop_queue(dev);
+		return NETDEV_TX_BUSY;
+	}
 
 	spin_lock_bh(&txq->lock);
 	if (!txq->on) {

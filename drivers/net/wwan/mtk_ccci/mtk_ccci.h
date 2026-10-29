@@ -590,6 +590,11 @@ int mtk_ccci_dpmaif_init(struct mtk_ccci *ccci);
 int mtk_ccci_dpmaif_start(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_pre_stop(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_stop(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_suspend_late(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_suspend_noirq(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_resume_noirq(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_resume_early(struct mtk_ccci *ccci);
+void mtk_ccci_dpmaif_resume(struct mtk_ccci *ccci);
 void mtk_ccci_dpmaif_debugfs_init(struct mtk_ccci *ccci);
 netdev_tx_t mtk_ccci_dpmaif_xmit(struct mtk_ccci *ccci, struct net_device *dev,
 				 struct sk_buff *skb, unsigned int ch);
