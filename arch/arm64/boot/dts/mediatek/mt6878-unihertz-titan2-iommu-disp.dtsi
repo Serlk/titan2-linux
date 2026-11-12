@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Unihertz Titan 2: the display path behind the multimedia IOMMU (M4U).
+ * The SMI common, the display larb0 and the M4U, with OVL0_2L (larb0 ports
+ * 1 and 2) as its master: mediatek-drm then allocates its frame buffers
+ * through the IOMMU instead of from CMA below 4 GiB (the OVL has a 32-bit
+ * DMA mask without it, which also forces bounce buffers for anything the
+ * GPU or the camera exports to the compositor). Included by
+ * mt6878-unihertz-titan2-all.dts; -all-fb (simplefb, no mediatek-drm)
+ * stays without it. Formerly the -iommu board.
+ *
+ * Handover: the M4U bank 0 is set up (page table base, interrupts) when
+ * OVL0_2L probes and is attached to its DMA domain. No SMI register is
+ * written until OVL0_2L is runtime resumed by the first CRTC enable of
+ * mediatek-drm; that resume sets MMU_EN on the two ports. The panel is in
+ * DSI command mode, so no frame is fetched before the same enable has
+ * written the layers again (all disabled, then the IOVA of the new buffer):
+ * the boot frame buffer is never read through the M4U and needs no direct
+ * mapping. The other display ports (OVL1/2/3, WDMA, POSTMASK) stay as the
+ * boot loader left them.
+ *
+ * If the screen stays dark or the log shows M4U translation faults, boot
+ * the -all-fb DTB.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+&smi_common {
+	status = "okay";
+};
+
+&larb0 {
+	status = "okay";
+};
+
+&m4u {
+	status = "okay";
+};
+
+&disp_ovl0_2l {
+	iommus = <&m4u M4U_L0_P2_DISP_OVL0_2L_RDMA0>,
+		 <&m4u M4U_L0_P1_DISP_OVL0_2L_HDR>;
+};

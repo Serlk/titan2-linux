@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the VCP (video uP) through the MM IOMMU. EXAMPLE, not built,
+ * untested.
+ *
+ * Use on top of mt6878-unihertz-titan2-iommu.dts (which enables the
+ * smi-common, larb0 and the M4U; the M4U needs at least one available
+ * larb to probe) together with mt6878-unihertz-titan2-vcp.dtsi, included
+ * after it. LK finds the VCP node by compatible and reads its vcp-* and
+ * memorydump properties (docs/lk-boot-requirements.md section 6); an added
+ * iommus property does not touch those. Run scripts/lk-fdt-check.py on
+ * the result.
+ *
+ * The VCP and its DMA helper nodes are larb-less masters (port header larb
+ * 41, M4U_L41_VIDEO_UP); the M4U gives them the downstream VDO_UP window,
+ * 0x1_1000_0000 + 1.5G. The ported VCP driver sets a 32-bit DMA mask
+ * (drivers/soc/mediatek/vcp): it must allow at least 33 bits (the factory
+ * dma-ranges: 4..8 GiB) before this works.
+ *
+ * Open: what enables translation for the larb-less VCP port. The downstream VCP
+ * driver maps vcp_cfgreg_mmu (0x1e820000, VCP_GCE_MMU, B_MMU_EN bits 15:14)
+ * but never writes it.
+ */
+
+&{/vcp@1ea00000} {
+	iommus = <&m4u M4U_L41_VIDEO_UP>;
+};
+
+&{/vcp-iommu-vdec} {
+	iommus = <&m4u M4U_L41_VIDEO_UP>;
+};
+
+&{/vcp-iommu-venc} {
+	iommus = <&m4u M4U_L41_VIDEO_UP>;
+};
+
+&{/vcp-iommu-work} {
+	iommus = <&m4u M4U_L41_VIDEO_UP>;
+};
