@@ -404,6 +404,7 @@ config BT_MTKBGF
 	depends on OF
 	depends on MTK_CONNINFRA
 	select BT_MTK
+	select CRC32
 	help
 	  MediaTek Bluetooth driver for the BGF core of the connectivity
 	  subsystem (CONNSYS) of MediaTek MT6878 class SoCs. HCI runs over
