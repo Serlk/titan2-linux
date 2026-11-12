@@ -39,6 +39,9 @@ properties:
   power-controller:
     $ref: /schemas/power/mediatek,power-controller.yaml#
 
+  low-power-manager:
+    $ref: /schemas/soc/mediatek/mediatek,mt6878-lpm.yaml#
+
 required:
   - compatible
   - reg

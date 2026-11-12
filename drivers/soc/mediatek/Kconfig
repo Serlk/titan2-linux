@@ -30,6 +30,19 @@ config MTK_CONNINFRA
 	  subsystem on and is shared by the Wi-Fi, Bluetooth, GNSS and FM
 	  drivers.
 
+config MTK_LPM
+	tristate "MediaTek MT6878 low power manager (suspend-to-idle)"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF && CPU_IDLE && SUSPEND && HAVE_ARM_SMCCC
+	select MFD_SYSCON
+	select REGMAP
+	help
+	  Say yes here for the kernel side of the system low power handshake
+	  with the trusted firmware and the SPM on the MediaTek MT6878: the
+	  CPU suspend source around suspend-to-idle, the wake-up interrupt,
+	  the interrupts kept through MCUSYS off, the SPM constraints, and
+	  the report of what woke the system and how deep it slept.
+
 config MTK_DEVAPC
 	tristate "Mediatek Device APC Support"
 	help

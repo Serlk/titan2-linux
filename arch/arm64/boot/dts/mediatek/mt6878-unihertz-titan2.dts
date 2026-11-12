@@ -250,6 +250,16 @@
 	status = "okay";
 };
 
+/*
+ * System sleep (suspend-to-idle) handshake with TF-A and the SPM. The
+ * level interrupts listed are mirrored into the SYS_CIRQ while the GIC is
+ * off, as the downstream kernel does for the DSI and SPI controllers.
+ */
+&lpm {
+	mediatek,irq-remain = <&dsi0 0>;
+	status = "okay";
+};
+
 &pio {
 	kbd_led_pins: kbd-led-pins {
 		pins-pwm {

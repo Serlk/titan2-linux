@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6878-lpm.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6878 low power manager
+
+maintainers:
+  - serlk <22211586+Serlk@users.noreply.github.com>
+
+description:
+  The kernel side of the system low power handshake with the trusted
+  firmware (BL31) and the SPM on the MT6878. System sleep is
+  suspend-to-idle; the firmware turns the 26 MHz clock, the PLLs, the DRAM
+  and the core supply down once every CPU reports that it suspends. The
+  node is a child of the SCPSYS syscon, whose registers hold the SPM
+  wake-up status.
+
+properties:
+  compatible:
+    const: mediatek,mt6878-lpm
+
+  interrupts:
+    maxItems: 1
+    description:
+      The SPM interrupt the firmware sets pending to report a wake-up.
+
+  mediatek,irq-remain:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description:
+      Level interrupts to keep through MCUSYS off, each as the phandle of
+      the device node and the index of the interrupt in it. The firmware
+      mirrors them into the SYS_CIRQ while the GIC is powered down.
+    items:
+      items:
+        - description: phandle of the device node
+        - description: index of the interrupt in the node
+
+required:
+  - compatible
+  - interrupts
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    syscon@1c001000 {
+        compatible = "mediatek,mt6878-scpsys", "syscon", "simple-mfd";
+        reg = <0x1c001000 0x1000>;
+
+        low-power-manager {
+            compatible = "mediatek,mt6878-lpm";
+            interrupts = <GIC_SPI 499 IRQ_TYPE_LEVEL_HIGH 0>;
+        };
+    };

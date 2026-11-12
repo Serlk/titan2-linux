@@ -1225,6 +1225,12 @@
 			 * top domains need the camera/ISP vcore supply (the
 			 * external VMM buck) as domain-supply, given by the board.
 			 */
+			lpm: low-power-manager {
+				compatible = "mediatek,mt6878-lpm";
+				interrupts = <GIC_SPI 499 IRQ_TYPE_LEVEL_HIGH 0>;
+				status = "disabled";
+			};
+
 			spm: power-controller {
 				compatible = "mediatek,mt6878-power-controller";
 				#address-cells = <1>;
