@@ -33,6 +33,7 @@
 #define SMI_M4U_TH			0x234
 #define SMI_FIFO_TH1			0x238
 #define SMI_FIFO_TH2			0x23c
+#define SMI_PREULTRA_MASK1		0x244
 #define SMI_DCM				0x300
 #define SMI_DUMMY			0x444
 
@@ -47,6 +48,8 @@
 
 #define SMI_LARB_SW_FLAG		0x40
 #define SMI_LARB_SW_FLAG_1		0x1
+
+#define SMI_LARB_DISABLE_ULTRA		0x70
 
 #define SMI_LARB_OSTDL_PORT		0x200
 #define SMI_LARB_OSTDL_PORTx(id)	(SMI_LARB_OSTDL_PORT + (((id) & 0x1f) << 2))
@@ -80,6 +83,8 @@
 /* general */
 #define SMI_LARB_NONSEC_CON(id)		(0x380 + ((id) * 4))
 #define F_MMU_EN			BIT(0)
+#define F_CMD_GP_EN			BIT(1)
+#define F_BW_THRT_EN			BIT(3)
 #define BANK_SEL(id)			({		\
 	u32 _id = (id) & 0x3;				\
 	(_id << 8 | _id << 10 | _id << 12 | _id << 14);	\
@@ -115,10 +120,25 @@ static const char * const mtk_smi_larb_clks[] = {"apb", "smi", "gals"};
  * sub common: Require apb/smi/gals0 clocks in has_gals case. Otherwise, only apb/smi are required.
  */
 static const char * const mtk_smi_common_clks[] = {"apb", "smi", "gals0", "gals1"};
-#define MTK_SMI_CLK_NR_MAX		ARRAY_SIZE(mtk_smi_common_clks)
 #define MTK_SMI_COM_REQ_CLK_NR		2
-#define MTK_SMI_COM_GALS_REQ_CLK_NR	MTK_SMI_CLK_NR_MAX
+#define MTK_SMI_COM_GALS_REQ_CLK_NR	ARRAY_SIZE(mtk_smi_common_clks)
 #define MTK_SMI_SUB_COM_GALS_REQ_CLK_NR 3
+
+/*
+ * MT6878: larbs and sub-commons need apb/smi and up to five gals clocks,
+ * one per path, all optional.
+ */
+static const char * const mtk_smi_mt6878_clks[] = {
+	"apb", "smi", "gals0", "gals1", "gals2", "gals3", "gals4"
+};
+
+#define MTK_SMI_CLK_NR_MAX		ARRAY_SIZE(mtk_smi_mt6878_clks)
+
+/* A register value that differs between instances of the same compatible */
+struct mtk_smi_inst_reg {
+	phys_addr_t			base;
+	struct mtk_smi_reg_pair		reg;
+};
 
 struct mtk_smi_common_plat {
 	enum mtk_smi_type	type;
@@ -126,6 +146,28 @@ struct mtk_smi_common_plat {
 	u32			bus_sel; /* Balance some larbs to enter mmu0 or mmu1 */
 
 	const struct mtk_smi_reg_pair	*init;
+
+	/* Per instance, by register base; the last entry has base 0 */
+	const struct mtk_smi_inst_reg	*inst_regs;
+
+	/* If set: apb and smi, then clk_nr_opt optional clocks */
+	const char * const	*clk_names;
+	unsigned int		clk_nr_opt;
+};
+
+/*
+ * Per-larb arbitration settings, written when the larb is powered on; a
+ * zero cmd_thrt or disable_ultra is not written.
+ * cmd_thrt:	  the whole LARB_CMD_THRT_CON (supersedes THRT_UPDATE)
+ * disable_ultra: the ports whose ultra (urgent) requests are disabled
+ * cmd_grp:	  the ports with command grouping (LARB_NONSEC_CON bit 1)
+ * bw_thrt:	  the ports with bandwidth throttling (LARB_NONSEC_CON bit 3)
+ */
+struct mtk_smi_larb_misc {
+	u32				cmd_thrt;
+	u32				disable_ultra;
+	u32				cmd_grp;
+	u32				bw_thrt;
 };
 
 struct mtk_smi_larb_gen {
@@ -134,6 +176,11 @@ struct mtk_smi_larb_gen {
 	unsigned int			larb_direct_to_common_mask;
 	unsigned int			flags_general;
 	const u8			(*ostd)[SMI_LARB_PORT_NR_MAX];
+	const struct mtk_smi_larb_misc	*misc;
+
+	/* If set: apb and smi, then clk_nr_opt optional clocks */
+	const char * const		*clk_names;
+	unsigned int			clk_nr_opt;
 };
 
 struct mtk_smi {
@@ -146,6 +193,7 @@ struct mtk_smi {
 		void __iomem		*base;	      /* only for gen2 */
 	};
 	struct device			*smi_common_dev; /* for sub common */
+	const struct mtk_smi_reg_pair	*inst_reg; /* common: this instance's */
 	const struct mtk_smi_common_plat *plat;
 };
 
@@ -241,7 +289,10 @@ static int mtk_smi_larb_config_port_gen2_general(struct device *dev)
 	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
 	u32 reg, flags_general = larb->larb_gen->flags_general;
 	const u8 *larbostd = larb->larb_gen->ostd ? larb->larb_gen->ostd[larb->larbid] : NULL;
+	const struct mtk_smi_larb_misc *misc =
+		larb->larb_gen->misc ? &larb->larb_gen->misc[larb->larbid] : NULL;
 	struct arm_smccc_res res;
+	unsigned long msk;
 	int i;
 
 	if (BIT(larb->larbid) & larb->larb_gen->larb_direct_to_common_mask)
@@ -254,8 +305,14 @@ static int mtk_smi_larb_config_port_gen2_general(struct device *dev)
 		writel_relaxed(reg, larb->base + SMI_LARB_CMD_THRT_CON);
 	}
 
+	if (misc && misc->cmd_thrt)
+		writel_relaxed(misc->cmd_thrt, larb->base + SMI_LARB_CMD_THRT_CON);
+
 	if (MTK_SMI_CAPS(flags_general, MTK_SMI_FLAG_SW_FLAG))
 		writel_relaxed(SMI_LARB_SW_FLAG_1, larb->base + SMI_LARB_SW_FLAG);
+
+	if (misc && misc->disable_ultra)
+		writel_relaxed(misc->disable_ultra, larb->base + SMI_LARB_DISABLE_ULTRA);
 
 	for (i = 0; i < SMI_LARB_PORT_NR_MAX && larbostd && !!larbostd[i]; i++)
 		writel_relaxed(larbostd[i], larb->base + SMI_LARB_OSTDL_PORTx(i));
@@ -280,8 +337,85 @@ static int mtk_smi_larb_config_port_gen2_general(struct device *dev)
 		reg |= BANK_SEL(larb->bank[i]);
 		writel(reg, larb->base + SMI_LARB_NONSEC_CON(i));
 	}
+
+	if (!misc)
+		return 0;
+
+	msk = misc->cmd_grp | misc->bw_thrt;
+	for_each_set_bit(i, &msk, 32) {
+		reg = readl_relaxed(larb->base + SMI_LARB_NONSEC_CON(i));
+		if (misc->cmd_grp & BIT(i))
+			reg |= F_CMD_GP_EN;
+		if (misc->bw_thrt & BIT(i))
+			reg |= F_BW_THRT_EN;
+		writel(reg, larb->base + SMI_LARB_NONSEC_CON(i));
+	}
 	return 0;
 }
+
+/*
+ * MT6878: indexed by the larb id of mediatek,mt6878-memory-port.h, which is
+ * not the hardware larb number (in the comments).
+ */
+static const u8 mtk_smi_larb_mt6878_ostd[][SMI_LARB_PORT_NR_MAX] = {
+	/* larb0 */
+	[0] = {0x02, 0x08, 0x1e, 0x08, 0x1e, 0x10, 0x01,},
+	/* larb1 */
+	[1] = {0x08, 0x1e, 0x08, 0x1e, 0x10, 0x01,},
+	/* larb2 */
+	[2] = {0x05, 0x05, 0x01, 0x01, 0x01,},
+	/* larb4 */
+	[3] = {0x2f, 0x1e, 0x09, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x05,
+	       0x01, 0x17,},
+	/* larb7 */
+	[4] = {0x20, 0x02, 0x01, 0x01, 0x01, 0x04, 0x02, 0x01, 0x01, 0x02,
+	       0x02, 0x01, 0x0a, 0x05, 0x04,},
+	/* larb9 */
+	[5] = {0x0b, 0x01, 0x03, 0x01, 0x0b, 0x09, 0x01, 0x03, 0x07, 0x0f,
+	       0x0c, 0x01, 0x01, 0x01, 0x08, 0x01, 0x01, 0x01,},
+	/* larb11 */
+	[6] = {0x06, 0x23, 0x23, 0x12, 0x09, 0x08, 0x08, 0x02, 0x01, 0x01,
+	       0x01, 0x01,},
+	/* larb12 */
+	[7] = {0x08, 0x04, 0x03, 0x03, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+	       0x01, 0x01,},
+	/* larb13 */
+	[8] = {0x0c, 0x34, 0x20, 0x10, 0x01,},
+	/* larb14 */
+	[9] = {0x0c, 0x34, 0x20, 0x01,},
+	/* larb15 */
+	[10] = {0x0e, 0x01, 0x01, 0x09, 0x05, 0x09, 0x01, 0x01, 0x01, 0x01,
+		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x0b, 0x0b, 0x01, 0x01,
+		0x01, 0x01, 0x01, 0x01, 0x01, 0x08, 0x08, 0x01, 0x01,},
+	/* larb16 */
+	[11] = {0x08, 0x14, 0x01, 0x01, 0x14, 0x1a, 0x01, 0x01, 0x0c, 0x01,
+		0x08, 0x0a, 0x04, 0x01, 0x08, 0x0a, 0x01,},
+	/* larb17 */
+	[12] = {0x24, 0x01, 0x12, 0x12, 0x01, 0x08, 0x08, 0x01,},
+	/* larb22 */
+	[13] = {0x06, 0x23, 0x23, 0x12, 0x09, 0x08, 0x08, 0x02, 0x01, 0x01,
+		0x01, 0x01,},
+	/* larb25 */
+	[14] = {0x04, 0x08, 0x0c, 0x08, 0x17, 0x17, 0x0c, 0x0c, 0x0c, 0x03,
+		0x0a, 0x01, 0x01, 0x01,},
+	/* larb28 */
+	[15] = {0x16, 0x01, 0x16, 0x01, 0x12, 0x01, 0x16, 0x1e, 0x01, 0x01,
+		0x01, 0x01, 0x16, 0x10, 0x10, 0x14, 0x1a, 0x14, 0x18, 0x01,
+		0x01, 0x16, 0x10, 0x10, 0x01, 0x01, 0x01,},
+	/* larb29 */
+	[16] = {0x0c, 0x0c, 0x0c, 0x0c, 0x28, 0x18, 0x08, 0x08, 0x01, 0x01,},
+	/* larb30 */
+	[17] = {0x04, 0x03, 0x04, 0x03,},
+	/* larb33 */
+	[18] = {0x08, 0x14, 0x01, 0x01, 0x14, 0x1a, 0x01, 0x01, 0x0c, 0x01,
+		0x08, 0x0a, 0x04, 0x01, 0x08, 0x0a, 0x01,},
+	/* larb34 */
+	[19] = {0x24, 0x01, 0x12, 0x12, 0x01, 0x08, 0x08, 0x01,},
+	/* larb38 */
+	[20] = {0x01, 0x0d, 0x08, 0x0b, 0x08, 0x05, 0x01, 0x01, 0x08, 0x08,
+		0x06, 0x03, 0x02, 0x01, 0x01, 0x0a, 0x06, 0x01, 0x06, 0x14,
+		0x0b, 0x08, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01,},
+};
 
 static const u8 mtk_smi_larb_mt6893_ostd[][SMI_LARB_PORT_NR_MAX] = {
 	[0] = {0x2, 0x6, 0x2, 0x2, 0x2, 0x28, 0x18, 0x18, 0x1, 0x1, 0x1, 0x8,
@@ -498,6 +632,82 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt6779 = {
 		/* DUMMY | IPU0 | IPU1 | CCU | MDLA */
 };
 
+/*
+ * MT6878 values of MediaTek's kernel, indexed like the OSTD table. There
+ * the command grouping is for the OVL ports with a large OSTD (larb0/1)
+ * and the bandwidth throttling for the non real time ports.
+ */
+static const struct mtk_smi_larb_misc mtk_smi_larb_mt6878_misc[] = {
+	/* larb0 */
+	[0] = {.cmd_thrt = 0x370256, .disable_ultra = 0x40,
+		.cmd_grp = 0x3c, .bw_thrt = 0x40},
+	/* larb1 */
+	[1] = {.cmd_thrt = 0x370256, .disable_ultra = 0x20,
+		.cmd_grp = 0x1f, .bw_thrt = 0x20},
+	/* larb2 */
+	[2] = {.cmd_thrt = 0x370256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0x1f},
+	/* larb4 */
+	[3] = {.cmd_thrt = 0x370256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xfff},
+	/* larb7 */
+	[4] = {.cmd_thrt = 0x370256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0x7fff},
+	/* larb9 */
+	[5] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0x3ffff},
+	/* larb11 */
+	[6] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xfff},
+	/* larb12 */
+	[7] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xfff},
+	/* larb13 */
+	[8] = {.cmd_thrt = 0x370256},
+	/* larb14 */
+	[9] = {.cmd_thrt = 0x370256},
+	/* larb15 */
+	[10] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0x1fffffff},
+	/* larb16 */
+	[11] = {.cmd_thrt = 0x370256},
+	/* larb17 */
+	[12] = {.cmd_thrt = 0x370256},
+	/* larb22 */
+	[13] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xfff},
+	/* larb25 */
+	[14] = {.cmd_thrt = 0x370256, .disable_ultra = 0x3f0, .bw_thrt = 0x3f0},
+	/* larb28 */
+	[15] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0x7ffffff},
+	/* larb29 */
+	[16] = {.cmd_thrt = 0x370256},
+	/* larb30 */
+	[17] = {.cmd_thrt = 0x370256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xf},
+	/* larb33 */
+	[18] = {.cmd_thrt = 0x370256},
+	/* larb34 */
+	[19] = {.cmd_thrt = 0x370256},
+	/* larb38 */
+	[20] = {.cmd_thrt = 0x350256, .disable_ultra = 0xffffffff,
+		.bw_thrt = 0xfffffff},
+};
+
+/*
+ * The MMU_EN bits of MT6878 are in LARB_NONSEC_CON and take effect from the
+ * normal world (MediaTek's display driver sets them there itself).
+ */
+static const struct mtk_smi_larb_gen mtk_smi_larb_mt6878 = {
+	.config_port               = mtk_smi_larb_config_port_gen2_general,
+	.flags_general	            = MTK_SMI_FLAG_SW_FLAG,
+	.ostd		            = mtk_smi_larb_mt6878_ostd,
+	.misc			    = mtk_smi_larb_mt6878_misc,
+	.clk_names		    = mtk_smi_mt6878_clks,
+	.clk_nr_opt		    = ARRAY_SIZE(mtk_smi_mt6878_clks) - MTK_SMI_LARB_REQ_CLK_NR,
+};
+
 static const struct mtk_smi_larb_gen mtk_smi_larb_mt6893 = {
 	.config_port                = mtk_smi_larb_config_port_gen2_general,
 	.flags_general	            = MTK_SMI_FLAG_THRT_UPDATE | MTK_SMI_FLAG_SW_FLAG,
@@ -550,6 +760,7 @@ static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt2712-smi-larb", .data = &mtk_smi_larb_mt2712},
 	{.compatible = "mediatek,mt6779-smi-larb", .data = &mtk_smi_larb_mt6779},
 	{.compatible = "mediatek,mt6795-smi-larb", .data = &mtk_smi_larb_mt8173},
+	{.compatible = "mediatek,mt6878-smi-larb", .data = &mtk_smi_larb_mt6878},
 	{.compatible = "mediatek,mt6893-smi-larb", .data = &mtk_smi_larb_mt6893},
 	{.compatible = "mediatek,mt8167-smi-larb", .data = &mtk_smi_larb_mt8167},
 	{.compatible = "mediatek,mt8173-smi-larb", .data = &mtk_smi_larb_mt8173},
@@ -656,8 +867,13 @@ static int mtk_smi_larb_probe(struct platform_device *pdev)
 	if (IS_ERR(larb->base))
 		return PTR_ERR(larb->base);
 
-	ret = mtk_smi_dts_clk_init(dev, &larb->smi, mtk_smi_larb_clks,
-				   MTK_SMI_LARB_REQ_CLK_NR, MTK_SMI_LARB_OPT_CLK_NR);
+	if (larb->larb_gen->clk_names)
+		ret = mtk_smi_dts_clk_init(dev, &larb->smi, larb->larb_gen->clk_names,
+					   MTK_SMI_LARB_REQ_CLK_NR,
+					   larb->larb_gen->clk_nr_opt);
+	else
+		ret = mtk_smi_dts_clk_init(dev, &larb->smi, mtk_smi_larb_clks,
+					   MTK_SMI_LARB_REQ_CLK_NR, MTK_SMI_LARB_OPT_CLK_NR);
 	if (ret)
 		return ret;
 
@@ -703,6 +919,13 @@ static int __maybe_unused mtk_smi_larb_resume(struct device *dev)
 
 	if (MTK_SMI_CAPS(larb->larb_gen->flags_general, MTK_SMI_FLAG_SLEEP_CTL))
 		mtk_smi_larb_sleep_ctrl_disable(larb);
+
+	/*
+	 * The larb id and the port masks come from the IOMMU when it binds
+	 * the larb. Until then the ports keep their reset state.
+	 */
+	if (!larb->mmu)
+		return 0;
 
 	/* Configure the basic setting for this larb */
 	return larb_gen->config_port(dev);
@@ -776,6 +999,46 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt6795 = {
 	.init     = mtk_smi_common_mt6795_init,
 };
 
+/*
+ * MT6878 has one smi-common, the init values are the same as on MT8195.
+ * The sub-commons get the values of MediaTek's kernel: the same L1LEN and
+ * dummy setting for all, and a pre-ultra mask that differs by instance.
+ */
+static const struct mtk_smi_reg_pair mtk_smi_sub_common_mt6878_init[SMI_COMMON_INIT_REGS_NR] = {
+	{SMI_L1LEN, 0xa},
+	{SMI_DUMMY, 0x1},
+};
+
+static const struct mtk_smi_inst_reg mtk_smi_sub_common_mt6878_inst[] = {
+	{0x15002000, {SMI_PREULTRA_MASK1, 0x2146}},	/* img1 0 */
+	{0x15003000, {SMI_PREULTRA_MASK1, 0x2146}},	/* img1 1 */
+	{0x15009000, {SMI_PREULTRA_MASK1, 0x2105}},	/* img1 2 */
+	{0x15781000, {SMI_PREULTRA_MASK1, 0x2146}},	/* img vcore 0 */
+	{0x15782000, {SMI_PREULTRA_MASK1, 0x2146}},	/* img vcore 1 */
+	{0x1a005000, {SMI_PREULTRA_MASK1, 0x2146}},	/* cam 0 */
+	{0x1a006000, {SMI_PREULTRA_MASK1, 0x2105}},	/* cam 1 */
+	{0x1b202000, {SMI_PREULTRA_MASK1, 0x2146}},	/* ccu */
+	{0x1b203000, {SMI_PREULTRA_MASK1, 0x2146}},	/* cam vcore */
+	{0x1e809000, {SMI_PREULTRA_MASK1, 0x2146}},	/* mminfra 3x1 */
+	{0x1e80a000, {SMI_PREULTRA_MASK1, 0x2146}},	/* mminfra 2x1 */
+	{}
+};
+
+static const struct mtk_smi_common_plat mtk_smi_common_mt6878 = {
+	.type     = MTK_SMI_GEN2,
+	.bus_sel  = F_MMU1_LARB(1) | F_MMU1_LARB(3) | F_MMU1_LARB(5) |
+		    F_MMU1_LARB(7),
+	.init     = mtk_smi_common_mt8195_init,
+};
+
+static const struct mtk_smi_common_plat mtk_smi_sub_common_mt6878 = {
+	.type     = MTK_SMI_GEN2_SUB_COMM,
+	.init     = mtk_smi_sub_common_mt6878_init,
+	.inst_regs = mtk_smi_sub_common_mt6878_inst,
+	.clk_names  = mtk_smi_mt6878_clks,
+	.clk_nr_opt = ARRAY_SIZE(mtk_smi_mt6878_clks) - MTK_SMI_COM_REQ_CLK_NR,
+};
+
 static const struct mtk_smi_common_plat mtk_smi_common_mt6893 = {
 	.type     = MTK_SMI_GEN2,
 	.has_gals = true,
@@ -845,6 +1108,8 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt2712-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt6779-smi-common", .data = &mtk_smi_common_mt6779},
 	{.compatible = "mediatek,mt6795-smi-common", .data = &mtk_smi_common_mt6795},
+	{.compatible = "mediatek,mt6878-smi-common", .data = &mtk_smi_common_mt6878},
+	{.compatible = "mediatek,mt6878-smi-sub-common", .data = &mtk_smi_sub_common_mt6878},
 	{.compatible = "mediatek,mt6893-smi-common", .data = &mtk_smi_common_mt6893},
 	{.compatible = "mediatek,mt8167-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt8173-smi-common", .data = &mtk_smi_common_gen2},
@@ -879,7 +1144,12 @@ static int mtk_smi_common_probe(struct platform_device *pdev)
 		else if (common->plat->type == MTK_SMI_GEN2_SUB_COMM)
 			clk_required = MTK_SMI_SUB_COM_GALS_REQ_CLK_NR;
 	}
-	ret = mtk_smi_dts_clk_init(dev, common, mtk_smi_common_clks, clk_required, 0);
+	if (common->plat->clk_names)
+		ret = mtk_smi_dts_clk_init(dev, common, common->plat->clk_names,
+					   MTK_SMI_COM_REQ_CLK_NR, common->plat->clk_nr_opt);
+	else
+		ret = mtk_smi_dts_clk_init(dev, common, mtk_smi_common_clks,
+					   clk_required, 0);
 	if (ret)
 		return ret;
 
@@ -898,9 +1168,19 @@ static int mtk_smi_common_probe(struct platform_device *pdev)
 		if (IS_ERR(common->clk_async))
 			return PTR_ERR(common->clk_async);
 	} else {
-		common->base = devm_platform_ioremap_resource(pdev, 0);
+		const struct mtk_smi_inst_reg *inst = common->plat->inst_regs;
+		struct resource *res;
+
+		common->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 		if (IS_ERR(common->base))
 			return PTR_ERR(common->base);
+
+		for (; inst && inst->base; inst++) {
+			if (inst->base == res->start) {
+				common->inst_reg = &inst->reg;
+				break;
+			}
+		}
 	}
 
 	/* link its smi-common if this is smi-sub-common */
@@ -936,13 +1216,18 @@ static int __maybe_unused mtk_smi_common_resume(struct device *dev)
 	if (ret)
 		return ret;
 
-	if (common->plat->type != MTK_SMI_GEN2)
+	if (common->plat->type == MTK_SMI_GEN1)
 		return 0;
 
 	for (i = 0; i < SMI_COMMON_INIT_REGS_NR && init && init[i].offset; i++)
 		writel_relaxed(init[i].value, common->base + init[i].offset);
 
-	writel(bus_sel, common->base + SMI_BUS_SEL);
+	if (common->inst_reg)
+		writel(common->inst_reg->value,
+		       common->base + common->inst_reg->offset);
+
+	if (common->plat->type == MTK_SMI_GEN2)
+		writel(bus_sel, common->base + SMI_BUS_SEL);
 	return 0;
 }
 
