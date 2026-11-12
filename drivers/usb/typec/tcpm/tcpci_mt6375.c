@@ -10,12 +10,15 @@
  * (Copyright (C) 2022 Richtek Technology Corp., ChiYuan Huang
  * <cy_huang@richtek.com>).
  *
- * The VBUS supply of the port is the charger of the same chip; this
- * driver never sources VBUS or VCONN: such requests are refused, and the
- * standard TCPCI source/sink VBUS commands, which the BSP never issues
- * either, are not sent. Water, foreign object and cable type detection of
- * the BSP are not supported; foreign object detection is switched off as
- * the BSP does when it is not used.
+ * VBUS is sourced by the OTG boost of the charger of the same chip, a
+ * regulator ("vbus-source-supply": not "vbus-supply", which the MediaTek
+ * I2C controller would take for its own bus supply through the child-node
+ * lookup of the regulator core), and sunk by its charger
+ * input on its own: the standard TCPCI source/sink VBUS commands, which
+ * the downstream driver never issues either, are not sent. VCONN comes from the TCPC
+ * itself (the downstream port driver supplies it). Water, foreign object and cable
+ * type detection of the downstream driver are not supported; foreign object detection
+ * is switched off as the downstream driver does when it is not used.
  */
 
 #include <linux/bits.h>
@@ -28,6 +31,7 @@
 #include <linux/pm_wakeirq.h>
 #include <linux/pm_wakeup.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/usb/tcpci.h>
 #include <linux/usb/tcpm.h>
 
@@ -79,6 +83,8 @@ struct mt6375_tcpc {
 	struct device *dev;
 	struct tcpci *tcpci;
 	struct tcpci_data tdata;
+	struct regulator *vbus;		/* the OTG boost of the charger */
+	bool vbus_on;
 };
 
 /* Write 1 to clear, the implemented bits of MTINT1..7 */
@@ -216,32 +222,42 @@ static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *tdata)
 	return 0;
 }
 
+/*
+ * VCONN is switched by the TCPCI core through POWER_CTRL; the chip-specific
+ * current limit and OCP are set at init (VCONCTRL3).
+ */
 static int mt6375_tcpc_set_vconn(struct tcpci *tcpci, struct tcpci_data *tdata,
 				 bool enable)
 {
-	struct mt6375_tcpc *priv = container_of(tdata, struct mt6375_tcpc,
-						tdata);
-
-	if (enable) {
-		dev_warn(priv->dev, "refusing to source VCONN\n");
-		return -EOPNOTSUPP;
-	}
-
 	return 0;
 }
 
+/*
+ * Source: the OTG boost regulator of the charger. Sink: the charger input
+ * takes VBUS on its own, nothing to switch. No TCPC command either way.
+ */
 static int mt6375_tcpc_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata,
 				bool source, bool sink)
 {
 	struct mt6375_tcpc *priv = container_of(tdata, struct mt6375_tcpc,
 						tdata);
+	int ret = 0;
 
-	if (source) {
-		dev_warn(priv->dev, "refusing to source VBUS\n");
+	if (source && !priv->vbus) {
+		dev_warn(priv->dev, "no VBUS supply: cannot source\n");
 		return -EOPNOTSUPP;
 	}
+	if (source && !priv->vbus_on) {
+		ret = regulator_enable(priv->vbus);
+		if (!ret)
+			priv->vbus_on = true;
+	} else if (!source && priv->vbus_on) {
+		ret = regulator_disable(priv->vbus);
+		priv->vbus_on = false;
+	}
+	if (ret)
+		return ret;
 
-	/* The charger sinks on its own: nothing to switch, no TCPC command */
 	return 1;
 }
 
@@ -299,6 +315,14 @@ static int mt6375_tcpc_probe(struct platform_device *pdev)
 	ret = mt6375_tcpc_check_id(priv);
 	if (ret)
 		return ret;
+
+	priv->vbus = devm_regulator_get_optional(dev, "vbus-source");
+	if (IS_ERR(priv->vbus)) {
+		if (PTR_ERR(priv->vbus) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		priv->vbus = NULL;
+		dev_info(dev, "no VBUS supply: sink only\n");
+	}
 
 	irq = platform_get_irq_byname(pdev, "pd_evt");
 	if (irq < 0)

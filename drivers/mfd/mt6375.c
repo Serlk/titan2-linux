@@ -208,6 +208,7 @@ static int mt6375_probe(struct i2c_client *i2c)
 	struct device *dev = &i2c->dev;
 	struct mt6375_data *data;
 	struct regmap *regmap;
+	u8 all_masked[MT6375_NUM_IRQ_REGS];
 	int i, ret;
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
@@ -237,6 +238,22 @@ static int mt6375_probe(struct i2c_client *i2c)
 	ret = mt6375_check_id(dev, regmap);
 	if (ret)
 		return ret;
+
+	/*
+	 * regmap-irq only masks bits described in mt6375_irqs. The boot
+	 * loader can leave other sources enabled, notably GM30 (104),
+	 * whose driver is not used here. Mask every bank as the downstream driver does
+	 * before handing the supported sources to regmap-irq.
+	 */
+	memset(all_masked, 0xff, sizeof(all_masked));
+	ret = regmap_bulk_write(regmap, MT6375_REG_MASK_BASE,
+				all_masked, sizeof(all_masked));
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to mask interrupts\n");
+	ret = regmap_bulk_write(regmap, MT6375_REG_EVT_BASE,
+				all_masked, sizeof(all_masked));
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to clear interrupts\n");
 
 	ret = devm_regmap_add_irq_chip(dev, regmap, i2c->irq, IRQF_ONESHOT, 0,
 				       &mt6375_irq_chip, &data->irq_data);
