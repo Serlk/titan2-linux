@@ -159,6 +159,16 @@
 	 * Keyboard backlight: PWM channel 3 (PWM_2 on GPIO21), as the factory
 	 * keypad_led node (pwm_ch 2, levels 0..100, nothing lit below 8).
 	 */
+	/*
+	 * IR blaster: PWM channel 1 (PWM_1 on GPIO20), as the factory irtx-pwm
+	 * node (pwm-ch 1, no data inversion, powered from VIO28). pwm-ir-tx
+	 * sets the carrier period itself; the one here is only the 38 kHz default.
+	 */
+	ir-transmitter {
+		compatible = "pwm-ir-tx";
+		pwms = <&pwm 1 26316>;
+	};
+
 	keyboard-backlight {
 		compatible = "pwm-leds";
 
@@ -177,6 +187,22 @@
 				     1130 1640 2000 2650 3400 4095>;
 		default-brightness-level = <12>;
 		keep-boot-brightness;
+	};
+
+	/*
+	 * Vibration motor (ERM) on the MT6369 VIBR LDO. The factory device
+	 * tree drives it through a "regulator-vibrator" node with the same
+	 * 2.8 V to 3.5 V window; its GPL driver (leds/regulator-vibrator.c
+	 * in MediaTek's downstream tree) asks for that range and so always
+	 * runs the motor at 2.8 V. Kept at 2.8 V here too: raise
+	 * max-microvolt (up to 3500000) for a stronger effect at full
+	 * magnitude.
+	 */
+	vibrator {
+		compatible = "regulator-haptic";
+		haptic-supply = <&mt6369_vibr>;
+		min-microvolt = <2800000>;
+		max-microvolt = <2800000>;
 	};
 
 	battery: battery {
@@ -220,7 +246,7 @@
 
 &pwm {
 	pinctrl-names = "default";
-	pinctrl-0 = <&kbd_led_pins>;
+	pinctrl-0 = <&kbd_led_pins>, <&ir_tx_pins>;
 	status = "okay";
 };
 
@@ -228,6 +254,13 @@
 	kbd_led_pins: kbd-led-pins {
 		pins-pwm {
 			pinmux = <PINMUX_GPIO21__FUNC_PWM_2>;
+		};
+	};
+
+	ir_tx_pins: ir-tx-pins {
+		pins-pwm {
+			pinmux = <PINMUX_GPIO20__FUNC_PWM_1>;
+			bias-disable;
 		};
 	};
 
@@ -724,8 +757,15 @@
 			 * aw9523b_led@58). Neither the stock DT nor its driver (the GPL
 			 * module aw9523_key.ko) set a voltage: only switched on, at the level the PMIC comes up with.
 			 */
+			/*
+			 * 2.8 V I/O rail of the IR blaster (factory irtx-pwm
+			 * pwm-supply), the NFC controller and the LCD bias I2C:
+			 * none of them is a regulator consumer here, so keep it
+			 * on instead of letting the core switch it off as unused.
+			 */
 			mt6369_vio28: vio28 {
 				regulator-name = "mt6369_vio28";
+				regulator-always-on;
 			};
 
 			/* Touchscreen supply, set to 2.8 V by the factory driver */
@@ -733,6 +773,13 @@
 				regulator-name = "mt6369_vtp";
 				regulator-min-microvolt = <2800000>;
 				regulator-max-microvolt = <2800000>;
+			};
+
+			/* Vibration motor supply (factory mt6369_vibr, 2.8 V to 3.5 V) */
+			mt6369_vibr: vibr {
+				regulator-name = "mt6369_vibr";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <3500000>;
 			};
 
 			/*
