@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/* MT6375 diagnostic stage: preserve boot charger settings, no Type-C/PD. */
+#include "mt6878-unihertz-titan2-all.dts"
+
+&i2c5 {
+	pmic@34 {
+		status = "okay";
+	};
+};
+
+&mt6375_chg {
+	/delete-property/ monitored-battery;
+};

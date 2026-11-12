@@ -1,9 +1,64 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 /*
  * Titan 2: every bring-up stage at once, the display on mediatek-drm.
- * Same as -all-fb plus the -drm stage.
+ * Same as -all-fb plus the -drm stage, plus the MT6375 charger with the
+ * Type-C port manager (PD sink 5 V / 9 V, host role with VBUS from the
+ * charger's OTG boost) and USB in OTG mode. The battery limits stay the
+ * conservative ones of the first controlled charge until the charger is
+ * proven at the factory rate.
  *
  * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  */
 #include "mt6878-unihertz-titan2-all-fb.dts"
 #include "mt6878-unihertz-titan2-drm.dtsi"
+/*
+ * The display behind the multimedia IOMMU (OVL0 iommus) is not included
+ * yet: it works as the only IOMMU master, but together with other masters
+ * on the same M4U the screen showed stale memory.
+ * #include "mt6878-unihertz-titan2-iommu-disp.dtsi"
+ */
+
+&i2c5 {
+	pmic@34 {
+		status = "okay";
+	};
+};
+
+&{/soc@0/i2c@11280000/pmic@34/tcpc} {
+	status = "okay";
+};
+
+&ssusb {
+	dr_mode = "otg";
+};
+
+/*
+ * Charge limits, stage 2 (12.11.2026): 1.5 A instead of the 0.5 A of the
+ * first controlled charge; CV, termination and the 5..45 degC window stay.
+ * Factory device tree (mtk_charger / pdc nodes): battery_cv 4.45 V, DCP
+ * ac-charger-current 2.05 A (input 3.2 A), SDP 1.2 A, CDP 1.5 A, PD
+ * sc-charger-current 3.0 A with the input at 1.5 A at 9 V, charging window
+ * 0..50 degC. Next steps, one at a time after a watched charge: 2.05 A
+ * (the factory DCP current, the highest factory value on every port with
+ * a single battery maximum), then CV 4.45 V. Revert: 500000 here.
+ */
+&battery {
+	constant-charge-voltage-max-microvolt = <4350000>;
+	constant-charge-current-max-microamp = <1500000>;
+	charge-term-current-microamp = <150000>;
+	operating-range-celsius = <5 45>;
+};
+
+/*
+ * The factory cold limit (enable-limit-charger: below agold-limit-temp 15 degC
+ * the charge current is agold-charging 1 A; the factory configuration applies it on DCP only,
+ * here on every port) as the cool band; the warm band starts at the top of
+ * the charging window, so it never applies (the factory configuration has no SW JEITA).
+ */
+&mt6375_chg {
+	mediatek,jeita-cool-celsius = <15>;
+	mediatek,jeita-warm-celsius = <45>;
+	mediatek,jeita-cool-charge-current-microamp = <1000000>;
+	/* charge in system sleep (night on the charger), like the downstream mtk_charger */
+	mediatek,charge-in-suspend;
+};

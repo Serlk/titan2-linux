@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/* Controlled first charge: 5 V input stage, no TCPC, conservative limits. */
+#include "mt6878-unihertz-titan2-all.dts"
+
+&i2c5 {
+	pmic@34 {
+		status = "okay";
+	};
+};
+
+&battery {
+	constant-charge-voltage-max-microvolt = <4350000>;
+	constant-charge-current-max-microamp = <500000>;
+	charge-term-current-microamp = <150000>;
+	operating-range-celsius = <5 45>;
+};

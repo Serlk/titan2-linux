@@ -514,34 +514,64 @@
 			interrupt-names = "pwr_rdy", "detach", "vbus_ov",
 					  "chg_tout", "chg_batov", "bc12_dn";
 			io-channels = <&mt6375_adc MT6375_ADC_CHGVIN>,
-				      <&mt6375_adc MT6375_ADC_IBUS>;
-			io-channel-names = "vbus", "ibus";
+				      <&mt6375_adc MT6375_ADC_IBUS>,
+				      <&mt6375_adc MT6375_ADC_VBAT>,
+				      <&mt6375_adc MT6375_ADC_IBAT>,
+				      <&mt6375_adc MT6375_ADC_TEMPJC>,
+				      <&mt6375_adc MT6375_ADC_TS>;
+			io-channel-names = "vbus", "ibus", "vbat", "ibat",
+					   "temp_jc", "ts";
 			monitored-battery = <&battery>;
+			/*
+			 * D+/D- switch for BC1.2 detection (factory device tree: phys =
+			 * <usb2-phy0@11f40000 PHY_TYPE_USB2>, "usb2-phy").
+			 * Used only with mt6375_charger.bc12_detect=1. No
+			 * JEITA bands: the factory device tree has the thresholds but not
+			 * enable-sw-jeita, so the factory firmware does not apply them.
+			 */
+			phys = <&u2port PHY_TYPE_USB2>;
+			phy-names = "usb2-phy";
+
+			/* VBUS out for a host: the factory limits (4.85..5.5 V, 0.5..2.4 A) */
+			mt6375_otg_vbus: otg {
+				regulator-name = "usb-otg-vbus";
+				regulator-min-microvolt = <4850000>;
+				regulator-max-microvolt = <5500000>;
+				regulator-min-microamp = <500000>;
+				regulator-max-microamp = <2400000>;
+			};
 		};
 
 		/*
-		 * Type-C port. Sink only: the
-		 * driver refuses to source VBUS (the OTG boost of the
-		 * charger is not described at all) or VCONN. The only sink
-		 * PDO is 5 V; the stock one is 5 V / 2 A as well, the stock
-		 * PD charging algorithm raises it to 9 V later, which is not
-		 * done here. Disabled until the port is checked on the
-		 * device, step by step.
+		 * Type-C port, as the factory one: dual role with try-sink, Rp
+		 * 1.5 A, VCONN supplied, PD. Sources 5 V / 1.5 A from the OTG
+		 * boost of the charger; sinks 5 V / 3 A and 9 V / 2 A (the factory
+		 * sink PDO is 5 V / 2 A and its charging policy asks the source
+		 * for its most powerful PDO, which this list stands in for). The
+		 * charger follows the contract (input current limit).
+		 * Disabled until the port is checked on the device, step by
+		 * step: -typec.dts enables the chain.
 		 */
 		tcpc {
 			compatible = "mediatek,mt6375-tcpc";
 			interrupts = <120>;
 			interrupt-names = "pd_evt";
+			vbus-source-supply = <&mt6375_otg_vbus>;
 			status = "disabled";
 
 			connector {
 				compatible = "usb-c-connector";
 				label = "USB-C";
-				data-role = "device";
-				power-role = "sink";
-				self-powered;
-				sink-pdos = <PDO_FIXED(5000, 2000,
-						       PDO_FIXED_USB_COMM)>;
+				data-role = "dual";
+				power-role = "dual";
+				try-power-role = "sink";
+				source-pdos = <PDO_FIXED(5000, 1500,
+							 PDO_FIXED_USB_COMM)>;
+				sink-pdos = <PDO_FIXED(5000, 3000,
+						       PDO_FIXED_DUAL_ROLE |
+						       PDO_FIXED_DATA_SWAP |
+						       PDO_FIXED_USB_COMM)
+					     PDO_FIXED(9000, 2000, 0)>;
 				op-sink-microwatt = <10000000>;
 
 				port {
@@ -864,9 +894,9 @@
  * mediatek,force-vbus.
  *
  * The role switch for the MT6375 Type-C port is described but inert while
- * dr_mode is "peripheral"; with dr_mode = "otg" the port manager drives
- * it, and "no role" falls back to the device role (no VBUS supply is
- * described, so a host role would not power the bus either).
+ * dr_mode is "peripheral"; with dr_mode = "otg" (-typec.dts) the port
+ * manager drives it, powers the bus from the charger's OTG boost for a
+ * host, and "no role" falls back to the device role.
  *
  * The SSUSB power domain is not referenced: the SCPSYS controller is still
  * disabled, and the domain is left on by the boot chain (the preloader
