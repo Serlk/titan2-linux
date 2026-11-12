@@ -15,9 +15,10 @@
  * at a time and polled while any key is held; once all keys are released
  * the columns go back low and the row interrupts are re-armed.
  *
- * Each column costs two I2C transfers: a 2-byte write of the port direction
- * registers (only the scanned column is an output) and a 2-byte read of the
- * input registers. The chip auto-increments the register address.
+ * Each column costs three I2C transfers: a 2-byte write of the port direction
+ * registers (only the scanned column is an output) and separate reads of the
+ * two input registers. Both input ports must be read separately to clear
+ * their interrupts; reading them in a single burst leaves port 1 pending.
  *
  * The interrupt line is level triggered and only deasserts once the input
  * registers have been read, so the interrupt handler does no I2C at all: it
@@ -568,6 +569,8 @@ static const struct regmap_config aw9523_keypad_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = AW9523_REG_SOFT_RESET,
+	/* Each INPUT port needs its own read transaction to acknowledge IRQs. */
+	.use_single_read = true,
 };
 
 static int aw9523_keypad_probe(struct i2c_client *client)

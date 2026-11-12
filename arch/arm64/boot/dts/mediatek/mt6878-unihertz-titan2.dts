@@ -394,10 +394,11 @@
 		 * The keys found on the phone (evtest, one press each), in the
 		 * order of the keyboard: top row, then the three letter rows. The
 		 * downstream key_map[] has 63 entries; the other 28 (duplicates, F keys,
-		 * arrows, STOP..FIND, all of row 8) have no key behind them. Alt
-		 * pulls row 7 low whichever column is scanned, so it is the only
-		 * entry of that row and the other columns stay empty: with them
-		 * one Alt press came out as seven keys. The factory keymap sends 251 for Fn and
+		 * arrows, STOP..FIND) have no key behind them. Alt is on P1_0,
+		 * row 8, column 0, as in the downstream map. The apparent whole-row-7
+		 * Alt was an artefact of chip resets caused by reading both input
+		 * ports in one burst instead of acknowledging them separately.
+		 * The factory keymap sends 251 for Fn and
 		 * 253 for Sym, codes libinput drops (between KEY_MICMUTE and
 		 * BTN_MISC): they are KEY_PROG4 and KEY_PROG3 here, which have no
 		 * other meaning, so a Wayland shell can use them.
@@ -408,7 +409,7 @@
 					MATRIX_KEY(5, 2, KEY_BACK)	/* Back */
 					MATRIX_KEY(5, 3, KEY_APPSELECT)	/* Menu */
 					MATRIX_KEY(6, 0, KEY_PROG4)	/* Fn */
-					MATRIX_KEY(7, 0, KEY_RIGHTALT)	/* Alt, the whole row */
+					MATRIX_KEY(8, 0, KEY_RIGHTALT)	/* Alt: P1_0, P1_1 */
 					MATRIX_KEY(4, 1, KEY_Q)
 					MATRIX_KEY(3, 1, KEY_W)
 					MATRIX_KEY(2, 1, KEY_E)
