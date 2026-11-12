@@ -15,6 +15,10 @@
 #define MT6315_BUCK_MODE_FORCE_PWM	1
 #define MT6315_BUCK_MODE_LP		2
 
+/* BUCK_TOP_CON0 has a write-1-to-set and a write-1-to-clear register */
+#define MT6315_BUCK_TOP_CON0_SET	(MT6315_BUCK_TOP_CON0 + 1)
+#define MT6315_BUCK_TOP_CON0_CLR	(MT6315_BUCK_TOP_CON0 + 2)
+
 struct mt6315_regulator_info {
 	struct regulator_desc desc;
 	u32 status_reg;
@@ -176,6 +180,25 @@ static int mt6315_get_status(struct regulator_dev *rdev)
 	return (regval & BIT(0)) ? REGULATOR_STATUS_ON : REGULATOR_STATUS_OFF;
 }
 
+/*
+ * MT6319: switch a buck through the SET/CLR registers, as the MediaTek
+ * downstream driver does, instead of a read-modify-write of the enable
+ * register that also holds the enable bits of the other bucks (on the
+ * Titan 2: the GPU and the SoC vcore), which other masters of the SPMI bus
+ * may change at the same time.
+ */
+static int mt6315_regulator_enable_setclr(struct regulator_dev *rdev)
+{
+	return regmap_write(rdev->regmap, MT6315_BUCK_TOP_CON0_SET,
+			    rdev->desc->enable_mask);
+}
+
+static int mt6315_regulator_disable_setclr(struct regulator_dev *rdev)
+{
+	return regmap_write(rdev->regmap, MT6315_BUCK_TOP_CON0_CLR,
+			    rdev->desc->enable_mask);
+}
+
 static const struct regulator_ops mt6315_volt_range_ops = {
 	.list_voltage = regulator_list_voltage_linear_range,
 	.map_voltage = regulator_map_voltage_linear_range,
@@ -184,6 +207,20 @@ static const struct regulator_ops mt6315_volt_range_ops = {
 	.set_voltage_time_sel = regulator_set_voltage_time_sel,
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
+	.is_enabled = regulator_is_enabled_regmap,
+	.get_status = mt6315_get_status,
+	.set_mode = mt6315_regulator_set_mode,
+	.get_mode = mt6315_regulator_get_mode,
+};
+
+static const struct regulator_ops mt6319_volt_range_ops = {
+	.list_voltage = regulator_list_voltage_linear_range,
+	.map_voltage = regulator_map_voltage_linear_range,
+	.set_voltage_sel = regulator_set_voltage_sel_regmap,
+	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.set_voltage_time_sel = regulator_set_voltage_time_sel,
+	.enable = mt6315_regulator_enable_setclr,
+	.disable = mt6315_regulator_disable_setclr,
 	.is_enabled = regulator_is_enabled_regmap,
 	.get_status = mt6315_get_status,
 	.set_mode = mt6315_regulator_set_mode,
@@ -206,6 +243,9 @@ static const struct regmap_config mt6315_regmap_config = {
 
 static const struct of_device_id mt6315_of_match[] = {
 	{
+		.compatible = "mediatek,mt6319-regulator",
+		.data = &mt6319_volt_range_ops,
+	}, {
 		.compatible = "mediatek,mt6315-regulator",
 	}, {
 		/* sentinel */
@@ -220,6 +260,8 @@ static int mt6315_regulator_probe(struct spmi_device *pdev)
 	struct mt6315_chip *chip;
 	struct mt_regulator_init_data *init_data;
 	struct regulator_config config = {};
+	const struct regulator_ops *ops;
+	struct mt6315_regulator_info *info;
 	struct regulator_dev *rdev;
 	int i;
 
@@ -255,11 +297,20 @@ static int mt6315_regulator_probe(struct spmi_device *pdev)
 	chip->regmap = regmap;
 	dev_set_drvdata(dev, chip);
 
+	/* per device copy of the descriptors: a variant may change the ops */
+	ops = of_device_get_match_data(dev);
+	info = devm_kmemdup(dev, mt6315_regulators, sizeof(mt6315_regulators),
+			    GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
 	config.dev = dev;
 	config.regmap = regmap;
 	for (i = MT6315_VBUCK1; i < MT6315_VBUCK_MAX; i++) {
+		if (ops)
+			info[i].desc.ops = ops;
 		config.driver_data = init_data;
-		rdev = devm_regulator_register(dev, &mt6315_regulators[i].desc, &config);
+		rdev = devm_regulator_register(dev, &info[i].desc, &config);
 		if (IS_ERR(rdev)) {
 			dev_err(dev, "Failed to register %s\n",
 				mt6315_regulators[i].desc.name);

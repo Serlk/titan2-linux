@@ -1220,7 +1220,10 @@
 			 * - MD: owned by the modem; Linux must never switch it.
 			 * - MFG0: switched by the GPU microcontroller (GPUEB).
 			 * - APU: switched by the APU firmware.
-			 * - CAM and ISP trees: need the camera/ISP vcore supply.
+			 *
+			 * The CAM and ISP trees are described but disabled: their
+			 * top domains need the camera/ISP vcore supply (the
+			 * external VMM buck) as domain-supply, given by the board.
 			 */
 			spm: power-controller {
 				compatible = "mediatek,mt6878-power-controller";
@@ -1228,6 +1231,15 @@
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
 				access-controllers = <&infracfg_ao>, <&vlpcfg>, <&nemicfg_ao>;
+				/*
+				 * vlpcfg and nemicfg_ao are plain syscons, no driver
+				 * binds them: as fw_devlink suppliers (through
+				 * access-controllers) they held the power controller,
+				 * and all of display, SMI and M4U behind it, back
+				 * until the deferred probe timeout. They are regmaps
+				 * looked up at probe, not devices to wait for.
+				 */
+				post-init-providers = <&vlpcfg>, <&nemicfg_ao>, <&hwv>;
 				mediatek,hardware-voter = <&hwv>;
 				status = "disabled";
 
@@ -1292,6 +1304,131 @@
 						clocks = <&topckgen CLK_TOP_MMUP_SEL>;
 						clock-names = "mmup";
 						#power-domain-cells = <0>;
+					};
+
+					/*
+					 * Camera: clocks as in the MediaTek downstream
+					 * scpsys (basic clocks first, then the subsys
+					 * clocks enabled before the bus protection is
+					 * released). The subsys clock controllers are
+					 * inside the domains and carry no power-domains
+					 * themselves.
+					 */
+					cam_vcore_pd: power-domain@MT6878_POWER_DOMAIN_CAM_VCORE {
+						reg = <MT6878_POWER_DOMAIN_CAM_VCORE>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#power-domain-cells = <1>;
+						status = "disabled";
+
+						power-domain@MT6878_POWER_DOMAIN_CAM_MAIN {
+							reg = <MT6878_POWER_DOMAIN_CAM_MAIN>;
+							clocks = <&topckgen CLK_TOP_CAM_SEL>,
+								 <&camsys_main CLK_CAM_MAIN_CAM2MM0_GALS>,
+								 <&camsys_main CLK_CAM_MAIN_CAM2MM1_GALS>,
+								 <&camsys_main CLK_CAM_MAIN_LARB13>,
+								 <&camsys_main CLK_CAM_MAIN_LARB14>,
+								 <&camsys_main CLK_CAM_MAIN_LARB29>,
+								 <&camsys_main CLK_CAM_MAIN_CAM_MRAW>,
+								 <&camsys_mraw CLK_CAM_MR_GALS>,
+								 <&camsys_mraw CLK_CAM_MR_LARBX>;
+							clock-names = "cam", "cam_main-0", "cam_main-1",
+								      "cam_main-2", "cam_main-3",
+								      "cam_main-4", "cam_main-5",
+								      "cam_main-6", "cam_main-7";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#power-domain-cells = <1>;
+
+							power-domain@MT6878_POWER_DOMAIN_CAM_SUBA {
+								reg = <MT6878_POWER_DOMAIN_CAM_SUBA>;
+								clocks = <&camsys_main CLK_CAM_MAIN_CAM_SUBA>,
+									 <&camsys_rawa CLK_CAM_RA_RAW2MM_GALS>,
+									 <&camsys_rawa CLK_CAM_RA_YUV2RAW2MM_GALS>,
+									 <&camsys_rawa CLK_CAM_RA_LARBX>,
+									 <&camsys_yuva CLK_CAM_YA_LARBX>;
+								clock-names = "cam_suba-0", "cam_suba-1",
+									      "cam_suba-2", "cam_suba-3",
+									      "cam_suba-4";
+								#power-domain-cells = <0>;
+							};
+
+							power-domain@MT6878_POWER_DOMAIN_CAM_SUBB {
+								reg = <MT6878_POWER_DOMAIN_CAM_SUBB>;
+								clocks = <&camsys_main CLK_CAM_MAIN_CAM_SUBB>,
+									 <&camsys_rawb CLK_CAM_RB_RAW2MM_GALS>,
+									 <&camsys_rawb CLK_CAM_RB_YUV2RAW2MM_GALS>,
+									 <&camsys_rawb CLK_CAM_RB_LARBX>,
+									 <&camsys_yuvb CLK_CAM_YB_LARBX>;
+								clock-names = "cam_subb-0", "cam_subb-1",
+									      "cam_subb-2", "cam_subb-3",
+									      "cam_subb-4";
+								#power-domain-cells = <0>;
+							};
+						};
+
+						power-domain@MT6878_POWER_DOMAIN_CAM_CCU {
+							reg = <MT6878_POWER_DOMAIN_CAM_CCU>;
+							clocks = <&topckgen CLK_TOP_CCUSYS_SEL>,
+								 <&topckgen CLK_TOP_CCU_AHB_SEL>,
+								 <&ccusys CLK_CCU_LARB30_CON>,
+								 <&ccusys CLK_CCU_AHB_CON>,
+								 <&ccusys CLK_CCU2MM0_GALS_CON>;
+							clock-names = "ccu", "ccu_ahb", "cam_ccu-0",
+								      "cam_ccu-1", "cam_ccu-2";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#power-domain-cells = <1>;
+
+							power-domain@MT6878_POWER_DOMAIN_CAM_CCU_AO {
+								reg = <MT6878_POWER_DOMAIN_CAM_CCU_AO>;
+								#power-domain-cells = <0>;
+							};
+						};
+					};
+
+					isp_vcore_pd: power-domain@MT6878_POWER_DOMAIN_ISP_VCORE {
+						reg = <MT6878_POWER_DOMAIN_ISP_VCORE>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#power-domain-cells = <1>;
+						status = "disabled";
+
+						power-domain@MT6878_POWER_DOMAIN_ISP_MAIN {
+							reg = <MT6878_POWER_DOMAIN_ISP_MAIN>;
+							clocks = <&topckgen CLK_TOP_IMG1_SEL>,
+								 <&topckgen CLK_TOP_IPE_SEL>,
+								 <&imgsys_vcore CLK_IMG_VCORE_GALS_DISP>,
+								 <&imgsys_vcore CLK_IMG_VCORE_MAIN>,
+								 <&imgsys_vcore CLK_IMG_VCORE_SUB0>,
+								 <&imgsys_vcore CLK_IMG_VCORE_SUB1>,
+								 <&imgsys CLK_IMG_LARB9>,
+								 <&imgsys CLK_IMG_IPE>,
+								 <&imgsys CLK_IMG_LARB12>;
+							clock-names = "isp", "ipe", "isp-0", "isp-1",
+								      "isp-2", "isp-3", "isp-4",
+								      "isp-5", "isp-6";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#power-domain-cells = <1>;
+
+							power-domain@MT6878_POWER_DOMAIN_ISP_DIP1 {
+								reg = <MT6878_POWER_DOMAIN_ISP_DIP1>;
+								clocks = <&imgsys CLK_IMG_DIP0>,
+									 <&imgsys CLK_IMG_WPE0>,
+									 <&imgsys CLK_IMG_WPE1>,
+									 <&imgsys CLK_IMG_TRAW0>,
+									 <&imgsys CLK_IMG_GALS_RX_WPE0>,
+									 <&imgsys CLK_IMG_GALS_RX_WPE1>,
+									 <&imgsys CLK_IMG_GALS_RX_DIP0>,
+									 <&imgsys CLK_IMG_GALS_RX_DIP1>,
+									 <&imgsys CLK_IMG_GALS_RX_TRAW0>;
+								clock-names = "dip1-0", "dip1-1", "dip1-2",
+									      "dip1-3", "dip1-4", "dip1-5",
+									      "dip1-6", "dip1-7", "dip1-8";
+								#power-domain-cells = <0>;
+							};
+						};
 					};
 				};
 			};

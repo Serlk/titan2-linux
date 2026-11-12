@@ -17,6 +17,10 @@
 #define MTK_SCPD_MODEM_PWRSEQ		BIT(10)
 #define MTK_SCPD_SKIP_RESET_B		BIT(11)
 #define MTK_SCPD_INFRA_PWR_CTL		BIT(12)
+/* MT6878 MM_INFRA: firmware and clock gate steps after every power on */
+#define MTK_SCPD_MMINFRA_ON_SIP		BIT(13)
+/* MT6878 DISP: the optional downstream-style power on steps of mtk_pm_domains.disp_on */
+#define MTK_SCPD_MT6878_DISP_ON		BIT(14)
 #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
 					 (_scpd)->data->caps & (_x) :	\
 					 (_scpd)->hwv_data->caps & (_x))
@@ -148,6 +152,27 @@ enum scpsys_mtcmos_type {
 };
 
 /**
+ * struct scpsys_rail_iso - isolation of an external rail shared by domains
+ * @sta_offs: Offset of the isolation status register
+ * @set_offs: Offset of the write-1-to-set register
+ * @clr_offs: Offset of the write-1-to-clear register
+ * @bits: Isolation bits, in the order they are released after the rail
+ *        comes up (and set again, in the reverse order, before it goes down)
+ *
+ * Some SoCs feed a group of power domains from an external buck (e.g. the
+ * camera/ISP "VMM" rail of MT6878). The outputs of that rail are isolated
+ * from the always-on logic by bits in the SPM, which have to follow the rail
+ * itself and not a single domain: they are released when the regulator is
+ * enabled and set again before it is disabled.
+ */
+struct scpsys_rail_iso {
+	u16 sta_offs;
+	u16 set_offs;
+	u16 clr_offs;
+	u8 bits[3];
+};
+
+/**
  * struct scpsys_domain_data - scp domain data for power on/off flow
  * @name: The name of the power domain.
  * @sta_mask: The mask for power on/off status bit.
@@ -157,9 +182,16 @@ enum scpsys_mtcmos_type {
  * @sram_pdn_ack_bits: The mask for sram power control acked bits.
  * @ext_buck_iso_offs: The offset for external buck isolation
  * @ext_buck_iso_mask: The mask for external buck isolation
+ * @rail_iso: Isolation of the external rail that supplies the domain
+ *            (needs MTK_SCPD_DOMAIN_SUPPLY)
  * @caps: The flag for active wake-up action.
  * @rtff_type: The power domain RTFF HW type
  * @bp_cfg: bus protection configuration for any subsystem
+ * @subsys_cg_base: Physical addresses of up to two clock gate blocks (CON at
+ *                  0x100, CLR at 0x108) inside the domain whose gates the
+ *                  downstream kernel opens as subsys clocks of the domain
+ *                  (MTK_SCPD_MT6878_DISP_ON; 0: none)
+ * @subsys_cg_mask: The gates to open in each of them
  */
 struct scpsys_domain_data {
 	const char *name;
@@ -170,11 +202,14 @@ struct scpsys_domain_data {
 	u32 sram_pdn_ack_bits;
 	int ext_buck_iso_offs;
 	u32 ext_buck_iso_mask;
+	const struct scpsys_rail_iso *rail_iso;
 	u16 caps;
 	enum scpsys_rtff_type rtff_type;
 	const struct scpsys_bus_prot_data bp_cfg[SPM_MAX_BUS_PROT_DATA];
 	int pwr_sta_offs;
 	int pwr_sta2nd_offs;
+	u32 subsys_cg_base[2];
+	u32 subsys_cg_mask[2];
 };
 
 /**
@@ -189,6 +224,8 @@ struct scpsys_domain_data {
  * @setclr_bit: The SET/CLR bit to enable/disable the power domain
  * @sta_bit:    The SET/CLR STA bit to check for on/off ACK
  * @caps:       The flag for active wake-up action
+ * @cg_base:    Physical address of the clock gates of the subsystem the
+ *              domain powers, checked after power on (0: none)
  */
 struct scpsys_hwv_domain_data {
 	const char *name;
@@ -201,6 +238,7 @@ struct scpsys_hwv_domain_data {
 	u8 setclr_bit;
 	u8 sta_bit;
 	u16 caps;
+	u32 cg_base;
 };
 
 /**

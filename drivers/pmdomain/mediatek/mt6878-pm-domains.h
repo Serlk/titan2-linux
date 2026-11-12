@@ -114,6 +114,20 @@
 #define MT6878_SRAM_SLP					BIT(9)
 #define MT6878_SRAM_SLP_ACK				BIT(13)
 
+/*
+ * Isolation of the external VMM buck (MT6319 vbuck1) that feeds the camera
+ * and ISP vcore domains. Register offsets and bit order as programmed by the
+ * MediaTek downstream VMM SPM driver (mtk-vmm-spm.c, "mt6878" table: status
+ * 0xf28, set 0xf2c, clear 0xf30; external buck ISO 24, SRAM ISO DIN 25,
+ * SRAM latch enable 26), released in this order after the buck is enabled.
+ */
+static const struct scpsys_rail_iso mt6878_vmm_iso = {
+	.sta_offs = 0xf28,
+	.set_offs = 0xf2c,
+	.clr_offs = 0xf30,
+	.bits = { 24, 25, 26 },
+};
+
 #define MT6878_PWR_CON_STA(_ctl)		\
 	.ctl_offs = (_ctl),			\
 	.sta_mask = MT6878_PWR_ACK,		\
@@ -223,7 +237,13 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MCU(MT6878_TOP_AXI_PROT_EN_MCU_CONN_2ND),
 			MT6878_BP_INFRA(MT6878_TOP_AXI_PROT_EN_INFRA_CONN),
 		},
-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
+		/*
+		 * ACTIVE_WAKEUP: the connectivity subsystem (Wi-Fi, Bluetooth
+		 * firmware) keeps running through system sleep; while the
+		 * CONNINFRA device is on the wakeup path the domain stays as
+		 * it is in the noirq phases.
+		 */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF | MTK_SCPD_ACTIVE_WAKEUP,
 	},
 	[MT6878_POWER_DOMAIN_AUDIO] = {
 		.name = "audio",
@@ -266,6 +286,16 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 		.bp_cfg = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_DISP),
 		},
+		/* active wakeup: mtk_mmsys.keep_disp_on keeps it on in sleep */
+		.caps = MTK_SCPD_MMINFRA_ON_SIP | MTK_SCPD_ACTIVE_WAKEUP |
+			MTK_SCPD_MT6878_DISP_ON,
+		/*
+		 * The downstream "disp0-0" and "disp0-1" subsys clocks: the
+		 * SMI_COMMON gate of mmsys (CG_CON0 bit 31) and the SMI0 gate
+		 * of mdpsys (CG_CON0 bit 2), both inside this domain.
+		 */
+		.subsys_cg_base = { 0x14000000, 0x1f000000 },
+		.subsys_cg_mask = { BIT(31), BIT(2) },
 	},
 	[MT6878_POWER_DOMAIN_VEN0] = {
 		.name = "ven0",
@@ -284,7 +314,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_VCORE),
 			MT6878_BP_MM_1(MT6878_TOP_AXI_PROT_EN_MM_1_CAM_VCORE),
 		},
-		.caps = MTK_SCPD_DOMAIN_SUPPLY,
+		.rail_iso = &mt6878_vmm_iso,
+		.caps = MTK_SCPD_DOMAIN_SUPPLY | MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_CAM_CCU] = {
 		.name = "cam-ccu",
@@ -296,10 +327,14 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_DRAMC(MT6878_TOP_AXI_PROT_EN_DRAMC_CAM_CCU_2ND),
 			MT6878_BP_INFRA(MT6878_TOP_AXI_PROT_EN_INFRA_CAM_CCU),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_CAM_CCU_AO] = {
 		.name = "cam-ccu-ao",
 		MT6878_PWR_CON_STA(0xe64),
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_CAM_MAIN] = {
 		.name = "cam-main",
@@ -310,6 +345,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_MAIN),
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_MAIN_2ND),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_CAM_SUBA] = {
 		.name = "cam-suba",
@@ -320,6 +357,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_SUBA),
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_SUBA_2ND),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_CAM_SUBB] = {
 		.name = "cam-subb",
@@ -330,6 +369,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_SUBB),
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_CAM_SUBB_2ND),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_ISP_VCORE] = {
 		.name = "isp-vcore",
@@ -338,7 +379,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_ISP_VCORE),
 			MT6878_BP_MM_1(MT6878_TOP_AXI_PROT_EN_MM_1_ISP_VCORE),
 		},
-		.caps = MTK_SCPD_DOMAIN_SUPPLY,
+		.rail_iso = &mt6878_vmm_iso,
+		.caps = MTK_SCPD_DOMAIN_SUPPLY | MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_ISP_MAIN] = {
 		.name = "isp-main",
@@ -351,6 +393,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_ISP_MAIN_3RD),
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_ISP_MAIN_4TH),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_ISP_DIP1] = {
 		.name = "isp-dip1",
@@ -361,6 +405,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6878[] = {
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_ISP_DIP1),
 			MT6878_BP_MM(MT6878_TOP_AXI_PROT_EN_MM_ISP_DIP1_2ND),
 		},
+		/* the VMM rail: switched on demand only */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6878_POWER_DOMAIN_VDE0] = {
 		.name = "vde0",
@@ -412,7 +458,9 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_domain_data_mt6878[] = {
 		.set_sta = MT6878_HWV_MTCMOS_SET_STA,
 		.clr_sta = MT6878_HWV_MTCMOS_CLR_STA,
 		.setclr_bit = 0,
-		.caps = MTK_SCPD_INFRA_PWR_CTL,
+		.caps = MTK_SCPD_INFRA_PWR_CTL | MTK_SCPD_MMINFRA_ON_SIP,
+		/* mminfra_config: SMI and GCE clock gates */
+		.cg_base = 0x1e800000,
 	},
 };
 

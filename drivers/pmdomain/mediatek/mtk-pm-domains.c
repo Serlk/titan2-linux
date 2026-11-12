@@ -5,6 +5,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -15,6 +16,7 @@
 #include <linux/pm_domain.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/sizes.h>
 #include <linux/soc/mediatek/infracfg.h>
 #include <linux/soc/mediatek/mtk_sip_svc.h>
 #include <linux/spinlock.h>
@@ -59,6 +61,84 @@
 
 #define MTK_SIP_KERNEL_HWCCF_CONTROL	MTK_SIP_SMC_CMD(0x540)
 
+/*
+ * MT6878 MM_INFRA power on, as the MediaTek GPL kernel does it in its
+ * mminfra driver (drivers/misc/mediatek/mminfra/mtk-mminfra-debug.c,
+ * mtk_mminfra_pd_callback() on GENPD_NOTIFY_ON, and the probe; requests of
+ * drivers/misc/mediatek/cmdq/mailbox/cmdq-util.h): the secure firmware
+ * call that drops the MM DEVAPC protection again (without it the boot
+ * loader display path registers in mmsys ignore non-secure writes after a
+ * power cycle), and the check of the SMI and GCE clock gates.
+ */
+#define MTK_SIP_CMDQ_CONTROL		MTK_SIP_SMC_CMD(0x518)
+#define CMDQ_SIP_MMINFRA_CMD		6
+#define CMDQ_SIP_MMUEN_DEVAPC_DISABLE	7
+
+#define MMINFRA_CG_CON0			0x100
+#define MMINFRA_CG_CLR0			0x108
+#define MMINFRA_CG_CON1			0x110
+#define MMINFRA_CG0_SMI			BIT(2)
+
+#define MMINFRA_ON_DEVAPC		BIT(0)
+#define MMINFRA_ON_INIT_CMDS		BIT(1)
+#define MMINFRA_ON_SMI_CG		BIT(2)
+#define MMINFRA_ON_DISP_DEVAPC		BIT(3)
+
+/*
+ * Steps after an MT6878 MM_INFRA power on, a bit mask:
+ * bit 0: the DEVAPC disable call at every power on (as the downstream kernel does);
+ * bit 1: the mminfra commands 0 and 3 (HRE / read FIFO init) at the first
+ *        power on (the downstream driver does them once, at its probe);
+ * bit 2: ungate the SMI clock if it came back gated (the downstream driver only warns);
+ * bit 3: the DEVAPC disable call after every DISP power on as well, an
+ *        experiment: MM_INFRA may go down in the SPM sleep through the
+ *        hardware voter without its power domain seeing it, and the mmsys
+ *        path registers ignore writes after a DISP power cycle.
+ * The clock gates are logged either way.
+ */
+static unsigned int mminfra_on = MMINFRA_ON_DEVAPC | MMINFRA_ON_SMI_CG |
+				 MMINFRA_ON_DISP_DEVAPC;
+module_param(mminfra_on, uint, 0644);
+MODULE_PARM_DESC(mminfra_on, "MT6878 MM_INFRA power on steps: 1 DEVAPC, 2 init commands, 4 SMI clock, 8 DEVAPC after DISP (default 13)");
+
+/*
+ * MT6878 DISP power on: the steps of the MediaTek GPL scpsys driver
+ * (mtk-scpsys.c scpsys_power_on() with the "disp" data of
+ * mtk-scpsys-mt6878.c) that this driver does differently, a bit mask:
+ * bit 0: switch PWR_ON, wait for its ack, 50 us, then PWR_ON_2ND and wait
+ *        (downstream); this driver sets both switches at once;
+ * bit 1: open the "disp0-0"/"disp0-1" subsys clocks of the downstream driver (mmsys
+ *        SMI_COMMON, mdpsys SMI0) after the reset release, before the SRAM
+ *        and the bus protection are released, and again before the bus
+ *        protection is set at power off: the downstream driver keeps them enabled across
+ *        both. The protection handshake of the larb ports needs the SMI
+ *        clock; with an SMI larb driver that gates SMI_COMMON at runtime
+ *        suspend (the -iommu DTB), setting the protection timed out after
+ *        1 s and genpd silently kept DISP and MM_INFRA on, with the
+ *        protection left set (the display froze after resume). Default on;
+ * bit 2: diagnostics after power on: DISP bus protection status, mmsys
+ *        0x0fc, 0xc00, 0xc0c and whether the unused crossbar output
+ *        enable 0xc18 takes a write, before and after the firmware call of
+ *        mminfra_on bit 3.
+ * Default 2 (bit 1). A failed DISP power off is logged in any case, and
+ * its half set bus protection is released again.
+ */
+#define DISP_ON_STAGED			BIT(0)
+#define DISP_ON_SUBSYS_CG		BIT(1)
+#define DISP_ON_PROBE			BIT(2)
+
+static unsigned int disp_on = DISP_ON_SUBSYS_CG;
+module_param(disp_on, uint, 0644);
+MODULE_PARM_DESC(disp_on, "MT6878 DISP power on/off: 1 staged power switches, 2 subsys clocks around the bus protection, 4 log crossbar writability (default 2)");
+
+#define SUBSYS_CG_CON			0x100
+#define SUBSYS_CG_CLR			0x108
+/* mmsys config, for DISP_ON_PROBE */
+#define MMSYS_SEC_STA			0x0fc
+#define MMSYS_BYPASS_MUX_SHADOW		0xc00
+#define MMSYS_CROSSBAR_CON		0xc0c
+#define MMSYS_OVL_BG_CROSSBAR2		0xc18
+
 struct scpsys_domain {
 	struct generic_pm_domain genpd;
 	const struct scpsys_domain_data *data;
@@ -69,6 +149,20 @@ struct scpsys_domain {
 	int num_subsys_clks;
 	struct clk_bulk_data *subsys_clks;
 	struct regulator *supply;
+	struct notifier_block rail_nb;
+	void __iomem *cg_base;
+	unsigned int power_ons;
+	void __iomem *subsys_cg[2];
+	/* found on at probe (left on by the boot loader) */
+	bool boot_on;
+	/*
+	 * Switched on by scpsys_power_on() and not switched off since. genpd
+	 * ignores a failed power on in its system resume path
+	 * (genpd_sync_power_on() marks the domain on regardless), and would
+	 * then power off a domain whose clocks this driver had already
+	 * released: "already unprepared" for every clock of the domain.
+	 */
+	bool powered;
 };
 
 struct scpsys {
@@ -333,9 +427,109 @@ static int scpsys_regulator_enable(struct regulator *supply)
 	return supply ? regulator_enable(supply) : 0;
 }
 
+/*
+ * Isolation of an external rail shared by several domains (MT6878 VMM).
+ * Released once the rail is up, in the order of the table, and set again in
+ * the reverse order before the rail goes down: done from the regulator
+ * notifier, so that it follows the rail and not the single domain, plus once
+ * more in power on for a rail that was already up.
+ */
+static void scpsys_rail_iso_release(struct scpsys *scpsys,
+				    const struct scpsys_rail_iso *iso)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(iso->bits); i++)
+		regmap_write(scpsys->base, iso->clr_offs, BIT(iso->bits[i]));
+}
+
+static void scpsys_rail_iso_set(struct scpsys *scpsys,
+				const struct scpsys_rail_iso *iso)
+{
+	int i;
+
+	for (i = ARRAY_SIZE(iso->bits) - 1; i >= 0; i--)
+		regmap_write(scpsys->base, iso->set_offs, BIT(iso->bits[i]));
+}
+
+static u32 scpsys_rail_iso_mask(const struct scpsys_rail_iso *iso)
+{
+	return BIT(iso->bits[0]) | BIT(iso->bits[1]) | BIT(iso->bits[2]);
+}
+
+static int scpsys_rail_event(struct notifier_block *nb, unsigned long event,
+			     void *data)
+{
+	struct scpsys_domain *pd = container_of(nb, struct scpsys_domain, rail_nb);
+	const struct scpsys_rail_iso *iso = pd->data->rail_iso;
+
+	switch (event) {
+	case REGULATOR_EVENT_ENABLE:
+	case REGULATOR_EVENT_ABORT_DISABLE:
+		scpsys_rail_iso_release(pd->scpsys, iso);
+		break;
+	case REGULATOR_EVENT_PRE_DISABLE:
+		scpsys_rail_iso_set(pd->scpsys, iso);
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
 static int scpsys_regulator_disable(struct regulator *supply)
 {
 	return supply ? regulator_disable(supply) : 0;
+}
+
+static unsigned long scpsys_cmdq_sip(unsigned long req, unsigned long arg)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(MTK_SIP_CMDQ_CONTROL, req, arg, 0, 0, 0, 0, 0, &res);
+	return res.a0;
+}
+
+/* MT6878 MM_INFRA is on again: firmware calls and clock gates, see above */
+static void scpsys_mminfra_powered_on(struct scpsys_domain *pd)
+{
+	struct device *dev = pd->scpsys->dev;
+	unsigned int steps = READ_ONCE(mminfra_on);
+	unsigned long r0 = 0, r3 = 0, rd = 0;
+	u32 cg0 = 0, cg1 = 0, cg0_after = 0;
+	bool first = !pd->power_ons++;
+	bool hwv = pd->hwv_data;
+
+	if (!hwv) {
+		/* a domain below MM_INFRA (DISP) */
+		if (!(steps & MMINFRA_ON_DISP_DEVAPC))
+			return;
+		rd = scpsys_cmdq_sip(CMDQ_SIP_MMUEN_DEVAPC_DISABLE, 0);
+		dev_info(dev, "%s on (#%u): devapc %#lx\n", pd->genpd.name,
+			 pd->power_ons, rd);
+		return;
+	}
+
+	if (first && (steps & MMINFRA_ON_INIT_CMDS)) {
+		r0 = scpsys_cmdq_sip(CMDQ_SIP_MMINFRA_CMD, 0);
+		r3 = scpsys_cmdq_sip(CMDQ_SIP_MMINFRA_CMD, 3);
+	}
+	if (steps & MMINFRA_ON_DEVAPC)
+		rd = scpsys_cmdq_sip(CMDQ_SIP_MMUEN_DEVAPC_DISABLE, 0);
+
+	if (pd->cg_base) {
+		cg0 = readl(pd->cg_base + MMINFRA_CG_CON0);
+		cg1 = readl(pd->cg_base + MMINFRA_CG_CON1);
+		if ((cg0 & MMINFRA_CG0_SMI) && (steps & MMINFRA_ON_SMI_CG))
+			writel(MMINFRA_CG0_SMI, pd->cg_base + MMINFRA_CG_CLR0);
+		cg0_after = readl(pd->cg_base + MMINFRA_CG_CON0);
+	}
+
+	dev_info(dev, "%s on (#%u): steps %#x, init cmds %#lx/%#lx, devapc %#lx, cg %08x->%08x %08x%s\n",
+		 pd->genpd.name, pd->power_ons, steps, r0, r3, rd, cg0,
+		 cg0_after, cg1,
+		 (cg0_after & MMINFRA_CG0_SMI) ? " (SMI gated)" : "");
 }
 
 static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
@@ -404,6 +598,9 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
 
 	/* It's done! Disable the HWV low power subsystem clocks */
 	clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
+
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MMINFRA_ON_SIP))
+		scpsys_mminfra_powered_on(pd);
 
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL))
 		scpsys_sec_infra_power_on(false);
@@ -495,8 +692,13 @@ err_infra:
 static int scpsys_hwv_power_off(struct generic_pm_domain *genpd)
 {
 	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
+	int ret;
 
-	return scpsys_hwv_power_off_internal(pd);
+	ret = scpsys_hwv_power_off_internal(pd);
+	/* the power on logs its steps; tell whether the vote was dropped */
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MMINFRA_ON_SIP))
+		dev_info(pd->scpsys->dev, "%s off: %d\n", genpd->name, ret);
+	return ret;
 }
 
 static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
@@ -507,6 +709,18 @@ static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
 
 	/* subsys power on */
 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_BIT);
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON) &&
+	    (READ_ONCE(disp_on) & DISP_ON_STAGED)) {
+		unsigned int val;
+
+		/* as the downstream driver: the first switch, its ack, 50 us */
+		ret = regmap_read_poll_timeout(scpsys->base, pd->data->pwr_sta_offs,
+					       val, val & pd->data->sta_mask,
+					       MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
+		if (ret < 0)
+			return ret;
+		usleep_range(50, 60);
+	}
 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_2ND_BIT);
 
 	/* wait until PWR_ACK = 1 */
@@ -642,15 +856,68 @@ static void scpsys_modem_pwrseq_off(struct scpsys_domain *pd)
 		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_RST_B_BIT);
 }
 
-static int scpsys_power_on(struct generic_pm_domain *genpd)
+/* MT6878 DISP: open the downstream subsys clock gates, see disp_on */
+static void scpsys_open_subsys_cg(struct scpsys_domain *pd)
 {
-	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(pd->subsys_cg); i++)
+		if (pd->subsys_cg[i] && pd->data->subsys_cg_mask[i])
+			writel(pd->data->subsys_cg_mask[i],
+			       pd->subsys_cg[i] + SUBSYS_CG_CLR);
+}
+
+/* MT6878 DISP: does the mmsys crossbar block take a write? See disp_on */
+static void scpsys_disp_probe(struct scpsys_domain *pd, unsigned int n,
+			      const char *when)
+{
+	const struct scpsys_bus_prot_data *bpd = &pd->data->bp_cfg[0];
+	void __iomem *mm = pd->subsys_cg[0];
+	u32 sta = 0, cg1 = 0, test;
+
+	if (!mm)
+		return;
+	if (bpd->bus_prot_set_clr_mask)
+		regmap_read(scpsys_bus_protect_get_sta_regmap(pd, bpd),
+			    bpd->bus_prot_sta, &sta);
+	if (pd->subsys_cg[1])
+		cg1 = readl(pd->subsys_cg[1] + SUBSYS_CG_CON);
+
+	/* an output enable no path uses; 0 at boot, put back at once */
+	writel(0x00010001, mm + MMSYS_OVL_BG_CROSSBAR2);
+	test = readl(mm + MMSYS_OVL_BG_CROSSBAR2);
+	writel(0, mm + MMSYS_OVL_BG_CROSSBAR2);
+
+	dev_info(pd->scpsys->dev, "%s on (#%u) %s: bus prot sta %08x (domain bits %08x), mmsys cg %08x, mdpsys cg %08x, 0x0fc %08x, 0xc00 %08x, 0xc0c %08x, 0xc18 written 00010001 reads %08x\n",
+		 pd->genpd.name, n, when, sta,
+		 sta & bpd->bus_prot_sta_mask, readl(mm + SUBSYS_CG_CON), cg1,
+		 readl(mm + MMSYS_SEC_STA), readl(mm + MMSYS_BYPASS_MUX_SHADOW),
+		 readl(mm + MMSYS_CROSSBAR_CON), test);
+}
+
+static int scpsys_power_on_internal(struct scpsys_domain *pd)
+{
 	struct scpsys *scpsys = pd->scpsys;
+	unsigned int n;
+	bool probe;
 	int ret;
 
 	ret = scpsys_regulator_enable(pd->supply);
 	if (ret)
 		return ret;
+
+	if (pd->supply && pd->data->rail_iso) {
+		u32 val;
+
+		scpsys_rail_iso_release(scpsys, pd->data->rail_iso);
+		regmap_read(scpsys->base, pd->data->rail_iso->sta_offs, &val);
+		if (val & scpsys_rail_iso_mask(pd->data->rail_iso)) {
+			dev_err(scpsys->dev, "%s: rail isolation still set: %#x\n",
+				pd->genpd.name, val);
+			ret = -EIO;
+			goto err_reg;
+		}
+	}
 
 	ret = clk_bulk_prepare_enable(pd->num_clks, pd->clks);
 	if (ret)
@@ -689,6 +956,10 @@ static int scpsys_power_on(struct generic_pm_domain *genpd)
 			goto err_pwr_ack;
 	}
 
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON) &&
+	    (READ_ONCE(disp_on) & DISP_ON_SUBSYS_CG))
+		scpsys_open_subsys_cg(pd);
+
 	ret = scpsys_sram_enable(pd);
 	if (ret < 0)
 		goto err_disable_subsys_clks;
@@ -703,6 +974,18 @@ static int scpsys_power_on(struct generic_pm_domain *genpd)
 		if (ret)
 			goto err_enable_bus_protect;
 	}
+
+	probe = MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON) &&
+		(READ_ONCE(disp_on) & DISP_ON_PROBE);
+	n = pd->power_ons + 1;
+	if (probe)
+		scpsys_disp_probe(pd, n, "before the firmware call");
+
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MMINFRA_ON_SIP))
+		scpsys_mminfra_powered_on(pd);
+
+	if (probe)
+		scpsys_disp_probe(pd, n, "after the firmware call");
 
 	return 0;
 
@@ -721,15 +1004,38 @@ err_reg:
 	return ret;
 }
 
+/* MT6878 DISP: the bus protection could not be set, see disp_on */
+static void scpsys_disp_off_failed(struct scpsys_domain *pd, int err)
+{
+	const struct scpsys_bus_prot_data *bpd = &pd->data->bp_cfg[0];
+	u32 sta = 0;
+
+	regmap_read(scpsys_bus_protect_get_sta_regmap(pd, bpd),
+		    bpd->bus_prot_sta, &sta);
+	dev_warn(pd->scpsys->dev, "%s off failed: %d, bus prot sta %08x (domain bits %08x of %08x), mmsys cg %08x; protection released again, the domain stays on\n",
+		 pd->genpd.name, err, sta, sta & bpd->bus_prot_sta_mask,
+		 bpd->bus_prot_sta_mask,
+		 pd->subsys_cg[0] ? readl(pd->subsys_cg[0] + SUBSYS_CG_CON) : 0);
+	/* the masters would stay cut off from the bus while the domain is on */
+	scpsys_bus_protect_disable(pd, 0);
+}
+
 static int scpsys_power_off_internal(struct scpsys_domain *pd)
 {
 	struct scpsys *scpsys = pd->scpsys;
 	bool tmp;
 	int ret;
 
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON) &&
+	    (READ_ONCE(disp_on) & DISP_ON_SUBSYS_CG))
+		scpsys_open_subsys_cg(pd);
+
 	ret = scpsys_bus_protect_enable(pd, 0);
-	if (ret < 0)
+	if (ret < 0) {
+		if (MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON))
+			scpsys_disp_off_failed(pd, ret);
 		return ret;
+	}
 
 	ret = scpsys_sram_disable(pd);
 	if (ret < 0)
@@ -741,9 +1047,13 @@ static int scpsys_power_off_internal(struct scpsys_domain *pd)
 
 	clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
 
+	/*
+	 * A failure from here on leaves the domain on for genpd: take the
+	 * subsys clocks again so that a later power off releases them once.
+	 */
 	ret = scpsys_bus_protect_enable(pd, BUS_PROT_IGNORE_SUBCLK);
 	if (ret < 0)
-		return ret;
+		goto err_subsys_clks;
 
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MODEM_PWRSEQ))
 		scpsys_modem_pwrseq_off(pd);
@@ -754,20 +1064,100 @@ static int scpsys_power_off_internal(struct scpsys_domain *pd)
 	ret = readx_poll_timeout(scpsys_domain_is_on, pd, tmp, !tmp, MTK_POLL_DELAY_US,
 				 MTK_POLL_TIMEOUT);
 	if (ret < 0)
-		return ret;
+		goto err_subsys_clks;
 
 	clk_bulk_disable_unprepare(pd->num_clks, pd->clks);
 
 	scpsys_regulator_disable(pd->supply);
 
 	return 0;
+
+err_subsys_clks:
+	if (clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks))
+		dev_err(scpsys->dev, "%s: subsys clocks not restored\n",
+			pd->genpd.name);
+	return ret;
+}
+
+static int scpsys_power_on(struct generic_pm_domain *genpd)
+{
+	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
+	int ret;
+
+	if (pd->powered)
+		return 0;
+
+	ret = scpsys_power_on_internal(pd);
+	if (ret) {
+		/* genpd does not report it in its system resume path */
+		dev_err(pd->scpsys->dev, "%s: power on failed: %d\n",
+			genpd->name, ret);
+		return ret;
+	}
+	pd->powered = true;
+	return 0;
 }
 
 static int scpsys_power_off(struct generic_pm_domain *genpd)
 {
 	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
+	int ret;
 
-	return scpsys_power_off_internal(pd);
+	/* marked on by genpd after a power on that failed: nothing to undo */
+	if (!pd->powered) {
+		dev_dbg(pd->scpsys->dev, "%s: was not powered on\n", genpd->name);
+		return 0;
+	}
+
+	ret = scpsys_power_off_internal(pd);
+	if (!ret)
+		pd->powered = false;
+	return ret;
+}
+
+static bool scpsys_domain_data_is_on(struct scpsys *scpsys,
+				     const struct scpsys_domain_data *data)
+{
+	u32 mask2 = data->sta2nd_mask ? data->sta2nd_mask : data->sta_mask;
+	u32 status, status2;
+
+	regmap_read(scpsys->base, data->pwr_sta_offs, &status);
+	regmap_read(scpsys->base, data->pwr_sta2nd_offs, &status2);
+
+	return (status & data->sta_mask) && (status2 & mask2);
+}
+
+/*
+ * A domain on an isolated external rail: follow the rail with the
+ * isolation. If the rail is up while no domain on it is (left so by the
+ * boot loader), set the isolation now: a later disable of the unused rail
+ * (regulator late cleanup) does not go through the notifier.
+ */
+static int scpsys_rail_iso_init(struct scpsys_domain *pd)
+{
+	struct scpsys *scpsys = pd->scpsys;
+	const struct scpsys_rail_iso *iso = pd->data->rail_iso;
+	const struct scpsys_soc_data *soc = scpsys->soc_data;
+	bool users_on = false;
+	u32 val;
+	int i, ret;
+
+	for (i = 0; i < soc->num_domains; i++)
+		if (soc->domains_data[i].rail_iso == iso &&
+		    scpsys_domain_data_is_on(scpsys, &soc->domains_data[i]))
+			users_on = true;
+
+	ret = regulator_is_enabled(pd->supply);
+	regmap_read(scpsys->base, iso->sta_offs, &val);
+	dev_info(scpsys->dev, "%s: rail %s, isolation %#x, domains on the rail %s\n",
+		 pd->data->name, ret > 0 ? "on" : "off", val & scpsys_rail_iso_mask(iso),
+		 users_on ? "on" : "off");
+
+	if (ret > 0 && !users_on)
+		scpsys_rail_iso_set(scpsys, iso);
+
+	pd->rail_nb.notifier_call = scpsys_rail_event;
+	return devm_regulator_register_notifier(pd->supply, &pd->rail_nb);
 }
 
 static struct
@@ -846,6 +1236,13 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 			return dev_err_cast_probe(scpsys->dev, pd->supply,
 				      "%pOF: failed to get power supply.\n",
 				      node);
+
+		if (pd->data && pd->data->rail_iso) {
+			ret = scpsys_rail_iso_init(pd);
+			if (ret)
+				return dev_err_ptr_probe(scpsys->dev, ret,
+					"%pOF: failed to watch the supply\n", node);
+		}
 	}
 
 	num_clks = of_clk_get_parent_count(node);
@@ -904,6 +1301,25 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 		goto err_put_subsys_clocks;
 	}
 
+	if (pd->data && MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON)) {
+		for (i = 0; i < ARRAY_SIZE(pd->subsys_cg); i++) {
+			if (!pd->data->subsys_cg_base[i])
+				continue;
+			pd->subsys_cg[i] = devm_ioremap(scpsys->dev,
+							pd->data->subsys_cg_base[i],
+							SZ_4K);
+			if (!pd->subsys_cg[i])
+				dev_warn(scpsys->dev, "%pOF: cannot map clock gates %d\n",
+					 node, i);
+		}
+	}
+
+	if (pd->hwv_data && pd->hwv_data->cg_base) {
+		pd->cg_base = devm_ioremap(scpsys->dev, pd->hwv_data->cg_base, SZ_4K);
+		if (!pd->cg_base)
+			dev_warn(scpsys->dev, "%pOF: cannot map the clock gates\n", node);
+	}
+
 	if (pd->data && pd->data->name)
 		pd->genpd.name = pd->data->name;
 	else if (pd->hwv_data && pd->hwv_data->name)
@@ -945,6 +1361,11 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 			dev_warn(scpsys->dev,
 				 "%pOF: A default off power domain has been ON\n", node);
 	} else {
+		if (pd->hwv_data)
+			pd->boot_on = scpsys_hwv_domain_is_enable_done(pd);
+		else
+			pd->boot_on = scpsys_domain_is_on(pd);
+
 		ret = pd->genpd.power_on(&pd->genpd);
 		if (ret < 0) {
 			dev_err(scpsys->dev, "%pOF: failed to power on domain: %d\n", node, ret);
@@ -980,7 +1401,8 @@ static int scpsys_add_subdomain(struct scpsys *scpsys, struct device_node *paren
 	struct device_node *child;
 	int ret;
 
-	for_each_child_of_node(parent, child) {
+	/* a disabled child domain is skipped with its whole subtree */
+	for_each_available_child_of_node(parent, child) {
 		u32 id;
 
 		ret = of_property_read_u32(parent, "reg", &id);
@@ -1051,6 +1473,21 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF) &&
 	    pd->genpd.status == GENPD_STATE_OFF)
 		goto put_clocks;
+
+	/*
+	 * Neither is a domain that was already on when the probe found it: a
+	 * probe that fails (most often deferred, e.g. for the regulator of a
+	 * later domain) would otherwise power cycle what the boot loader runs
+	 * behind it, such as the display path, before the next attempt. Its
+	 * clocks keep the references this probe took, so they stay running
+	 * as the boot loader left them. A domain with a supply is switched off
+	 * as before: its regulator reference must not be dropped while enabled.
+	 */
+	if (pd->boot_on && !pd->supply) {
+		dev_dbg(scpsys->dev, "%s: left on, it was on at probe\n",
+			pd->genpd.name);
+		return;
+	}
 
 	if (pd->hwv_data) {
 		if (scpsys_hwv_domain_is_enable_done(pd))
