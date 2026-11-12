@@ -474,9 +474,27 @@ static bool mtk_wdt_running(struct watchdog_device *wdt_dev)
 	return watchdog_active(wdt_dev) || watchdog_hw_running(wdt_dev);
 }
 
+/*
+ * Keep a running watchdog counting through system sleep (pinged at suspend
+ * and resume): a sleep that hangs resets the system after the timeout (31 s
+ * at most). Only for test sleeps shorter than the timeout; the MediaTek
+ * kernel's kicker (aee/hangdet) also only reloads the counter at suspend.
+ */
+static bool keep_in_sleep;
+module_param(keep_in_sleep, bool, 0644);
+MODULE_PARM_DESC(keep_in_sleep,
+		 "Leave a running watchdog on through system sleep (default false; sleeps must be shorter than the timeout)");
+
 static int mtk_wdt_suspend(struct device *dev)
 {
 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
+
+	if (READ_ONCE(keep_in_sleep) && mtk_wdt_running(&mtk_wdt->wdt_dev)) {
+		mtk_wdt_ping(&mtk_wdt->wdt_dev);
+		dev_info(dev, "watchdog left running for the sleep (%u s)\n",
+			 mtk_wdt->wdt_dev.timeout);
+		return 0;
+	}
 
 	/*
 	 * Also stop a watchdog that the boot firmware left running and

@@ -78,6 +78,7 @@ struct mtk_spmi_pmic {
 	struct regmap *regmap;
 	const struct mtk_spmi_pmic_data *data;
 	struct irq_domain *domain;
+	int irq;			/* the RCS line of this slave */
 	struct mutex irq_lock;
 	unsigned long *irq_enable;
 	unsigned long *irq_enable_cur;
@@ -195,13 +196,25 @@ static void mtk_spmi_pmic_irq_sync_unlock(struct irq_data *d)
 	mutex_unlock(&pmic->irq_lock);
 }
 
+/*
+ * A wake-capable PMIC interrupt (the power key, a charger event) has to
+ * keep the RCS line of this slave, and with it the EINT behind the SPMI
+ * controller, armed through system sleep: pass the setting up.
+ */
+static int mtk_spmi_pmic_irq_set_wake(struct irq_data *d, unsigned int on)
+{
+	struct mtk_spmi_pmic *pmic = irq_data_get_irq_chip_data(d);
+
+	return irq_set_irq_wake(pmic->irq, on);
+}
+
 static const struct irq_chip mtk_spmi_pmic_irq_chip = {
 	.name = "mtk-spmi-pmic",
-	.flags = IRQCHIP_SKIP_SET_WAKE,
 	.irq_enable = mtk_spmi_pmic_irq_enable,
 	.irq_disable = mtk_spmi_pmic_irq_disable,
 	.irq_bus_lock = mtk_spmi_pmic_irq_lock,
 	.irq_bus_sync_unlock = mtk_spmi_pmic_irq_sync_unlock,
+	.irq_set_wake = mtk_spmi_pmic_irq_set_wake,
 };
 
 static void mtk_spmi_pmic_handle_group(struct mtk_spmi_pmic *pmic,
@@ -359,6 +372,7 @@ static int mtk_spmi_pmic_irq_init(struct mtk_spmi_pmic *pmic)
 	if (ret)
 		return ret;
 
+	pmic->irq = irq;
 	ret = devm_request_threaded_irq(dev, irq, NULL, mtk_spmi_pmic_irq_thread,
 					IRQF_ONESHOT, dev_name(dev), pmic);
 	if (ret)

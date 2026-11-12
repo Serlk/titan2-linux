@@ -1557,6 +1557,119 @@ static int __init clk_disable_unused(void)
 }
 late_initcall_sync(clk_disable_unused);
 
+/*
+ * System sleep with clk_ignore_unused: the boot loader's clocks that no
+ * driver holds stay on for good, and some of them keep resource requests to
+ * the SoC power manager (MediaTek SPM: its "cg_check" watches the infra
+ * clock gates) through the sleep. clk_sleep_gate_unused() gates, for one
+ * sleep, what clk_disable_unused() would have gated, restricted to clocks
+ * whose names start with one of @prefixes; clk_sleep_ungate_unused() opens
+ * exactly those again. Only plain gates are touched (no parent enabling, no
+ * runtime PM providers, no unprepare); the caller picks prefixes of
+ * always-on providers, as .is_enabled is read.
+ */
+#define CLK_SLEEP_GATED_MAX	256
+static struct clk_core *clk_sleep_gated[CLK_SLEEP_GATED_MAX];
+static unsigned int clk_sleep_ngated;
+
+static bool clk_sleep_name_match(const char *name, const char *list)
+{
+	const char *p = list;
+
+	while (p && *p) {
+		const char *end = strchrnul(p, ',');
+		size_t n = end - p;
+
+		if (n && !strncmp(name, p, n))
+			return true;
+		p = *end ? end + 1 : NULL;
+	}
+	return false;
+}
+
+static void clk_sleep_gate_subtree(struct clk_core *core, const char *prefixes,
+				   const char *exclude)
+{
+	struct clk_core *child;
+
+	hlist_for_each_entry(child, &core->children, child_node)
+		clk_sleep_gate_subtree(child, prefixes, exclude);
+
+	if (clk_sleep_ngated >= CLK_SLEEP_GATED_MAX)
+		return;
+	if (core->enable_count || core->rpm_enabled || !core->ops->disable ||
+	    !core->ops->enable || !core->ops->is_enabled ||
+	    core->flags & (CLK_IGNORE_UNUSED | CLK_IS_CRITICAL |
+			   CLK_OPS_PARENT_ENABLE))
+		return;
+	if (!clk_sleep_name_match(core->name, prefixes) ||
+	    (exclude && clk_sleep_name_match(core->name, exclude)))
+		return;
+	if (!core->ops->is_enabled(core->hw))
+		return;
+	core->ops->disable(core->hw);
+	clk_sleep_gated[clk_sleep_ngated++] = core;
+}
+
+/**
+ * clk_sleep_gate_unused() - gate the unused clocks left on, for a sleep
+ * @prefixes: comma separated clock name prefixes to consider
+ * @exclude: comma separated name prefixes to leave alone, or NULL
+ * @log: buffer for the names of the gated clocks, or NULL
+ * @len: size of @log
+ *
+ * Return: the number of clocks gated.
+ */
+unsigned int clk_sleep_gate_unused(const char *prefixes, const char *exclude,
+				   char *log, size_t len)
+{
+	struct clk_core *core;
+	unsigned long flags;
+	unsigned int i;
+	size_t n = 0;
+
+	if (!prefixes || !*prefixes)
+		return 0;
+
+	clk_prepare_lock();
+	flags = clk_enable_lock();
+	clk_sleep_ngated = 0;
+	hlist_for_each_entry(core, &clk_root_list, child_node)
+		clk_sleep_gate_subtree(core, prefixes, exclude);
+	hlist_for_each_entry(core, &clk_orphan_list, child_node)
+		clk_sleep_gate_subtree(core, prefixes, exclude);
+	clk_enable_unlock(flags);
+	clk_prepare_unlock();
+
+	if (log && len) {
+		log[0] = '\0';
+		for (i = 0; i < clk_sleep_ngated; i++)
+			n += scnprintf(log + n, len - n, "%s%s", i ? " " : "",
+				       clk_sleep_gated[i]->name);
+	}
+	return clk_sleep_ngated;
+}
+EXPORT_SYMBOL_GPL(clk_sleep_gate_unused);
+
+/**
+ * clk_sleep_ungate_unused() - open what clk_sleep_gate_unused() gated
+ */
+void clk_sleep_ungate_unused(void)
+{
+	unsigned long flags;
+
+	clk_prepare_lock();
+	flags = clk_enable_lock();
+	while (clk_sleep_ngated) {
+		struct clk_core *core = clk_sleep_gated[--clk_sleep_ngated];
+
+		core->ops->enable(core->hw);
+	}
+	clk_enable_unlock(flags);
+	clk_prepare_unlock();
+}
+EXPORT_SYMBOL_GPL(clk_sleep_ungate_unused);
+
 static int clk_core_determine_round_nolock(struct clk_core *core,
 					   struct clk_rate_request *req)
 {

@@ -31,6 +31,17 @@
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
+/*
+ * With power_off the panel is powered down whenever the display is off
+ * (system sleep, screen off), as the downstream kernel does, and initialized
+ * again from its reset on the next display on. Without it only the DCS
+ * sleep is used, the supplies stay on and the boot initialization is never
+ * repeated.
+ */
+static bool power_off;
+module_param(power_off, bool, 0644);
+MODULE_PARM_DESC(power_off, "Cut the panel power while the display is off (default: DCS sleep only)");
+
 #define TITAN2_MAIN_WIDTH	1440
 #define TITAN2_MAIN_HEIGHT	1440
 
@@ -263,6 +274,8 @@ static int titan2_main_unprepare(struct drm_panel *panel)
 
 	titan2_main_enter_sleep(ctx);
 	ctx->state = TITAN2_MAIN_SLEEP;
+	if (power_off)
+		titan2_main_power_off(ctx);
 
 	return 0;
 }

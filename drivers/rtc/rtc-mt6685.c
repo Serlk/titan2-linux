@@ -46,7 +46,6 @@
 #define MT6685_RTC_MCLK_PDN		BIT(4)
 #define MT6685_RTC_32K_CK_PDN		BIT(5)
 #define MT6685_SCK_TOP_INT_CON0		0x528
-#define MT6685_SCK_TOP_INT_CON0_SET	0x52a
 #define MT6685_INT_EN_RTC		BIT(0)
 #define MT6685_SCK_TOP_INT_STATUS0	0x534
 
@@ -261,6 +260,33 @@ static int mt6685_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 }
 
 /* called with rtc->lock held and the RTC clocks on */
+/*
+ * The RTC alarm reaches the SPMI RCS line only with the RTC bit of the
+ * chip's interrupt enable set. Downstream sets it as a read-modify-write of
+ * SCK_TOP_INT_CON0; a write to the SET mirror left it clear on the Titan 2
+ * (the alarm status rose, no interrupt), so it is written the same way and
+ * read back.
+ */
+static int mt6685_rtc_top_irq_enable(struct mt6685_rtc *rtc)
+{
+	unsigned int top;
+	int ret;
+
+	ret = regmap_update_bits(rtc->regmap, MT6685_SCK_TOP_INT_CON0,
+				 MT6685_INT_EN_RTC, MT6685_INT_EN_RTC);
+	if (ret)
+		return ret;
+	ret = regmap_read(rtc->regmap, MT6685_SCK_TOP_INT_CON0, &top);
+	if (ret)
+		return ret;
+	if (!(top & MT6685_INT_EN_RTC)) {
+		dev_warn_once(rtc->dev, "chip RTC interrupt enable stays clear (INT_CON0 %#x)\n",
+			      top);
+		return -EIO;
+	}
+	return 0;
+}
+
 static int mt6685_rtc_set_alarm_irq(struct mt6685_rtc *rtc, bool enable)
 {
 	u16 irqen;
@@ -271,13 +297,8 @@ static int mt6685_rtc_set_alarm_irq(struct mt6685_rtc *rtc, bool enable)
 		return ret;
 
 	if (enable) {
-		unsigned int top;
-
 		/* the RTC interrupt of the chip top must be on to get RCS */
-		ret = regmap_read(rtc->regmap, MT6685_SCK_TOP_INT_CON0, &top);
-		if (!ret && !(top & MT6685_INT_EN_RTC))
-			ret = regmap_write(rtc->regmap, MT6685_SCK_TOP_INT_CON0_SET,
-					   MT6685_INT_EN_RTC);
+		ret = mt6685_rtc_top_irq_enable(rtc);
 		if (ret)
 			return ret;
 		irqen |= RTC_IRQ_EN_AL;
@@ -459,6 +480,11 @@ static int mt6685_rtc_probe(struct platform_device *pdev)
 	ret = devm_pm_set_wake_irq(dev, rtc->irq);
 	if (ret)
 		dev_warn(dev, "no wake IRQ: %d\n", ret);
+
+	/* as downstream: the chip's RTC interrupt on from the start */
+	ret = mt6685_rtc_top_irq_enable(rtc);
+	if (ret)
+		dev_warn(dev, "chip RTC interrupt enable failed: %d\n", ret);
 
 	rtc->rtc_dev->ops = &mt6685_rtc_ops;
 	rtc->rtc_dev->range_min = mktime64(RTC_MIN_YEAR, 1, 1, 0, 0, 0);

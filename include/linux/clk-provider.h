@@ -1691,4 +1691,9 @@ static inline int of_clk_detect_critical(struct device_node *np, int index,
 
 void clk_gate_restore_context(struct clk_hw *hw);
 
+/* system sleep with clk_ignore_unused, see drivers/clk/clk.c */
+unsigned int clk_sleep_gate_unused(const char *prefixes, const char *exclude,
+				   char *log, size_t len);
+void clk_sleep_ungate_unused(void);
+
 #endif /* CLK_PROVIDER_H */

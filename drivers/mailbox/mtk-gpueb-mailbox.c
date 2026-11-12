@@ -169,8 +169,15 @@ static int mtk_gpueb_mbox_startup(struct mbox_chan *chan)
 
 	writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
 
+	/*
+	 * NO_SUSPEND: the GPU power domain is switched from the noirq phases
+	 * of system suspend (genpd), and its provider waits for the EB's
+	 * reply through this interrupt. The IRQ thread is not frozen, so the
+	 * reply is delivered with the other device interrupts disabled.
+	 */
 	ret = devm_request_threaded_irq(ch->ebm->dev, ch->ebm->irq, mtk_gpueb_mbox_isr,
-					mtk_gpueb_mbox_thread, IRQF_SHARED | IRQF_ONESHOT,
+					mtk_gpueb_mbox_thread,
+					IRQF_SHARED | IRQF_ONESHOT | IRQF_NO_SUSPEND,
 					ch->full_name, ch);
 	if (ret) {
 		dev_err(ch->ebm->dev, "Failed to request IRQ: %pe\n",
