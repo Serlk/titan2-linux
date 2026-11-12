@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the VCP (video companion processor, MMuP) for the ported
+ * downstream VCP driver (drivers/soc/mediatek/vcp). EXPERIMENTAL, not included by any board file
+ * yet; untested on hardware.
+ *
+ * The node follows the factory device tree (vcp@1ea00000 as the boot
+ * loader passes it to the kernel), transcribed without phandles. It replaces
+ * the bare /vcp of mt6878-titan2-lk-compat.dtsi: LK looks the node up by
+ * compatible and with vcp-support = <1> loads the VCP firmware from the
+ * vcp_<slot> partition into mblock-39-me_vcp_reserved, using
+ * vcp-sram-size, vcp-dram-size, core-nums, vcp-secure-dump-* and
+ * memorydump (titan2-docs: docs/lk-boot-requirements.md section 6; values
+ * as in the factory device tree). Only one node may carry "mediatek,vcp".
+ *
+ * Differences from the factory device tree: no "iommus"/"dma-ranges" (no MT6878 IOMMU driver
+ * on mainline; the shared memory is plain DMA memory below 4 GiB),
+ * no "mediatek,smi" (no MT6878 SMI driver). The vcp-iommu-* nodes are kept
+ * because the vcodec drivers take their DMA devices from them.
+ *
+ * Must be included after mt6878-titan2-lk-compat.dtsi (it deletes /vcp).
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+/ {
+	/delete-node/ vcp;
+
+	vcp@1ea00000 {
+		compatible = "mediatek,vcp";
+		status = "okay";
+		vcp-support = <1>;
+		reg = <0 0x1ea00000 0 0x40000>,
+		      <0 0x1ec24000 0 0x1000>,
+		      <0 0x1ec30000 0 0x1000>,
+		      <0 0x1ec32000 0 0x1000>,
+		      <0 0x1ec37000 0 0x1000>,
+		      <0 0x1ec40000 0 0x1000>,
+		      <0 0x1ec51000 0 0x1000>,
+		      <0 0x1ec52000 0 0x1000>,
+		      <0 0x1ec60000 0 0x40000>,
+		      <0 0x1eca5000 0 0x04>,
+		      <0 0x1e820000 0 0x04>,
+		      <0 0x1ecfb000 0 0x100>,
+		      <0 0x1ecfb100 0 0x04>,
+		      <0 0x1ecfb10c 0 0x04>,
+		      <0 0x1eca5020 0 0x04>,
+		      <0 0x1ecfc000 0 0x100>,
+		      <0 0x1ecfc100 0 0x04>,
+		      <0 0x1ecfc10c 0 0x04>,
+		      <0 0x1eca5024 0 0x04>,
+		      <0 0x1ecfd000 0 0x100>,
+		      <0 0x1ecfd100 0 0x04>,
+		      <0 0x1ecfd10c 0 0x04>,
+		      <0 0x1eca5028 0 0x04>,
+		      <0 0x1ecfe000 0 0x100>,
+		      <0 0x1ecfe100 0 0x04>,
+		      <0 0x1ecfe10c 0 0x04>,
+		      <0 0x1eca502c 0 0x04>,
+		      <0 0x1ecff000 0 0x100>,
+		      <0 0x1ecff100 0 0x04>,
+		      <0 0x1ecff10c 0 0x04>,
+		      <0 0x1eca5030 0 0x04>;
+		/*
+		 * In the factory device tree the vcp-iommu-vdec/-venc/-work/-sec nodes carry the
+		 * vcp_cfgreg/_core0/intc/pwr_ctl windows as their reg; they only
+		 * need a DMA device here, so they have no reg (and no unit
+		 * address) below.
+		 */
+		reg-names = "vcp_sram_base", "vcp_cfgreg", "vcp_cfgreg_core0",
+			    "vcp_intc_core0", "vcp_pwr_ctl", "vcp_cfgreg_core1",
+			    "vcp_bus_debug", "vcp_bus_tracker", "vcp_l1creg",
+			    "vcp_cfgreg_sec", "vcp_cfgreg_mmu",
+			    "mbox0_base", "mbox0_set", "mbox0_clr", "mbox0_init",
+			    "mbox1_base", "mbox1_set", "mbox1_clr", "mbox1_init",
+			    "mbox2_base", "mbox2_set", "mbox2_clr", "mbox2_init",
+			    "mbox3_base", "mbox3_set", "mbox3_clr", "mbox3_init",
+			    "mbox4_base", "mbox4_set", "mbox4_clr", "mbox4_init";
+		interrupts = <GIC_SPI 200 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 201 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 202 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 203 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 204 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 206 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "wdt", "reserved", "mbox0", "mbox1", "mbox2",
+				  "mbox3", "mbox4";
+		core-0 = "enable";
+		vcp-hwvoter = "disable";
+		vcp-sram-size = <0x40000>;
+		vcp-dram-size = <0x800000>;
+		core-nums = <0x01>;
+		twohart = <0x01>;
+		fmeter-ck = <0x07>;
+		fmeter-type = <0x02>;
+		mbox-count = <0x05>;
+		vcp-ee-enable = <0x04>;
+		bus-debug-num-ports = <0x0d>;
+		/* <IPI id, mailbox, size in words> */
+		send-table = <0x00 0x00 0x12
+			      0x02 0x01 0x02
+			      0x03 0x01 0x02
+			      0x09 0x01 0x02
+			      0x0b 0x01 0x02
+			      0x0d 0x01 0x02
+			      0x0f 0x01 0x04
+			      0x10 0x02 0x12
+			      0x12 0x02 0x04
+			      0x14 0x03 0x02
+			      0x15 0x03 0x02
+			      0x16 0x03 0x06
+			      0x17 0x03 0x02
+			      0x1c 0x04 0x04>;
+		/* <IPI id, mailbox, size in words, recv_opt> */
+		recv-table = <0x01 0x00 0x12 0x00
+			      0x02 0x01 0x01 0x01
+			      0x04 0x01 0x0a 0x00
+			      0x05 0x01 0x01 0x00
+			      0x06 0x01 0x02 0x00
+			      0x0a 0x01 0x02 0x00
+			      0x0c 0x01 0x02 0x00
+			      0x0e 0x01 0x02 0x00
+			      0x0f 0x01 0x04 0x01
+			      0x11 0x02 0x12 0x00
+			      0x13 0x02 0x04 0x00
+			      0x14 0x03 0x01 0x01
+			      0x18 0x03 0x0a 0x00
+			      0x19 0x03 0x06 0x00
+			      0x1a 0x03 0x01 0x00
+			      0x1b 0x03 0x02 0x00
+			      0x1d 0x04 0x04 0x00>;
+		vcp-secure-dump = <0x01>;
+		vcp-secure-dump-size = <0x200000>;
+		vcp-secure-dump-offset = <0x600000>;
+		vcp-sec-dump-key = "mediatek,me_vcp_reserved";
+		memorydump = <0x40000 0x20000 0x3f00 0x400 0x160000>;
+		/* <region id, size>: VDEC VENC LOGGER VDEC/VENC props+log GCE MMDVFS MMQOS SECDUMP */
+		vcp-mem-tbl = <0x00 0x78000
+			       0x01 0x12000
+			       0x02 0x180000
+			       0x03 0x400
+			       0x04 0x400
+			       0x05 0x400
+			       0x06 0x400
+			       0x07 0x100000
+			       0x08 0x1000
+			       0x09 0x1000
+			       0x0a 0x00>;
+		power-domains = <&spm MT6878_POWER_DOMAIN_MM_PROC_DORMANT>;
+		clocks = <&topckgen CLK_TOP_MMUP_SEL>,
+			 <&topckgen CLK_TOP_MAINPLL_D3>,
+			 <&topckgen CLK_TOP_TCK_26M_MX9>;
+		clock-names = "mmup-sel", "mmup-clk", "mmup-26m";
+	};
+
+	vcp-iommu-vdec {
+		compatible = "mediatek,vcp-io-vdec";
+		vcp-support = <2>;
+	};
+
+	vcp-iommu-venc {
+		compatible = "mediatek,vcp-io-venc";
+		vcp-support = <3>;
+	};
+
+	vcp-iommu-work {
+		compatible = "mediatek,vcp-io-work";
+		vcp-support = <4>;
+	};
+};

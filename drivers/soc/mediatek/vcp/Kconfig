@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Ported to mainline 7.2 for the Unihertz Titan 2 from the MediaTek GPL
+# device-modules tree (kernel_device_modules-6.1, drivers/misc/mediatek/vcp).
+#
+# Not hooked up yet: add to drivers/soc/mediatek/Kconfig
+#     source "drivers/soc/mediatek/vcp/Kconfig"
+# and to drivers/soc/mediatek/Makefile
+#     obj-y += vcp/
+
+config MTK_TINYSYS_VCP_SUPPORT
+	tristate "MediaTek tinysys VCP (video companion processor) driver"
+	depends on ARM64 && HAVE_ARM_SMCCC
+	depends on MTK_MBOX && MTK_TINYSYS_IPI
+	help
+	  Host side of the MT6878 VCP ("MMuP", RV55), the coprocessor that
+	  runs the factory video decoder/encoder firmware and MM DVFS: mailbox
+	  and IPI channels, shared memory table, power and reset through the
+	  SiP call, ready handshake and the feature/notifier API used by the
+	  vcodec drivers. The firmware itself is loaded by the boot loader
+	  (vcp-support = <1> in the "mediatek,vcp" node).
+	  The module is called mtk-vcp.
