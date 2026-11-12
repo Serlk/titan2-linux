@@ -40,6 +40,15 @@ config RPMSG_MTK_SCP
 	  remote processors in MediaTek platforms.
 	  This use IPI and IPC to communicate with remote processors.
 
+config RPMSG_MTK_MBOX
+	tristate "MediaTek tinysys mailbox rpmsg"
+	depends on MTK_MBOX
+	select RPMSG
+	help
+	  rpmsg devices and endpoints on top of the MediaTek tinysys mailbox,
+	  used by the downstream MediaTek IPI layer (MTK_TINYSYS_IPI). Ported from
+	  the MediaTek GPL device-modules tree (kernel_device_modules-6.1).
+
 config RPMSG_QCOM_GLINK
 	tristate
 	select RPMSG

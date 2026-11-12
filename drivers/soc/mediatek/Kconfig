@@ -115,4 +115,26 @@ config MTK_SOCINFO
 	  information about the SoC to the userspace including the
 	  manufacturer name, marketing name and soc name.
 
+config MTK_MBOX
+	tristate "MediaTek tinysys mailbox"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	help
+	  The MediaTek tinysys mailbox used by the downstream MT6878 kernel to talk
+	  to the SCP: per mailbox a block of SRAM slots and set/clear
+	  interrupt registers. Ported from the MediaTek GPL device-modules
+	  tree (kernel_device_modules-6.1).
+
+config MTK_TINYSYS_IPI
+	tristate "MediaTek tinysys IPI"
+	depends on RPMSG_MTK_MBOX
+	help
+	  The downstream MediaTek IPI layer on top of the tinysys mailbox (through
+	  rpmsg): numbered channels with send, receive and send-and-wait for
+	  the SCP. Ported from the MediaTek GPL device-modules tree
+	  (kernel_device_modules-6.1).
+
+source "drivers/soc/mediatek/scp/Kconfig"
+source "drivers/soc/mediatek/sensorhub/Kconfig"
+
 endmenu

@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the SCP sensor hub (accelerometer/gyroscope, magnetometer,
+ * light/proximity are driven by the SCP firmware), for the ported
+ * downstream scp, sensorhub and hf_manager drivers
+ * (drivers/soc/mediatek/scp, drivers/soc/mediatek/sensorhub). Applied by
+ * mt6878-unihertz-titan2-all-fb.dts
+ * (and so by -all).
+ *
+ * The SCP node follows the factory device tree (scp@1c400000 as the boot
+ * loader passes it to the kernel), transcribed without phandles. It replaces
+ * the bare /scp of mt6878-titan2-lk-compat.dtsi: LK looks the node up by
+ * compatible and reads scp-sram-size, secure-dump, secure-dump-size,
+ * scp-protect, scp-mem-tbl and memorydump from it (titan2-docs:
+ * docs/lk-boot-requirements.md section 6), and those keep the lk-compat
+ * values, which are the factory ones. Only one node may carry
+ * "mediatek,scp": both LK and the driver take the first match.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+/ {
+	/delete-node/ scp;
+
+	/*
+	 * The SCP (RV55, two cores). The firmware is loaded and set up by
+	 * the boot loader; the scp driver releases it through the SiP call as the
+	 * downstream driver does and then talks to it over mailboxes 0..3
+	 * (mbox-count = 4; mbox4 is listed as in the factory device tree node but not used).
+	 * The memory table is carved from mblock-28-reserve-memory-scp_share
+	 * (scp-mem-key). DVFS (the factory "mediatek,scp-dvfs" node) is not
+	 * ported: without it the driver leaves the SCP clock as LK set it.
+	 */
+	scp@1c400000 {
+		compatible = "mediatek,scp";
+		status = "okay";
+		reg = <0 0x1c400000 0 0x100000>,
+		      <0 0x1cb24000 0 0x1000>,
+		      <0 0x1cb21000 0 0x1000>,
+		      <0 0x1cb30000 0 0x1000>,
+		      <0 0x1cb40000 0 0x1000>,
+		      <0 0x1cb80000 0 0x1000>,
+		      <0 0x1cb60000 0 0x20000>,
+		      <0 0x1cb2a000 0 0x04>,
+		      <0 0x1cba0000 0 0x100>,
+		      <0 0x1cba0100 0 0x04>,
+		      <0 0x1cba010c 0 0x04>,
+		      <0 0x1cb2a020 0 0x04>,
+		      <0 0x1cbb0000 0 0x100>,
+		      <0 0x1cbb0100 0 0x04>,
+		      <0 0x1cbb010c 0 0x04>,
+		      <0 0x1cb2a024 0 0x04>,
+		      <0 0x1cbc0000 0 0x100>,
+		      <0 0x1cbc0100 0 0x04>,
+		      <0 0x1cbc010c 0 0x04>,
+		      <0 0x1cb2a028 0 0x04>,
+		      <0 0x1cbd0000 0 0x100>,
+		      <0 0x1cbd0100 0 0x04>,
+		      <0 0x1cbd010c 0 0x04>,
+		      <0 0x1cb2a02c 0 0x04>,
+		      <0 0x1cbe0000 0 0x100>,
+		      <0 0x1cbe0100 0 0x04>,
+		      <0 0x1cbe010c 0 0x04>,
+		      <0 0x1cb2a030 0 0x04>,
+		      <0 0x1cb50000 0 0x1000>;
+		reg-names = "scp_sram_base", "scp_cfgreg", "scp_clkreg", "scp_cfgreg_core0",
+			    "scp_cfgreg_core1", "scp_bus_tracker", "scp_l1creg", "scp_cfgreg_sec",
+			    "mbox0_base", "mbox0_set", "mbox0_clr", "mbox0_init",
+			    "mbox1_base", "mbox1_set", "mbox1_clr", "mbox1_init",
+			    "mbox2_base", "mbox2_set", "mbox2_clr", "mbox2_init",
+			    "mbox3_base", "mbox3_set", "mbox3_clr", "mbox3_init",
+			    "mbox4_base", "mbox4_set", "mbox4_clr", "mbox4_init",
+			    "scp_cfgreg_ap";
+		interrupts = <GIC_SPI 516 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 517 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 518 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 519 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 520 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 521 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 522 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1", "mbox2", "mbox3", "mbox4";
+		core-0 = "enable";
+		scp-hwvoter = "enable";
+		scp-sram-size = <0x100000>;
+		core-nums = <0x02>;
+		twohart = <0x01>;
+		mbox-count = <0x04>;
+		/* <IPI id, mailbox, size in slots> */
+		send-table = <0x00 0x00 0x0b
+		              0x0e 0x00 0x01
+		              0x0f 0x00 0x02
+		              0x10 0x00 0x01
+		              0x11 0x01 0x06
+		              0x12 0x01 0x02
+		              0x2e 0x01 0x01
+		              0x1d 0x01 0x10
+		              0x1f 0x01 0x07
+		              0x04 0x02 0x01
+		              0x05 0x02 0x02
+		              0x06 0x02 0x01
+		              0x21 0x02 0x10
+		              0x03 0x03 0x04
+		              0x25 0x03 0x01
+		              0x1a 0x03 0x09
+		              0x23 0x03 0x02
+		              0x27 0x03 0x04
+		              0x2b 0x03 0x04
+		              0x2d 0x03 0x01>;
+		#recv-cells-mode = <0x01>;
+		/* <IPI id, mailbox, size, recv_opt, lock, buf_full_opt, cb_ctx_opt> */
+		recv-table = <0x01 0x00 0x02 0x00 0x00 0x00 0x00
+		              0x02 0x00 0x1a 0x00 0x00 0x00 0x00
+		              0x24 0x00 0x01 0x00 0x00 0x00 0x00
+		              0x0f 0x00 0x01 0x01 0x00 0x00 0x00
+		              0x14 0x01 0x0a 0x00 0x00 0x00 0x00
+		              0x15 0x01 0x06 0x00 0x00 0x00 0x00
+		              0x16 0x01 0x01 0x00 0x00 0x00 0x00
+		              0x1e 0x01 0x02 0x00 0x00 0x00 0x00
+		              0x20 0x01 0x07 0x00 0x00 0x00 0x00
+		              0x05 0x02 0x01 0x01 0x00 0x00 0x00
+		              0x08 0x02 0x0a 0x00 0x00 0x00 0x00
+		              0x22 0x02 0x10 0x00 0x00 0x00 0x00
+		              0x07 0x03 0x02 0x00 0x00 0x00 0x00
+		              0x26 0x03 0x01 0x00 0x00 0x00 0x00
+		              0x1c 0x03 0x05 0x00 0x00 0x00 0x00
+		              0x1b 0x03 0x02 0x00 0x00 0x00 0x00
+		              0x23 0x03 0x04 0x01 0x00 0x00 0x00
+		              0x28 0x03 0x04 0x00 0x00 0x00 0x00
+		              0x2c 0x03 0x04 0x00 0x00 0x00 0x00>;
+		/* <feature id, frequency (MHz), core> */
+		scp-feature-tbl = <0x00 0x28 0x00
+		                   0x01 0x00 0x00
+		                   0x02 0x1a 0x00
+		                   0x03 0x00 0x00
+		                   0x04 0xc8 0x00
+		                   0x05 0x00 0x00
+		                   0x06 0x87 0x00
+		                   0x07 0x0a 0x00
+		                   0x08 0x50 0x00
+		                   0x09 0x2b 0x00
+		                   0x0a 0x16 0x00
+		                   0x0b 0x14 0x00
+		                   0x0c 0x64 0x00
+		                   0x0d 0xc8 0x00>;
+		scp-dram-region = "enable";
+		scp-protect = "enable";
+		secure-dump = "enable";
+		secure-dump-size = <0xe28000>;
+		scp-pm-notify = "enable";
+		scp-thermal-wq = "disable";
+		scp-low-pwr-dbg = "enable";
+		scp-cfgreg-ap-en = "enable";
+		scp-ipc-wa = "disable";
+		scp-mbrain = "enable";
+		scp-bus-tracker-ver = <0x02>;
+		scp-mem-key = "mediatek,reserve-memory-scp_share";
+		/* <memory id, size, alignment> */
+		scp-mem-tbl = <0x00 0x00 0x00
+		               0x01 0xca700 0x00
+		               0x02 0x100000 0x00
+		               0x03 0x180000 0x00
+		               0x05 0xa000 0x00
+		               0x07 0x1a000 0x00
+		               0x08 0x10000 0x00
+		               0x09 0x1000 0x00
+		               0x0a 0x2000 0x00
+		               0x0b 0x100 0x00
+		               0x0c 0x100 0x00
+		               0x13 0x200 0x00>;
+		memorydump = <0x100000 0xc4000 0x3c00 0x400 0xc60000>;
+		scp-resource-dump = "disable";
+		scp-supply-num = <0x03>;
+		scp-resource-reg-dump-cell = <0x02>;
+		scp-resource-reg-dump = <0x1c001818 0x04
+		                         0x1c00192c 0x04>;
+		awake-timeout = <0x7530>;
+	};
+
+	/*
+	 * The factory infracfg_ao node, which the scp driver binds by this compatible
+	 * for the SCP wake-up/IRQ registers and its exception dump (the
+	 * driver only maps it; the clock driver of
+	 * clock-controller@10001000 owns the block).
+	 */
+	scp-infracfg-ao {
+		compatible = "mediatek,infracfg_ao";
+		reg = <0 0x10001000 0 0x1000>;
+	};
+};

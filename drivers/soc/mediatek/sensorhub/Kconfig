@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0
+# Ported to mainline 7.2 for the Unihertz Titan 2 from the MediaTek GPL
+# device-modules tree (kernel_device_modules-6.1, drivers/misc/mediatek/sensor/2.0).
+
+config MTK_SENSOR_SUPPORT
+	tristate "MediaTek hf_manager sensor framework"
+	help
+	  The downstream MediaTek sensor framework core: /dev/hf_manager, the
+	  character device the sensor HAL (or a daemon) uses to enable
+	  sensors, set batching and read events, and /proc/hf_manager.
+	  The module is called hf_manager.
+
+config MTK_SENSORHUB
+	tristate "MediaTek SCP sensor hub"
+	depends on MTK_SENSOR_SUPPORT && MTK_TINYSYS_SCP_SUPPORT
+	help
+	  The sensor hub client of the downstream MediaTek kernel: the sensors are
+	  driven by the SCP firmware, this module talks to it over the SCP
+	  IPI channels and shared memory and registers them with hf_manager.
+	  The module is called sensorhub.
+
+config MTK_SENSORHUB_IIO
+	tristate "IIO devices for the sensors of the MediaTek SCP sensor hub"
+	depends on MTK_SENSOR_SUPPORT && IIO
+	help
+	  An in-kernel hf_manager client that exposes the accelerometer,
+	  gyroscope, magnetometer, ambient light and proximity sensors the
+	  sensor hub lists as IIO devices (hub-accel, hub-gyro, hub-magn,
+	  hub-light, hub-prox), enabled at the hub while they are read.
+	  For iio-sensor-proxy and other IIO clients.
+	  The module is called mtk-hf-iio.

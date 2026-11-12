@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0
+# Ported to mainline 7.2 for the Unihertz Titan 2 from the MediaTek GPL
+# device-modules tree (kernel_device_modules-6.1, drivers/misc/mediatek/scp).
+
+config MTK_TINYSYS_SCP_SUPPORT
+	tristate "MediaTek tinysys SCP (RV55) driver"
+	depends on MTK_TINYSYS_IPI && OF_RESERVED_MEM && HAVE_ARM_SMCCC
+	help
+	  Driver for the MediaTek SCP (System Companion Processor) as used by
+	  the downstream MT6878 kernel: mailbox/IPI channels, ready notifier,
+	  awake handshake, reserved memory table and recovery. The SCP
+	  firmware is loaded and set up by the boot loader; this driver only
+	  releases it, as the downstream one does.
+	  The module is called scp.
+
+config MTK_TINYSYS_SCP_LOGGER_SUPPORT
+	bool "SCP logger support"
+	depends on MTK_TINYSYS_SCP_SUPPORT
+	help
+	  SCP log buffer in the SCP reserved memory, read through
+	  /dev/scp and the scp sysfs attributes.
+
+config MTK_TINYSYS_SCP_DEBUG_SUPPORT
+	bool "SCP debug support"
+	depends on MTK_TINYSYS_SCP_SUPPORT
+	help
+	  Debug attributes of the downstream SCP driver (register dumps, reset
+	  by command). If unsure, say N.

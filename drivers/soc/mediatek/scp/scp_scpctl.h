@@ -1,0 +1,34 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (c) 2020 MediaTek Inc.
+ *
+ * Ported to mainline 7.2 for the Unihertz Titan 2 from the MediaTek GPL
+ * device-modules tree (kernel_device_modules-6.1).
+ */
+
+#ifndef __SCP_SCPCTL_H__
+#define __SCP_SCPCTL_H__
+
+#include <linux/types.h>
+
+enum SCPCTL_TYPE_E {
+	SCPCTL_TYPE_TMON,
+	SCPCTL_STRESS_TEST,
+};
+
+enum SCPCTL_OP_E {
+	SCPCTL_OP_INACTIVE = 0,
+	SCPCTL_OP_ACTIVE,
+};
+
+struct scpctl_cmd_s {
+	uint32_t	type;
+	uint32_t	op;
+};
+
+extern struct device_attribute dev_attr_scpctl;
+extern bool scp_need_aed_dump;
+extern bool scp_reset_stress;
+#endif /* __SCP_SCPCTL_H__ */
+
+

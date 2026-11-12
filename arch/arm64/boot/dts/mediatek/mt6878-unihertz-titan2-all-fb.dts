@@ -2,8 +2,8 @@
 /*
  * Titan 2: every bring-up stage at once, except the mediatek-drm display:
  * the screen stays on simplefb and the LK frame trigger. CPU frequency and
- * thermal, cpuidle, the GPU, connectivity (Wi-Fi/BT), audio and the modem
- * driver, on top of the power-domain stage.
+ * thermal, cpuidle, the GPU, connectivity (Wi-Fi/BT), audio, the modem
+ * driver and the SCP sensor hub, on top of the power-domain stage.
  *
  * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  */
@@ -14,6 +14,7 @@
 #include "mt6878-unihertz-titan2-wifi.dtsi"
 #include "mt6878-unihertz-titan2-audio.dtsi"
 #include "mt6878-unihertz-titan2-modem.dtsi"
+#include "mt6878-unihertz-titan2-sensors.dtsi"
 
 /*
  * Connectivity all the way: CONNINFRA, the Wi-Fi driver (mt7921-soc starts
