@@ -14,6 +14,7 @@
 #include <linux/nvmem-provider.h>
 #include <linux/mailbox_client.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -24,8 +25,11 @@
 #include <linux/pm_opp.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/spinlock.h>
 #include <linux/string_choices.h>
+#include <linux/thermal.h>
 #include <linux/units.h>
+#include <linux/workqueue.h>
 
 #define GPR_LP_STATE		0x0028
 #define   EB_ON_SUSPEND		0x0
@@ -167,6 +171,17 @@
 #define GPUFREQ_PWR_COUNT_SLACK		4
 
 /*
+ * When the OPP could not be restored on power-on, try again this often, this
+ * many times. Genpd, the OPP core and devfreq all skip a request for the state
+ * they believe is set, so nothing else would send it again.
+ */
+#define GPUFREQ_PERF_RETRY_MS		20
+#define GPUFREQ_PERF_RETRIES		10
+
+/* no command outstanding on the GPUFreq channel */
+#define GPUFREQ_NO_CMD			(-1)
+
+/*
  * This enum is part of the ABI of the GPUEB firmware. Don't change the
  * numbering, as you would wreak havoc.
  */
@@ -278,6 +293,24 @@ struct mtk_mfg_opp_entry {
 	__le32 power_mw;
 } __packed;
 
+/**
+ * struct mtk_mfg_mbox - one mailbox channel to the EB
+ * @cl: mailbox client
+ * @rx_done: completed when a reply was taken into @rx_data
+ * @mfg: driver instance
+ * @ch: mailbox channel
+ * @tx_data: message being sent, kept off the stack
+ * @rx_data: last reply taken
+ * @lock: protects @rx_data, @expect_cmd and @stale_cmd against the RX callback
+ * @expect_cmd: command whose reply is waited for, GPUFREQ_NO_CMD if none
+ * @stale_cmd: command that was given up on and may still be answered,
+ *	GPUFREQ_NO_CMD if none
+ * @warned_echo: a reply for another command was taken once already
+ *
+ * The EB echoes the command number in its GPUFreq replies (downstream logs
+ * it as the received command). A reply that arrives after its command was
+ * given up on must not be taken as the reply to the next command.
+ */
 struct mtk_mfg_mbox {
 	struct mbox_client cl;
 	struct completion rx_done;
@@ -285,6 +318,10 @@ struct mtk_mfg_mbox {
 	struct mbox_chan *ch;
 	void *tx_data;
 	void *rx_data;
+	spinlock_t lock;
+	int expect_cmd;
+	int stale_cmd;
+	bool warned_echo;
 };
 
 struct mtk_mfg {
@@ -311,16 +348,30 @@ struct mtk_mfg {
 	struct mtk_mfg_mbox *gf_mbox;
 	struct mtk_mfg_mbox *slp_mbox;
 	const struct mtk_mfg_variant *variant;
+	/* serialises the EB requests of the genpd callbacks and @perf_work */
+	struct mutex lock;
+	/* the GPU is on as far as the EB was asked; under @lock */
+	bool gpu_on;
+	/* performance state last asked for; under @lock */
+	unsigned int perf_state;
+	/* @perf_state could not be applied on power-on; under @lock */
+	bool perf_pending;
+	unsigned int perf_retries;
+	struct delayed_work perf_work;
 };
 
 /**
  * struct mtk_mfg_gf_layout - offsets in the GPUFreq shared status
+ * @freq_gpu: current GPU frequency in kHz
+ * @freq_stk: current Stack frequency in kHz
  * @pwr_ctl: whether the EB takes power control requests (0 if not used)
  * @shader_present: bitmask of the usable shader cores
  * @opp_table_gpu: start of the working GPU OPP table
  * @opp_table_stk: start of the working Stack OPP table
  */
 struct mtk_mfg_gf_layout {
+	u16 freq_gpu;
+	u16 freq_stk;
 	u16 pwr_ctl;
 	u16 shader_present;
 	u16 opp_table_gpu;
@@ -351,12 +402,17 @@ struct mtk_mfg_variant {
 };
 
 static const struct mtk_mfg_gf_layout mtk_mfg_mt8196_layout = {
+	.freq_gpu = GF_REG_FREQ_OUT_GPU,
+	.freq_stk = GF_REG_FREQ_OUT_STK,
 	.shader_present = GF_REG_SHADER_PRESENT,
 	.opp_table_gpu = GF_REG_OPP_TABLE_GPU,
 	.opp_table_stk = GF_REG_OPP_TABLE_STK,
 };
 
 static const struct mtk_mfg_gf_layout mtk_mfg_mt6878_layout = {
+	/* CON1/fmeter fields are debug snapshots, not live DVFS status. */
+	.freq_gpu = GF_REG_FREQ_CUR_GPU,
+	.freq_stk = GF_REG_FREQ_CUR_STK,
 	.pwr_ctl = MT6878_GF_REG_PWR_CTL,
 	.shader_present = MT6878_GF_REG_SHADER_PRESENT,
 	.opp_table_gpu = MT6878_GF_REG_OPP_TABLE_GPU,
@@ -392,7 +448,7 @@ static unsigned long mtk_mfg_recalc_rate_gpu(struct clk_hw *hw,
 {
 	struct mtk_mfg *mfg = container_of(hw, struct mtk_mfg, clk_core_hw);
 
-	return readl(mfg->shared_mem + GF_REG_FREQ_OUT_GPU) * HZ_PER_KHZ;
+	return readl(mfg->shared_mem + mfg->variant->layout->freq_gpu) * HZ_PER_KHZ;
 }
 
 static int mtk_mfg_determine_rate(struct clk_hw *hw,
@@ -419,7 +475,7 @@ static unsigned long mtk_mfg_recalc_rate_stack(struct clk_hw *hw,
 {
 	struct mtk_mfg *mfg = container_of(hw, struct mtk_mfg, clk_stack_hw);
 
-	return readl(mfg->shared_mem + GF_REG_FREQ_OUT_STK) * HZ_PER_KHZ;
+	return readl(mfg->shared_mem + mfg->variant->layout->freq_stk) * HZ_PER_KHZ;
 }
 
 static const struct clk_ops mtk_mfg_clk_gpu_ops = {
@@ -537,6 +593,22 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
 	return 0;
 }
 
+/*
+ * End the wait for the outstanding GPUFreq reply. With @gave_up, the reply
+ * may still come: remember its command so the RX callback drops it.
+ */
+static void mtk_mfg_ipi_done(struct mtk_mfg *mfg, bool gave_up)
+{
+	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
+	unsigned long flags;
+
+	spin_lock_irqsave(&gf->lock, flags);
+	if (gave_up)
+		gf->stale_cmd = gf->expect_cmd;
+	gf->expect_cmd = GPUFREQ_NO_CMD;
+	spin_unlock_irqrestore(&gf->lock, flags);
+}
+
 /**
  * __mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
  * @mfg: pointer to this driver instance's private &struct mtk_mfg
@@ -551,11 +623,15 @@ static int mtk_mfg_ipi_send(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 {
 	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
 	struct device *dev = &mfg->pdev->dev;
+	unsigned long flags;
 	int ret;
 
 	BUILD_BUG_ON(sizeof(*msg) > GPUEB_MBOX_MAX_RX_SIZE);
 
 	msg->magic = mfg->ipi_magic;
+	dev_dbg(dev, "GPUFreq send cmd=%u target=%u data=%u\n",
+		le32_to_cpu(msg->cmd), le32_to_cpu(msg->target),
+		le32_to_cpu(msg->u.oppidx));
 
 	/*
 	 * The mailbox core holds on to the message until the EB took it, which
@@ -564,11 +640,15 @@ static int mtk_mfg_ipi_send(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 	memcpy(gf->tx_data, msg, sizeof(*msg));
 
 	/* a reply that came after an earlier timeout isn't the answer to this */
+	spin_lock_irqsave(&gf->lock, flags);
 	reinit_completion(&gf->rx_done);
+	gf->expect_cmd = le32_to_cpu(msg->cmd);
+	spin_unlock_irqrestore(&gf->lock, flags);
 
 	ret = mbox_send_message(gf->ch, gf->tx_data);
 	if (ret < 0) {
 		dev_err(dev, "Cannot send GPUFreq IPI command: %pe\n", ERR_PTR(ret));
+		mtk_mfg_ipi_done(mfg, false);
 		return ret;
 	}
 
@@ -580,11 +660,17 @@ static int mtk_mfg_ipi_wait(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg,
 			    unsigned long timeout)
 {
 	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
+	unsigned long flags;
 
 	if (!wait_for_completion_timeout(&gf->rx_done, timeout))
 		return -ETIMEDOUT;
 
+	spin_lock_irqsave(&gf->lock, flags);
 	memcpy(msg, gf->rx_data, sizeof(*msg));
+	spin_unlock_irqrestore(&gf->lock, flags);
+	dev_dbg(&mfg->pdev->dev, "GPUFreq reply cmd=%u target=%u ret=%d\n",
+		le32_to_cpu(msg->cmd), le32_to_cpu(msg->target),
+		(int)le32_to_cpu(msg->u.return_value));
 
 	return 0;
 }
@@ -602,6 +688,7 @@ static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
 
 	ret = mtk_mfg_ipi_wait(mfg, msg,
 			       msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS));
+	mtk_mfg_ipi_done(mfg, ret != 0);
 	if (ret) {
 		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
 		return ret;
@@ -681,6 +768,7 @@ static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
 	struct device *dev = &mfg->pdev->dev;
 	unsigned long end = jiffies + msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS);
 	struct mtk_mfg_ipi_msg msg = {};
+	bool stale_same;
 	int before, after;
 	int ret;
 
@@ -689,6 +777,15 @@ static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
 
 	msg.cmd = CMD_POWER_CONTROL;
 	msg.u.power_state = on ? 1 : 0;
+
+	/*
+	 * An earlier power request that was taken as done without its reply
+	 * may be answered now; the reply can't be told apart from this one's
+	 * by its command, only by the count it carries.
+	 */
+	spin_lock_irq(&mfg->gf_mbox->lock);
+	stale_same = mfg->gf_mbox->stale_cmd == CMD_POWER_CONTROL;
+	spin_unlock_irq(&mfg->gf_mbox->lock);
 
 	ret = mtk_mfg_ipi_send(mfg, &msg);
 	if (ret)
@@ -704,16 +801,30 @@ static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
 				       msecs_to_jiffies(GPUFREQ_PWR_POLL_MS));
 		if (!ret) {
 			*count = msg.u.return_value;
+			if (stale_same && *count >= 0 && *count != after) {
+				/* the late reply to the earlier request */
+				dev_dbg(dev, "dropped a late power reply, count %d\n",
+					*count);
+				spin_lock_irq(&mfg->gf_mbox->lock);
+				mfg->gf_mbox->stale_cmd = GPUFREQ_NO_CMD;
+				spin_unlock_irq(&mfg->gf_mbox->lock);
+				stale_same = false;
+				continue;
+			}
+			mtk_mfg_ipi_done(mfg, false);
 			return 0;
 		}
 		*count = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
 		if (*count == after) {
 			dev_dbg(dev, "EB switched the GPU %s without a reply, count %d\n",
 				str_on_off(on), *count);
+			/* its reply may still come: don't take it for the next one's */
+			mtk_mfg_ipi_done(mfg, true);
 			return 0;
 		}
 	} while (time_before(jiffies, end));
 
+	mtk_mfg_ipi_done(mfg, true);
 	dev_err(dev, "No reply to GPUFreq IPI command %u, count %d\n",
 		le32_to_cpu(msg.cmd), *count);
 
@@ -847,7 +958,6 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
 		}
 		mfg->gpu_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
 		mfg->gpu_opps[i].u_volt = e.voltage_core * 10;
-		mfg->gpu_opps[i].level = i;
 		if (i < mfg->variant->turbo_below)
 			mfg->gpu_opps[i].turbo = true;
 	}
@@ -862,7 +972,6 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
 		}
 		mfg->stack_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
 		mfg->stack_opps[i].u_volt = e.voltage_core * 10;
-		mfg->stack_opps[i].level = i;
 		if (i < mfg->variant->turbo_below)
 			mfg->stack_opps[i].turbo = true;
 	}
@@ -929,10 +1038,45 @@ static const struct mtk_mfg_variant mtk_mfg_mt6878_variant = {
 static void mtk_mfg_mbox_rx_callback(struct mbox_client *cl, void *mssg)
 {
 	struct mtk_mfg_mbox *mb = container_of(cl, struct mtk_mfg_mbox, cl);
+	struct device *dev = cl->dev;
+	unsigned long flags;
+	int cmd;
 
-	if (mb->rx_data)
-		mb->rx_data = memcpy(mb->rx_data, mssg, GPUEB_MBOX_MAX_RX_SIZE);
+	if (!mb->rx_data) {
+		complete(&mb->rx_done);
+		return;
+	}
+
+	cmd = le32_to_cpu(((struct mtk_mfg_ipi_msg *)mssg)->cmd);
+
+	spin_lock_irqsave(&mb->lock, flags);
+	if (mb->expect_cmd == GPUFREQ_NO_CMD) {
+		/* nobody waits: a reply to a command that was given up on */
+		if (cmd == mb->stale_cmd)
+			mb->stale_cmd = GPUFREQ_NO_CMD;
+		spin_unlock_irqrestore(&mb->lock, flags);
+		dev_dbg(dev, "dropped a GPUFreq reply to command %d, nothing outstanding\n",
+			cmd);
+		return;
+	}
+	if (cmd != mb->expect_cmd && cmd == mb->stale_cmd) {
+		int expect = mb->expect_cmd;
+
+		mb->stale_cmd = GPUFREQ_NO_CMD;
+		spin_unlock_irqrestore(&mb->lock, flags);
+		dev_dbg(dev, "dropped a late GPUFreq reply to command %d, waiting for %d\n",
+			cmd, expect);
+		return;
+	}
+	if (cmd != mb->expect_cmd && !mb->warned_echo) {
+		/* not seen on MT6878; keep the old behaviour, but say so */
+		mb->warned_echo = true;
+		dev_warn(dev, "GPUFreq reply for command %d while waiting for %d\n",
+			 cmd, mb->expect_cmd);
+	}
+	memcpy(mb->rx_data, mssg, GPUEB_MBOX_MAX_RX_SIZE);
 	complete(&mb->rx_done);
+	spin_unlock_irqrestore(&mb->lock, flags);
 }
 
 static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
@@ -942,6 +1086,7 @@ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
 	struct dev_pm_opp_data *go = mfg->gpu_opps;
 	struct dev_pm_opp_data *prev_o = NULL;
 	struct dev_pm_opp_data *o;
+	struct dev_pm_opp_data data;
 	int i, ret;
 
 	for (i = mfg->num_gpu_opps - 1; i >= 0; i--) {
@@ -963,10 +1108,16 @@ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
 		if (prev_o && prev_o->freq == o->freq)
 			continue;
 
-		ret = dev_pm_opp_add_dynamic(dev, o);
+		/*
+		 * Firmware indices run from fastest to slowest. Genpd levels
+		 * increase with performance, and zero means no performance vote.
+		 */
+		data = *o;
+		data.level = mfg->num_gpu_opps - i;
+		ret = dev_pm_opp_add_dynamic(dev, &data);
 		if (ret) {
 			dev_err(dev, "Failed to add OPP level %u from PD %s: %pe\n",
-				o->level, pd->name, ERR_PTR(ret));
+				data.level, pd->name, ERR_PTR(ret));
 			dev_pm_opp_remove_all_dynamic(dev);
 			return ret;
 		}
@@ -981,10 +1132,71 @@ static void mtk_mfg_detach_dev(struct generic_pm_domain *pd, struct device *dev)
 	dev_pm_opp_remove_all_dynamic(dev);
 }
 
+/* called with mfg->lock held */
+static int mtk_mfg_apply_performance(struct mtk_mfg *mfg, unsigned int state)
+{
+	unsigned int idx;
+	int ret;
+
+	lockdep_assert_held(&mfg->lock);
+
+	if (state > mfg->num_gpu_opps)
+		return -EINVAL;
+
+	/* No vote uses the lowest OPP; keep zero out of the live OPP levels. */
+	idx = mfg->num_gpu_opps - max(state, 1U);
+	ret = mtk_mfg_set_oppidx(mfg, idx);
+	dev_dbg(&mfg->pdev->dev,
+		"pstate=%u idx=%u ret=%d shared_idx=%u freq=%lu power=%u active=%u\n",
+		state, idx, ret, readl(mfg->shared_mem + GF_REG_GPU_OPP_IDX),
+		mtk_mfg_recalc_rate_gpu(&mfg->clk_core_hw, 0),
+		readl(mfg->shared_mem + GF_REG_POWER_COUNT),
+		readl(mfg->shared_mem + GF_REG_ACTIVE_COUNT));
+	if (!ret) {
+		mfg->perf_state = state;
+		mfg->perf_pending = false;
+	}
+	return ret;
+}
+
+/*
+ * The OPP asked for could not be restored when the GPU was switched on. The
+ * domain stays on (failing the power-on would leave the GPU's runtime PM in
+ * error for good), and the request is sent again from here until it is taken.
+ */
+static void mtk_mfg_perf_work(struct work_struct *work)
+{
+	struct mtk_mfg *mfg = container_of(to_delayed_work(work), struct mtk_mfg,
+					   perf_work);
+	struct device *dev = &mfg->pdev->dev;
+	int ret;
+
+	mutex_lock(&mfg->lock);
+	if (!mfg->gpu_on || !mfg->perf_pending)
+		goto out;
+
+	ret = mtk_mfg_apply_performance(mfg, mfg->perf_state);
+	if (!ret) {
+		dev_info(dev, "OPP for performance state %u restored after %u retries\n",
+			 mfg->perf_state, mfg->perf_retries + 1);
+		goto out;
+	}
+
+	if (++mfg->perf_retries < GPUFREQ_PERF_RETRIES)
+		queue_delayed_work(system_freezable_wq, &mfg->perf_work,
+				   msecs_to_jiffies(GPUFREQ_PERF_RETRY_MS << mfg->perf_retries));
+	else
+		dev_err(dev, "OPP for performance state %u not restored: %pe\n",
+			mfg->perf_state, ERR_PTR(ret));
+out:
+	mutex_unlock(&mfg->lock);
+}
+
 static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
 				   unsigned int state)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret = 0;
 
 	/*
 	 * pmdomain core intentionally sets a performance state before turning
@@ -993,15 +1205,36 @@ static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
 	 * powered on. To do this, return cleanly without taking action, and
 	 * defer setting what pmdomain core set in mtk_mfg_power_on.
 	 */
-	if (mfg->pd.status != GENPD_STATE_ON)
-		return 0;
+	mutex_lock(&mfg->lock);
+	if (mfg->pd.status != GENPD_STATE_ON || !mfg->gpu_on) {
+		/* applied by mtk_mfg_power_on(), from pd->performance_state */
+		mfg->perf_state = state;
+		goto out;
+	}
 
-	return mtk_mfg_set_oppidx(mfg, state);
+	ret = mtk_mfg_apply_performance(mfg, state);
+out:
+	mutex_unlock(&mfg->lock);
+	return ret;
 }
+
+static int __mtk_mfg_power_on(struct mtk_mfg *mfg);
 
 static int mtk_mfg_power_on(struct generic_pm_domain *pd)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret;
+
+	mutex_lock(&mfg->lock);
+	ret = __mtk_mfg_power_on(mfg);
+	mutex_unlock(&mfg->lock);
+
+	return ret;
+}
+
+static int __mtk_mfg_power_on(struct mtk_mfg *mfg)
+{
+	struct generic_pm_domain *pd = &mfg->pd;
 	int ret;
 
 	ret = regulator_bulk_enable(mfg->variant->num_regulators,
@@ -1028,13 +1261,26 @@ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
 	ret = mtk_mfg_power_control(mfg, true);
 	if (ret)
 		goto err_eb_off;
+	mfg->gpu_on = true;
 
 	/* Don't try to set a OPP in probe before OPPs have been read from EB */
 	if (mfg->gpu_opps) {
 		/* The aforementioned deferred setting of pmdomain's state */
-		ret = mtk_mfg_set_oppidx(mfg, pd->performance_state);
-		if (ret)
-			dev_warn(&mfg->pdev->dev, "Failed to set oppidx in %s\n", __func__);
+		mfg->perf_state = pd->performance_state;
+		ret = mtk_mfg_apply_performance(mfg, mfg->perf_state);
+		if (ret) {
+			/*
+			 * Genpd, the OPP core and devfreq take this state as
+			 * set and won't ask for it again: retry from a work.
+			 */
+			dev_warn(&mfg->pdev->dev,
+				 "Failed to restore OPP for performance state %u: %pe, retrying\n",
+				 mfg->perf_state, ERR_PTR(ret));
+			mfg->perf_pending = true;
+			mfg->perf_retries = 0;
+			queue_delayed_work(system_freezable_wq, &mfg->perf_work,
+					   msecs_to_jiffies(GPUFREQ_PERF_RETRY_MS));
+		}
 	}
 
 	return 0;
@@ -1051,9 +1297,22 @@ err_disable_regulators:
 	return ret;
 }
 
+static int __mtk_mfg_power_off(struct mtk_mfg *mfg);
+
 static int mtk_mfg_power_off(struct generic_pm_domain *pd)
 {
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+	int ret;
+
+	mutex_lock(&mfg->lock);
+	ret = __mtk_mfg_power_off(mfg);
+	mutex_unlock(&mfg->lock);
+
+	return ret;
+}
+
+static int __mtk_mfg_power_off(struct mtk_mfg *mfg)
+{
 	struct device *dev = &mfg->pdev->dev;
 	int ret;
 
@@ -1062,6 +1321,9 @@ static int mtk_mfg_power_off(struct generic_pm_domain *pd)
 		dev_err(dev, "power_control failed: %pe\n", ERR_PTR(ret));
 		return ret;
 	}
+	/* a pending OPP retry is dropped: power-on applies the state again */
+	mfg->gpu_on = false;
+	mfg->perf_pending = false;
 
 	ret = mtk_mfg_eb_off(mfg);
 	if (ret) {
@@ -1100,6 +1362,9 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
 
 	gf->mfg = mfg;
 	init_completion(&gf->rx_done);
+	spin_lock_init(&gf->lock);
+	gf->expect_cmd = GPUFREQ_NO_CMD;
+	gf->stale_cmd = GPUFREQ_NO_CMD;
 	gf->cl.dev = dev;
 	gf->cl.rx_callback = mtk_mfg_mbox_rx_callback;
 	gf->cl.tx_tout = GPUEB_TIMEOUT_US / USEC_PER_MSEC;
@@ -1304,6 +1569,49 @@ static int mtk_mfg_init_nvmem_provider(struct mtk_mfg *mfg)
 	return 0;
 }
 
+/*
+ * GPU temperature as the EB keeps it in the shared status: degrees Celsius,
+ * -274 before the first measurement (the downstream
+ * gpufreq_get_cur_temperature() reads the same word). The EB measures while
+ * the GPU is on; with the GPU off the last value stays, which a passive trip
+ * can live with. Registered only when a thermal zone in the device tree
+ * names this node as its sensor.
+ */
+static int mtk_mfg_get_temp(struct thermal_zone_device *tz, int *temp)
+{
+	struct mtk_mfg *mfg = thermal_zone_device_priv(tz);
+	int t;
+
+	if (!mfg->gf_ready)
+		return -EAGAIN;
+
+	t = (int)readl(mfg->shared_mem + GF_REG_TEMP_RAW);
+	if (t < -40 || t > 150)
+		return -EAGAIN;
+
+	*temp = t * MILLIDEGREE_PER_DEGREE;
+
+	return 0;
+}
+
+static const struct thermal_zone_device_ops mtk_mfg_thermal_ops = {
+	.get_temp = mtk_mfg_get_temp,
+};
+
+static void mtk_mfg_init_thermal(struct mtk_mfg *mfg)
+{
+	struct device *dev = &mfg->pdev->dev;
+	struct thermal_zone_device *tz;
+
+	tz = devm_thermal_of_zone_register(dev, 0, mfg, &mtk_mfg_thermal_ops);
+	if (IS_ERR(tz)) {
+		if (PTR_ERR(tz) != -ENODEV)
+			dev_warn(dev, "GPU thermal zone not registered: %pe\n", tz);
+		return;
+	}
+	dev_info(dev, "GPU thermal zone from the EB temperature\n");
+}
+
 static int mtk_mfg_probe(struct platform_device *pdev)
 {
 	struct mtk_mfg *mfg;
@@ -1317,6 +1625,8 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 
 	mfg->pdev = pdev;
 	mfg->variant = data;
+	mutex_init(&mfg->lock);
+	INIT_DELAYED_WORK(&mfg->perf_work, mtk_mfg_perf_work);
 
 	dev_set_drvdata(dev, mfg);
 
@@ -1458,10 +1768,13 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 		goto err_power_off;
 	}
 
+	mtk_mfg_init_thermal(mfg);
+
 	return 0;
 
 err_power_off:
 	mtk_mfg_power_off(&mfg->pd);
+	cancel_delayed_work_sync(&mfg->perf_work);
 err_free_mbox:
 	mtk_mfg_free_mbox(mfg);
 err_remove_genpd:
@@ -1489,6 +1802,7 @@ static void mtk_mfg_remove(struct platform_device *pdev)
 		on = mtk_mfg_is_powered_on(mfg);
 	if (on)
 		mtk_mfg_power_off(&mfg->pd);
+	cancel_delayed_work_sync(&mfg->perf_work);
 
 	of_genpd_del_provider(pdev->dev.of_node);
 	pm_genpd_remove(&mfg->pd);

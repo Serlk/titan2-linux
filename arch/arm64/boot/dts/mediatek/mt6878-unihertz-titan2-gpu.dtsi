@@ -15,5 +15,53 @@
 };
 
 &gpu {
+	/*
+	 * Energy model for the devfreq cooling device (P = C * V^2 * f, in
+	 * uW = C * mV^2 * MHz / 10^6). From the MT6878 GPUFreq reference point
+	 * in the GPL kernel_device_modules-6.1
+	 * drivers/gpu/mediatek/gpufreq/v2/include/gpufreq_mt6878.h:
+	 * GPU_DYN_REF_POWER 1693 mW at 1400 MHz and 0.9125 V, the same model
+	 * as __gpufreq_get_dyn_pgpu() in gpufreq_mt6878.c:
+	 * 1693000 * 10^6 / (912.5^2 * 1400) = 1452. Voltages come with the
+	 * OPPs that the GPUEB reports.
+	 */
+	dynamic-power-coefficient = <1452>;
 	status = "okay";
+};
+
+/*
+ * The GPU has no LVTS sensor the kernel can read (the MFG LVTS controller at
+ * 0x13ff0000 is not started by the firmware); the GPUEB measures it and
+ * keeps the value in its shared status, which the gpufreq node exposes as a
+ * thermal sensor. The passive trip lets step_wise lower the GPU OPP through
+ * the panthor devfreq cooling device; the CPU zones in mt6878.dtsi only
+ * throttle the CPUs, so until here nothing slowed the GPU down when hot.
+ */
+&thermal_zones {
+	gpu-thermal {
+		polling-delay = <1000>;
+		polling-delay-passive = <250>;
+		thermal-sensors = <&gpufreq>;
+
+		trips {
+			gpu_alert: trip-alert {
+				temperature = <85000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+
+			gpu_crit: trip-crit {
+				temperature = <110000>;
+				hysteresis = <0>;
+				type = "critical";
+			};
+		};
+
+		cooling-maps {
+			map0 {
+				trip = <&gpu_alert>;
+				cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+			};
+		};
+	};
 };

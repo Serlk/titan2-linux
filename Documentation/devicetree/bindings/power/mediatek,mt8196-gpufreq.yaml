@@ -97,6 +97,12 @@ properties:
   "#power-domain-cells":
     const: 0
 
+  "#thermal-sensor-cells":
+    const: 0
+    description:
+      The GPU temperature the MCU measures and keeps in its shared status,
+      for a thermal zone that throttles the GPU.
+
   shader-present:
     type: object
 

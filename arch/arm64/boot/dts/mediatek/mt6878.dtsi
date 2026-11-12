@@ -998,6 +998,7 @@
 			#clock-cells = <1>;
 			#nvmem-cell-cells = <0>;
 			#power-domain-cells = <0>;
+			#thermal-sensor-cells = <0>;
 			status = "disabled";
 		};
 

@@ -4,6 +4,7 @@
 #include <linux/clk.h>
 #include <linux/devfreq.h>
 #include <linux/devfreq_cooling.h>
+#include <linux/moduleparam.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 
@@ -12,6 +13,23 @@
 
 #include "panthor_devfreq.h"
 #include "panthor_device.h"
+
+/*
+ * simple_ondemand jumps to the highest OPP as soon as the GPU is busier than
+ * upthreshold percent of the polling period and only leaves it below
+ * upthreshold - downdifferential. 45/5 are the upstream defaults (chosen for
+ * desktop-like loads); a phone that composites every frame may want a later
+ * jump, so both can be set at module load (0 = default).
+ */
+static unsigned int panthor_devfreq_upthreshold;
+module_param_named(devfreq_upthreshold, panthor_devfreq_upthreshold, uint, 0444);
+MODULE_PARM_DESC(devfreq_upthreshold,
+		 "simple_ondemand: busy percentage above which the GPU takes its highest OPP (0 = default 45)");
+
+static unsigned int panthor_devfreq_downdifferential;
+module_param_named(devfreq_downdifferential, panthor_devfreq_downdifferential, uint, 0444);
+MODULE_PARM_DESC(devfreq_downdifferential,
+		 "simple_ondemand: the OPP is kept while the busy percentage stays above upthreshold minus this (0 = default 5)");
 
 /**
  * struct panthor_devfreq - Device frequency management
@@ -245,6 +263,18 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 	 */
 	pdevfreq->gov_data.upthreshold = 45;
 	pdevfreq->gov_data.downdifferential = 5;
+	if (panthor_devfreq_upthreshold)
+		pdevfreq->gov_data.upthreshold = panthor_devfreq_upthreshold;
+	if (panthor_devfreq_downdifferential)
+		pdevfreq->gov_data.downdifferential = panthor_devfreq_downdifferential;
+	if (pdevfreq->gov_data.upthreshold > 100 ||
+	    pdevfreq->gov_data.upthreshold <= pdevfreq->gov_data.downdifferential) {
+		DRM_DEV_INFO(dev, "Bad devfreq thresholds %u/%u, using 45/5\n",
+			     pdevfreq->gov_data.upthreshold,
+			     pdevfreq->gov_data.downdifferential);
+		pdevfreq->gov_data.upthreshold = 45;
+		pdevfreq->gov_data.downdifferential = 5;
+	}
 
 	pdevfreq->devfreq = devm_devfreq_add_device(dev, &panthor_devfreq_profile,
 						    DEVFREQ_GOV_SIMPLE_ONDEMAND,
