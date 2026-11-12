@@ -619,7 +619,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			ranges;
-			mediatek,syscon-wakeup = <&pericfg_ao 0x214 105>;
+			mediatek,syscon-wakeup = <&pericfg_ao 0x214 107>;
 			wakeup-source;
 			status = "disabled";
 

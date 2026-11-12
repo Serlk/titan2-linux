@@ -1014,6 +1014,41 @@ void ssusb_gadget_exit(struct ssusb_mtk *ssusb)
 	mtu3_hw_exit(mtu);
 }
 
+/**
+ * ssusb_gadget_restore() - set the device IP up again after a sleep
+ * @ssusb: the controller
+ *
+ * What probe (mtu3_hw_init) and mtu3_start() wrote, for an IP that may have
+ * lost it while the system slept: ports enabled, the MAC defaults and, if
+ * the gadget was started, the CSRs, the speed, the interrupts and D+.
+ * Only while no host is connected, so no endpoint is in use.
+ *
+ * Return: 0 or a negative error from the clock check.
+ */
+int ssusb_gadget_restore(struct ssusb_mtk *ssusb)
+{
+	struct mtu3 *mtu = ssusb->u3d;
+	unsigned long flags;
+	int ret;
+
+	if (!mtu || mtu->connected)
+		return 0;
+
+	ret = mtu3_device_enable(mtu);
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&mtu->lock, flags);
+	mtu3_regs_init(mtu);
+	if (mtu->is_active)
+		mtu3_start(mtu);
+	else
+		mtu3_dev_power_down(mtu);
+	spin_unlock_irqrestore(&mtu->lock, flags);
+
+	return 0;
+}
+
 bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb)
 {
 	struct mtu3 *mtu = ssusb->u3d;
@@ -1050,8 +1085,17 @@ int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	struct mtu3 *mtu = ssusb->u3d;
 
-	if (!mtu->gadget_driver)
+	if (!mtu->gadget_driver) {
+		/*
+		 * Device role of a dual role controller: the device part runs
+		 * without a gadget, but the host suspend powered port 0 down
+		 * with the host ports. Nothing else powers it up again, and a
+		 * gadget bound later would raise D+ on a powered down port.
+		 */
+		if (mtu->is_active)
+			mtu3_dev_power_on(mtu);
 		return 0;
+	}
 
 	mtu3_dev_resume(mtu);
 

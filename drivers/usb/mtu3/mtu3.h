@@ -246,6 +246,7 @@ struct otg_switch_mtk {
  * @uwk: syscon including usb wakeup glue layer between SSUSB IP and SPM
  * @uwk_reg_base: the base address of the wakeup glue layer in @uwk
  * @uwk_vers: the version of the wakeup glue layer
+ * @uwk_armed: the wakeup glue was enabled at the last suspend
  */
 struct ssusb_mtk {
 	struct device *dev;
@@ -272,6 +273,9 @@ struct ssusb_mtk {
 	struct regmap *uwk;
 	u32 uwk_reg_base;
 	u32 uwk_vers;
+	bool uwk_armed;
+	/* IPPC power and port control at the last system suspend */
+	u32 sleep_ippc[4];
 };
 
 /**

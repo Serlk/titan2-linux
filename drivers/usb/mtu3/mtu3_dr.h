@@ -18,6 +18,7 @@ int ssusb_wakeup_of_property_parse(struct ssusb_mtk *ssusb,
 				struct device_node *dn);
 int ssusb_host_resume(struct ssusb_mtk *ssusb, bool p0_skipped);
 int ssusb_host_suspend(struct ssusb_mtk *ssusb);
+int ssusb_host_restore(struct ssusb_mtk *ssusb);
 void ssusb_wakeup_set(struct ssusb_mtk *ssusb, bool enable);
 
 #else
@@ -48,6 +49,11 @@ static inline int ssusb_host_suspend(struct ssusb_mtk *ssusb)
 	return 0;
 }
 
+static inline int ssusb_host_restore(struct ssusb_mtk *ssusb)
+{
+	return 0;
+}
+
 static inline void ssusb_wakeup_set(struct ssusb_mtk *ssusb, bool enable)
 {}
 
@@ -60,6 +66,7 @@ void ssusb_gadget_exit(struct ssusb_mtk *ssusb);
 int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg);
 int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg);
 bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb);
+int ssusb_gadget_restore(struct ssusb_mtk *ssusb);
 
 #else
 static inline int ssusb_gadget_init(struct ssusb_mtk *ssusb)
@@ -85,6 +92,11 @@ ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg)
 static inline bool ssusb_gadget_ip_sleep_check(struct ssusb_mtk *ssusb)
 {
 	return true;
+}
+
+static inline int ssusb_gadget_restore(struct ssusb_mtk *ssusb)
+{
+	return 0;
 }
 
 #endif

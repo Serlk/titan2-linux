@@ -19,6 +19,45 @@
 #include "mtu3_dr.h"
 #include "mtu3_debug.h"
 
+/*
+ * A device-only controller may come back from system sleep with the IP
+ * (IPPC and MAC) at reset values: on MT6878 the gadget does not raise D+
+ * again after a suspend through the SPM, while it does after a pm_test
+ * one. 1 (the default): as the downstream driver does at every connect,
+ * reset the IP and write the probe and start settings again at system
+ * resume when no host is connected; 0: leave the IP as it is.
+ */
+static int reinit_on_resume = 1;
+module_param(reinit_on_resume, int, 0644);
+MODULE_PARM_DESC(reinit_on_resume, "Device mode: reset and set up the IP again at system resume (default 1)");
+
+/*
+ * The ip-sleep wakeup of the glue signals the SPM while the IP is not in
+ * sleep: enabled with the IP awake (device role without D+, e.g. no gadget
+ * bound) it wakes the system at once, as USB_POWERDWN_B with nothing slept
+ * on MT6878. The downstream driver of that SoC enables it in host mode
+ * only (in device mode its system suspend leaves the controller alone).
+ * 0 (the default): enable the glue in the host role only; 1: in the device
+ * role, too. Never while the IP is awake, nor unless the controller may
+ * wake the system.
+ */
+static bool uwk_device_role;
+module_param(uwk_device_role, bool, 0644);
+MODULE_PARM_DESC(uwk_device_role, "Enable the wakeup glue in the device role, too (default 0)");
+
+static const u32 ssusb_sleep_regs[] = {
+	U3D_SSUSB_IP_PW_CTRL0, U3D_SSUSB_IP_PW_CTRL2,
+	U3D_SSUSB_U2_CTRL_0P, U3D_SSUSB_IP_PW_STS1,
+};
+
+static void ssusb_sleep_regs_read(struct ssusb_mtk *ssusb, u32 *v)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ssusb_sleep_regs); i++)
+		v[i] = mtu3_readl(ssusb->ippc_base, ssusb_sleep_regs[i]);
+}
+
 /* u2-port0 should be powered on and enabled; */
 int ssusb_check_clocks(struct ssusb_mtk *ssusb, u32 ex_clks)
 {
@@ -70,6 +109,32 @@ static int wait_for_ip_sleep(struct ssusb_mtk *ssusb)
 	}
 
 	return ret;
+}
+
+/* Whether the wakeup glue is to be enabled for this suspend; clocks on */
+static bool ssusb_uwk_wanted(struct ssusb_mtk *ssusb, pm_message_t msg)
+{
+	const char *why = NULL;
+	u32 sts = 0;
+
+	if (!ssusb->uwk_en)
+		return false;
+
+	if (!device_may_wakeup(ssusb->dev)) {
+		why = "may not wake the system";
+	} else if (!ssusb->is_host && !uwk_device_role) {
+		why = "device role";
+	} else {
+		sts = mtu3_readl(ssusb->ippc_base, U3D_SSUSB_IP_PW_STS1);
+		if (!(sts & SSUSB_IP_SLEEP_STS))
+			why = "IP not in sleep";
+	}
+
+	if (msg.event == PM_EVENT_SUSPEND)
+		dev_info(ssusb->dev, "wakeup glue %s%s (pw_sts1 %#x)\n",
+			 why ? "not enabled: " : "enabled", why ? why : "", sts);
+
+	return !why;
 }
 
 static int ssusb_phy_init(struct ssusb_mtk *ssusb)
@@ -542,15 +607,65 @@ static int mtu3_suspend_common(struct device *dev, pm_message_t msg)
 	if (ret)
 		goto sleep_err;
 
+	if (msg.event == PM_EVENT_SUSPEND)
+		ssusb_sleep_regs_read(ssusb, ssusb->sleep_ippc);
+	ssusb->uwk_armed = ssusb_uwk_wanted(ssusb, msg);
 	ssusb_phy_power_off(ssusb);
 	clk_bulk_disable_unprepare(BULK_CLKS_CNT, ssusb->clks);
-	ssusb_wakeup_set(ssusb, true);
+	if (ssusb->uwk_armed)
+		ssusb_wakeup_set(ssusb, true);
 	return 0;
 
 sleep_err:
 	resume_ip_and_ports(ssusb, msg);
 err:
 	return ret;
+}
+
+/*
+ * System resume, device mode or the device role of a dual role controller:
+ * log the IPPC power and port control if it changed during the sleep, then
+ * set the device part up again as probe and mtu3_start() did (the
+ * downstream driver resets the IP at every connect). A device-only
+ * controller is reset first. A dual role one only if the IP came back
+ * from a power down (held in reset, its reset value): the reset takes the
+ * host part with it, so its ports are set up again, too, and the xHCI
+ * driver finds a controller that lost power.
+ */
+static void ssusb_resume_reinit(struct ssusb_mtk *ssusb)
+{
+	u32 now[ARRAY_SIZE(ssusb_sleep_regs)];
+	bool otg_device = ssusb->dr_mode == USB_DR_MODE_OTG && !ssusb->is_host;
+	int ret;
+
+	if (ssusb->dr_mode != USB_DR_MODE_PERIPHERAL && !otg_device)
+		return;
+
+	ssusb_sleep_regs_read(ssusb, now);
+	if (memcmp(now, ssusb->sleep_ippc, sizeof(now)))
+		dev_info(ssusb->dev, "IPPC changed in sleep: pw_ctrl0 %#x->%#x pw_ctrl2 %#x->%#x u2_ctrl %#x->%#x pw_sts1 %#x->%#x\n",
+			 ssusb->sleep_ippc[0], now[0], ssusb->sleep_ippc[1],
+			 now[1], ssusb->sleep_ippc[2], now[2],
+			 ssusb->sleep_ippc[3], now[3]);
+
+	if (!reinit_on_resume || (ssusb->u3d && ssusb->u3d->connected))
+		return;
+
+	if (!otg_device) {
+		ssusb_ip_sw_reset(ssusb);
+	} else if (now[0] & SSUSB_IP_SW_RST) {
+		ssusb_ip_sw_reset(ssusb);
+		ret = ssusb_host_restore(ssusb);
+		if (ret)
+			dev_err(ssusb->dev, "host part restore failed: %d\n", ret);
+	}
+	if (otg_device)
+		ssusb_set_force_mode(ssusb, MTU3_DR_FORCE_DEVICE);
+	ret = ssusb_gadget_restore(ssusb);
+	if (ret)
+		dev_err(ssusb->dev, "device IP restore failed: %d\n", ret);
+	else
+		dev_dbg(ssusb->dev, "device IP set up again after sleep\n");
 }
 
 static int mtu3_resume_common(struct device *dev, pm_message_t msg)
@@ -560,7 +675,9 @@ static int mtu3_resume_common(struct device *dev, pm_message_t msg)
 
 	dev_dbg(dev, "%s\n", __func__);
 
+	/* also clear a glue left enabled by an older kernel or the firmware */
 	ssusb_wakeup_set(ssusb, false);
+	ssusb->uwk_armed = false;
 	ret = clk_bulk_prepare_enable(BULK_CLKS_CNT, ssusb->clks);
 	if (ret)
 		goto clks_err;
@@ -568,6 +685,9 @@ static int mtu3_resume_common(struct device *dev, pm_message_t msg)
 	ret = ssusb_phy_power_on(ssusb);
 	if (ret)
 		goto phy_err;
+
+	if (msg.event == PM_EVENT_SUSPEND)
+		ssusb_resume_reinit(ssusb);
 
 	return resume_ip_and_ports(ssusb, msg);
 

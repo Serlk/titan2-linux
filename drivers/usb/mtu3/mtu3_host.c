@@ -46,6 +46,11 @@
 #define WC1_IS_P_95		BIT(12)
 #define WC1_IS_EN_P0_95		BIT(6)
 
+/* mt6878 */
+#define PERI_WK_CTRL2_6878	0x08
+#define WC2_IS_EN_6878		BIT(0)	/* ip sleep */
+#define WC2_LS_EN_6878		BIT(2)	/* line state */
+
 /* mt2712 etc */
 #define PERI_SSUSB_SPM_CTRL	0x0
 #define SSC_IP_SLEEP_EN	BIT(4)
@@ -59,6 +64,7 @@ enum ssusb_uwk_vers {
 	SSUSB_UWK_V1_3,		/* mt8195 IP0 */
 	SSUSB_UWK_V1_5 = 105,	/* mt8195 IP2 */
 	SSUSB_UWK_V1_6,		/* mt8195 IP3 */
+	SSUSB_UWK_V1_7,		/* mt6878 */
 };
 
 /*
@@ -99,6 +105,11 @@ static void ssusb_wakeup_ip_sleep_set(struct ssusb_mtk *ssusb, bool enable)
 		reg = ssusb->uwk_reg_base + PERI_WK_CTRL0_8195;
 		msk = WC0_IS_EN_P3_95 | WC0_IS_C_95(0x7) | WC0_IS_P_95;
 		val = enable ? (WC0_IS_EN_P3_95 | WC0_IS_C_95(0x1)) : 0;
+		break;
+	case SSUSB_UWK_V1_7:
+		reg = ssusb->uwk_reg_base + PERI_WK_CTRL2_6878;
+		msk = WC2_IS_EN_6878 | WC2_LS_EN_6878;
+		val = enable ? msk : 0;
 		break;
 	case SSUSB_UWK_V2:
 		reg = ssusb->uwk_reg_base + PERI_SSUSB_SPM_CTRL;
@@ -275,6 +286,16 @@ int ssusb_host_resume(struct ssusb_mtk *ssusb, bool p0_skipped)
 	}
 
 	return 0;
+}
+
+/*
+ * The IP lost its state in a system sleep (its power domain went down):
+ * power on the host part and its ports again as probe did; a dual role
+ * controller in the device role switches port 0 back afterwards.
+ */
+int ssusb_host_restore(struct ssusb_mtk *ssusb)
+{
+	return ssusb_host_enable(ssusb);
 }
 
 /* here not skip port0 due to PDN can be set repeatedly */

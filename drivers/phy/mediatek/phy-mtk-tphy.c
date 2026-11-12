@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/phy/phy.h>
+#include <linux/phy/phy-mtk-tphy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/usb/role.h>
@@ -23,6 +24,17 @@
 #include <linux/workqueue.h>
 
 #include "phy-mtk-io.h"
+
+/*
+ * A U2 PHY may come back from system sleep with its registers at their
+ * reset values (seen as a cleared interrupt enable or, with the software
+ * role switch, cleared FORCE bits, neither of which the driver clears
+ * itself). 1 (the default): restore the init settings, the tuning and the
+ * role at power on when that is seen; 2: at every power on; 0: never.
+ */
+static int restore_state = 1;
+module_param(restore_state, int, 0644);
+MODULE_PARM_DESC(restore_state, "Restore U2 PHY settings lost in sleep: 0 never, 1 when lost (default), 2 always");
 
 /* version V1 sub-banks offset base address */
 /* banks shared by multiple phys */
@@ -350,6 +362,8 @@ struct mtk_phy_instance {
 	bool fixed_role;
 	bool type_force_mode;
 	bool software_role_switch;
+	bool u2_inited;		/* the U2 registers were set up */
+	bool u2_forced;		/* the software role FORCE bits were set */
 };
 
 struct mtk_tphy {
@@ -934,28 +948,13 @@ static int u2_phy_software_role_switch_init(struct mtk_phy_instance *instance)
 	return 0;
 }
 
-static void u2_phy_instance_init(struct mtk_tphy *tphy,
-	struct mtk_phy_instance *instance)
+/* the register part of the init, also used to restore a PHY that lost it */
+static void u2_phy_instance_regs_init(struct mtk_tphy *tphy,
+				      struct mtk_phy_instance *instance)
 {
 	struct u2phy_banks *u2_banks = &instance->u2_banks;
 	void __iomem *com = u2_banks->com;
 	u32 index = instance->index;
-	int ret;
-
-	if (instance->software_role_switch) {
-		ret = u2_phy_software_role_switch_init(instance);
-		if (ret) {
-			/*
-			 * No dual-role controller behind the PHY, e.g. one
-			 * with dr_mode = "peripheral": keep the forced device
-			 * role instead of polling for a role switch.
-			 */
-			dev_info(&instance->phy->dev,
-				 "no role switch, forcing device role\n");
-			u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
-			instance->fixed_role = true;
-		}
-	}
 
 	/* switch to USB function, and enable usb pll */
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM0, P2C_FORCE_UART_EN | P2C_FORCE_SUSPENDM);
@@ -994,6 +993,30 @@ static void u2_phy_instance_init(struct mtk_tphy *tphy,
 	u2_phy_pll_26m_set(tphy, instance);
 
 	dev_dbg(tphy->dev, "%s(%d)\n", __func__, index);
+}
+
+static void u2_phy_instance_init(struct mtk_tphy *tphy,
+				 struct mtk_phy_instance *instance)
+{
+	int ret;
+
+	if (instance->software_role_switch) {
+		ret = u2_phy_software_role_switch_init(instance);
+		if (ret) {
+			/*
+			 * No dual-role controller behind the PHY, e.g. one
+			 * with dr_mode = "peripheral": keep the forced device
+			 * role instead of polling for a role switch.
+			 */
+			dev_info(&instance->phy->dev,
+				 "no role switch, forcing device role\n");
+			u2_phy_instance_role_set(instance, USB_ROLE_DEVICE);
+			instance->fixed_role = true;
+		}
+	}
+
+	u2_phy_instance_regs_init(tphy, instance);
+	instance->u2_inited = true;
 }
 
 static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
@@ -1554,13 +1577,47 @@ static int mtk_phy_init(struct phy *phy)
 	return 0;
 }
 
+/*
+ * The settings of mtk_phy_init() and the forced role are written once; a
+ * PHY that lost power in system sleep has them at reset values and does not
+ * connect (with the software role switch the forced ID reads host).
+ */
+static void u2_phy_restore(struct mtk_tphy *tphy,
+			   struct mtk_phy_instance *instance)
+{
+	void __iomem *com = instance->u2_banks.com;
+	u32 acr0, dtm1;
+	bool lost;
+
+	if (!restore_state || !instance->u2_inited)
+		return;
+
+	acr0 = readl(com + U3P_USBPHYACR0);
+	dtm1 = readl(com + U3P_U2PHYDTM1);
+	lost = !(acr0 & PA0_RG_USB20_INTR_EN) ||
+	       (instance->u2_forced && !(dtm1 & P2C_FORCE_VBUSVALID));
+	if (!lost && restore_state < 2)
+		return;
+
+	dev_info(tphy->dev, "u2 port %u %s (acr0 %#x dtm1 %#x), restoring\n",
+		 instance->index, lost ? "lost its settings" : "re-initialised",
+		 acr0, dtm1);
+	phy_efuse_set(instance);
+	u2_phy_instance_regs_init(tphy, instance);
+	u2_phy_props_set(tphy, instance);
+	if (instance->software_role_switch)
+		u2_phy_instance_role_set(instance, instance->current_role);
+}
+
 static int mtk_phy_power_on(struct phy *phy)
 {
 	struct mtk_phy_instance *instance = phy_get_drvdata(phy);
 	struct mtk_tphy *tphy = dev_get_drvdata(phy->dev.parent);
 
 	if (instance->type == PHY_TYPE_USB2) {
+		u2_phy_restore(tphy, instance);
 		u2_phy_instance_power_on(tphy, instance);
+		instance->u2_forced = instance->software_role_switch;
 		hs_slew_rate_calibrate(tphy, instance);
 	} else if (instance->type == PHY_TYPE_PCIE) {
 		pcie_phy_instance_power_on(tphy, instance);
@@ -1594,15 +1651,49 @@ static int mtk_phy_exit(struct phy *phy)
 	return 0;
 }
 
+/*
+ * D+/D- to the BC1.1/BC1.2 charger detection path of an external charger,
+ * or back to the USB transceiver (the downstream driver's "BC11 switch"). The registers
+ * are only written while the PHY is initialised (clocked); an exit and a
+ * new init clear the switch anyway (u2_phy_instance_regs_init()).
+ */
+static int u2_phy_instance_set_bc11(struct phy *phy,
+				    struct mtk_phy_instance *instance, bool on)
+{
+	void __iomem *com = instance->u2_banks.com;
+
+	if (!phy->init_count)
+		return on ? -EAGAIN : 0;
+
+	if (on)
+		mtk_phy_set_bits(com + U3P_USBPHYACR6, PA6_RG_U2_BC11_SW_EN);
+	else
+		mtk_phy_clear_bits(com + U3P_USBPHYACR6, PA6_RG_U2_BC11_SW_EN);
+
+	dev_dbg(&phy->dev, "BC1.1 switch %s\n", on ? "on" : "off");
+	return 0;
+}
+
 static int mtk_phy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
 {
 	struct mtk_phy_instance *instance = phy_get_drvdata(phy);
 	struct mtk_tphy *tphy = dev_get_drvdata(phy->dev.parent);
 
-	if (instance->type == PHY_TYPE_USB2)
-		u2_phy_instance_set_mode(tphy, instance, mode);
+	if (instance->type != PHY_TYPE_USB2)
+		return submode ? -EOPNOTSUPP : 0;
 
-	return 0;
+	/* a submode leaves the role alone */
+	switch (submode) {
+	case MTK_TPHY_SUBMODE_NONE:
+		u2_phy_instance_set_mode(tphy, instance, mode);
+		return 0;
+	case MTK_TPHY_BC11_SW_SET:
+		return u2_phy_instance_set_bc11(phy, instance, true);
+	case MTK_TPHY_BC11_SW_CLR:
+		return u2_phy_instance_set_bc11(phy, instance, false);
+	default:
+		return -EINVAL;
+	}
 }
 
 static struct phy *mtk_phy_xlate(struct device *dev,
