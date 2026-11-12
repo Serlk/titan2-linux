@@ -21,6 +21,7 @@ properties:
           - mediatek,mt2712-smi-larb
           - mediatek,mt6779-smi-larb
           - mediatek,mt6795-smi-larb
+          - mediatek,mt6878-smi-larb
           - mediatek,mt6893-smi-larb
           - mediatek,mt8167-smi-larb
           - mediatek,mt8173-smi-larb
@@ -50,11 +51,16 @@ properties:
       - description: apb is Advanced Peripheral Bus clock, It's the clock for
           setting the register.
       - description: smi is the clock for transfer data and command.
-      - description: the clock for gals.
+      - description: the clock for gals, or of the first gals path where
+          there are several.
+      - description: the clock of the second gals path.
+      - description: the clock of the third gals path.
+      - description: the clock of the fourth gals path.
+      - description: the clock of the fifth gals path.
 
   clock-names:
     minItems: 2
-    maxItems: 3
+    maxItems: 7
 
   power-domains:
     maxItems: 1
@@ -99,7 +105,40 @@ allOf:
             - const: smi
             - const: gals
 
-    else:
+  - if:  # HW has several gals paths
+      properties:
+        compatible:
+          enum:
+            - mediatek,mt6878-smi-larb
+
+    then:
+      properties:
+        clocks:
+          minItems: 2
+          maxItems: 7
+        clock-names:
+          minItems: 2
+          items:
+            - const: apb
+            - const: smi
+            - const: gals0
+            - const: gals1
+            - const: gals2
+            - const: gals3
+            - const: gals4
+
+  - if:  # HW has no gals
+      not:
+        properties:
+          compatible:
+            enum:
+              - mediatek,mt6878-smi-larb
+              - mediatek,mt8183-smi-larb
+              - mediatek,mt8186-smi-larb
+              - mediatek,mt8188-smi-larb
+              - mediatek,mt8195-smi-larb
+
+    then:
       properties:
         clocks:
           minItems: 2
@@ -117,6 +156,7 @@ allOf:
               - mediatek,mt2701-smi-larb
               - mediatek,mt2712-smi-larb
               - mediatek,mt6779-smi-larb
+              - mediatek,mt6878-smi-larb
               - mediatek,mt8186-smi-larb
               - mediatek,mt8188-smi-larb
               - mediatek,mt8192-smi-larb

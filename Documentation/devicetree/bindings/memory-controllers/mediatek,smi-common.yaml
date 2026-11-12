@@ -16,7 +16,8 @@ description: |
   MediaTek SMI have two generations of HW architecture, here is the list
   which generation the SoCs use:
   generation 1: mt2701 and mt7623.
-  generation 2: mt2712, mt6779, mt8167, mt8173, mt8183, mt8186, mt8188, mt8192 and mt8195.
+  generation 2: mt2712, mt6779, mt6878, mt8167, mt8173, mt8183, mt8186, mt8188, mt8192
+  and mt8195.
 
   There's slight differences between the two SMI, for generation 2, the
   register which control the iommu port is at each larb's register base. But
@@ -33,6 +34,8 @@ properties:
           - mediatek,mt2712-smi-common
           - mediatek,mt6779-smi-common
           - mediatek,mt6795-smi-common
+          - mediatek,mt6878-smi-common
+          - mediatek,mt6878-smi-sub-common
           - mediatek,mt6893-smi-common
           - mediatek,mt8167-smi-common
           - mediatek,mt8173-smi-common
@@ -69,14 +72,18 @@ properties:
       - description: Either asynchronous clock to help transform the smi clock
           into the emi clock domain on Gen1 h/w, or the path0 clock of gals.
       - description: gals1 is the path1 clock of gals.
+      - description: gals2 is the path2 clock of gals.
+      - description: gals3 is the path3 clock of gals.
+      - description: gals4 is the path4 clock of gals.
 
   clock-names:
     minItems: 2
-    maxItems: 4
+    maxItems: 7
 
   mediatek,smi:
     $ref: /schemas/types.yaml#/definitions/phandle
-    description: a phandle to the smi-common node above. Only for sub-common.
+    description: a phandle to the smi-common node above, or to the next
+      smi-sub-common where sub-commons are chained. Only for sub-common.
 
 required:
   - compatible
@@ -108,10 +115,22 @@ allOf:
         compatible:
           contains:
             enum:
+              - mediatek,mt6878-smi-sub-common
               - mediatek,mt8195-smi-sub-common
     then:
       required:
         - mediatek,smi
+    else:
+      properties:
+        mediatek,smi: false
+
+  - if:  # sub common that has gals
+      properties:
+        compatible:
+          contains:
+            enum:
+              - mediatek,mt8195-smi-sub-common
+    then:
       properties:
         clocks:
           minItems: 3
@@ -121,9 +140,34 @@ allOf:
             - const: apb
             - const: smi
             - const: gals0
+
+  - if:  # sub common with several gals paths
+      properties:
+        compatible:
+          contains:
+            enum:
+              - mediatek,mt6878-smi-sub-common
+    then:
+      properties:
+        clocks:
+          minItems: 2
+          maxItems: 7
+        clock-names:
+          minItems: 2
+          items:
+            - const: apb
+            - const: smi
+            - const: gals0
+            - const: gals1
+            - const: gals2
+            - const: gals3
+            - const: gals4
     else:
       properties:
-        mediatek,smi: false
+        clocks:
+          maxItems: 4
+        clock-names:
+          maxItems: 4
 
   - if:  # for gen2 HW that have gals
       properties:
@@ -155,6 +199,7 @@ allOf:
           enum:
             - mediatek,mt2712-smi-common
             - mediatek,mt6795-smi-common
+            - mediatek,mt6878-smi-common
             - mediatek,mt8167-smi-common
             - mediatek,mt8173-smi-common
 
