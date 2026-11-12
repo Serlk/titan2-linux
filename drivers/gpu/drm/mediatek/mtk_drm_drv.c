@@ -37,6 +37,10 @@
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 
+bool mtk_drm_cmd_te_sync;
+module_param_named(cmd_te_sync, mtk_drm_cmd_te_sync, bool, 0644);
+MODULE_PARM_DESC(cmd_te_sync, "Command mode: trigger frames and vblank on panel TE");
+
 /*
  * As drm_atomic_helper_commit_tail_rpm(), but wait for the page flips
  * instead of the next vblank: the CRTC completes a flip once the hardware

@@ -23,6 +23,7 @@
 #define MT8183_MUTEX0_MOD1			0x34
 #define MT8183_MUTEX0_SOF0			0x2c
 
+#define DISP_REG_MUTEX_CFG			0x08
 #define DISP_REG_MUTEX_EN(n)			(0x20 + 0x20 * (n))
 #define DISP_REG_MUTEX(n)			(0x24 + 0x20 * (n))
 #define DISP_REG_MUTEX_RST(n)			(0x28 + 0x20 * (n))
@@ -372,6 +373,11 @@ struct mtk_mutex_data {
 	const bool no_clk;
 	/* outputs with a mutex_mod entry have a module bit as well */
 	const bool output_in_mod;
+	/*
+	 * The boot loader puts modules the display driver does not drive
+	 * into the mutex: keep them across power downs of the domain.
+	 */
+	const bool keep_boot_mod;
 };
 
 struct mtk_mutex_ctx {
@@ -382,6 +388,10 @@ struct mtk_mutex_ctx {
 	const struct mtk_mutex_data	*data;
 	phys_addr_t			addr;
 	struct cmdq_client_reg		cmdq_reg;
+	/* keep_boot_mod: modules and config found on the first prepare */
+	unsigned long			boot_read;
+	u32				boot_mod[MTK_MUTEX_MAX_HANDLES];
+	u32				boot_cfg;
 };
 
 static const u8 mt2701_mutex_mod[DDP_COMPONENT_ID_MAX] = {
@@ -836,6 +846,7 @@ static const struct mtk_mutex_data mt6878_mutex_driver_data = {
 	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
 	.output_in_mod = true,
+	.keep_boot_mod = true,
 };
 
 static const struct mtk_mutex_data mt8186_mutex_driver_data = {
@@ -900,6 +911,10 @@ struct mtk_mutex *mtk_mutex_get(struct device *dev)
 	struct mtk_mutex_ctx *mtx = dev_get_drvdata(dev);
 	int i;
 
+	/* A platform device may exist before its provider has finished probing. */
+	if (!mtx)
+		return ERR_PTR(-EPROBE_DEFER);
+
 	for (i = 0; i < MTK_MUTEX_MAX_HANDLES; i++)
 		if (!mtx->mutex[i].claimed) {
 			mtx->mutex[i].claimed = true;
@@ -921,11 +936,53 @@ void mtk_mutex_put(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_put);
 
+/*
+ * The first time a mutex is prepared, it still holds what the boot loader
+ * set: remember its modules (and the global config). On later prepares,
+ * after the domain has been powered down, put them back; the modules of
+ * the driver are added on top by mtk_mutex_add_comp().
+ */
+static void mtk_mutex_keep_boot_mod(struct mtk_mutex_ctx *mtx, unsigned int id)
+{
+	u32 offset = mtx->data->mutex_mod_reg + 0x20 * id;
+	u32 mod, cfg;
+
+	if (!test_and_set_bit(id, &mtx->boot_read)) {
+		mtx->boot_mod[id] = readl(mtx->regs + offset);
+		if (!test_and_set_bit(MTK_MUTEX_MAX_HANDLES, &mtx->boot_read))
+			mtx->boot_cfg = readl(mtx->regs + DISP_REG_MUTEX_CFG);
+		dev_dbg(mtx->dev, "mutex %u: boot loader modules %08x, sof %08x, cfg %08x\n",
+			id, mtx->boot_mod[id],
+			readl(mtx->regs + DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, id)),
+			mtx->boot_cfg);
+		return;
+	}
+
+	mod = readl(mtx->regs + offset);
+	cfg = readl(mtx->regs + DISP_REG_MUTEX_CFG);
+	dev_dbg(mtx->dev, "mutex %u: modules %08x (boot %08x), cfg %08x (boot %08x)\n",
+		id, mod, mtx->boot_mod[id], cfg, mtx->boot_cfg);
+
+	if (!mod && mtx->boot_mod[id])
+		dev_info(mtx->dev, "mutex %u lost its modules in a power down, setting %08x\n",
+			 id, mtx->boot_mod[id]);
+	if ((mod & mtx->boot_mod[id]) != mtx->boot_mod[id])
+		writel(mod | mtx->boot_mod[id], mtx->regs + offset);
+	if (cfg != mtx->boot_cfg)
+		writel(mtx->boot_cfg, mtx->regs + DISP_REG_MUTEX_CFG);
+}
+
 int mtk_mutex_prepare(struct mtk_mutex *mutex)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
-	return clk_prepare_enable(mtx->clk);
+	int ret;
+
+	ret = clk_prepare_enable(mtx->clk);
+	if (!ret && mtx->data->keep_boot_mod)
+		mtk_mutex_keep_boot_mod(mtx, mutex->id);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_prepare);
 
@@ -1158,6 +1215,7 @@ static int mtk_mutex_probe(struct platform_device *pdev)
 	if (!mtx)
 		return -ENOMEM;
 
+	mtx->dev = dev;
 	for (i = 0; i < MTK_MUTEX_MAX_HANDLES; i++)
 		mtx->mutex[i].id = i;
 

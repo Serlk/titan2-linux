@@ -103,6 +103,90 @@ struct mtk_mmsys_routes {
 };
 
 /**
+ * struct mtk_mmsys_keep_block - Registers of one block of a boot loader path
+ * @name: Name of the block, for the log and debugfs
+ * @offset: Offset of the block from the mmsys base address, 0 for mmsys
+ * @cg_bit: Bit of the block clock in the first clock gate register,
+ *          -1 if the block has no clock gate of its own
+ * @regs: Offsets of the kept registers, in the order they are written back
+ * @num_regs: Number of entries in @regs
+ * @relay_reg: Register holding the relay (bypass) bit of the block, set on
+ *             restore because the tables of the block are not kept
+ * @relay_mask: Relay bit(s) in @relay_reg, 0 if the block has none
+ * @skip_reg: Register with bits that are never written back
+ * @skip_mask: Those bits (layer enables, reset requests), 0 for none
+ * @owner_compat: Compatible of a driver that programs the block itself; the
+ *                block is not kept when such a node is enabled
+ */
+struct mtk_mmsys_keep_block {
+	const char *name;
+	u32 offset;
+	s8 cg_bit;
+	const u16 *regs;
+	u8 num_regs;
+	u16 relay_reg;
+	u32 relay_mask;
+	u16 skip_reg;
+	u32 skip_mask;
+	const char *owner_compat;
+};
+
+/**
+ * struct mtk_mmsys_reg_range - Registers [@start, @end) of the mmsys config
+ * @start: First offset
+ * @end: Offset after the last one
+ */
+struct mtk_mmsys_reg_range {
+	u16 start;
+	u16 end;
+};
+
+/**
+ * struct mtk_mmsys_boot_path - Display path kept from the boot loader
+ * @cg_sta: Status offsets of the two clock gate registers
+ * @cg_clr: Clear (ungate) offsets of the two clock gate registers
+ * @cg_keep: Clock gate bits not owned by any driver: gated where the boot
+ *           loader had left them ungated, they tell that the path lost its
+ *           state (the restore ungates every bit the boot loader had left
+ *           ungated)
+ * @blocks: Blocks whose registers are kept; the first one is mmsys itself
+ *          and its registers tell whether the path lost its state
+ * @num_blocks: Number of entries in @blocks
+ * @cfg_ranges: mmsys config registers read at probe and compared when the
+ *              path registers do not take writes after a power down (only
+ *              registers the MediaTek driver itself dumps)
+ * @num_cfg_ranges: Number of entries in @cfg_ranges
+ * @gce_base: Physical address of the display GCE, for the DISP_VA
+ *            handshake experiment (0: none)
+ * @mminfra_cfg_base: Physical address of the MM_INFRA config (GCE clocks)
+ * @disp_va_start: GCE token the secure firmware waits for
+ * @disp_va_end: GCE token it sets when done
+ * @gce_tokens: GCE software tokens the MediaTek GCE driver sets to 1 at
+ *              every GCE power up ("default-tokens" of its DT node)
+ * @num_gce_tokens: Number of entries in @gce_tokens
+ *
+ * Some boot loaders program a display path that is longer than the one the
+ * DRM driver drives (engines the driver does not support yet, left in the
+ * mutex and in the crossbars). Its registers are read at probe and written
+ * back when the path is connected again after a power down of the domain.
+ */
+struct mtk_mmsys_boot_path {
+	u16 cg_sta[2];
+	u16 cg_clr[2];
+	u32 cg_keep[2];
+	const struct mtk_mmsys_keep_block *blocks;
+	u8 num_blocks;
+	const struct mtk_mmsys_reg_range *cfg_ranges;
+	u8 num_cfg_ranges;
+	u32 gce_base;
+	u32 mminfra_cfg_base;
+	u16 disp_va_start;
+	u16 disp_va_end;
+	const u16 *gce_tokens;
+	u8 num_gce_tokens;
+};
+
+/**
  * struct mtk_mmsys_driver_data - Settings of the mmsys
  * @clk_driver: Clock driver name that the mmsys is using
  *              (defined in drivers/clk/mediatek/clk-*.c).
@@ -125,6 +209,7 @@ struct mtk_mmsys_routes {
  *             Please notice that this value has to be set to 1 (minimum) if
  *             ETHDR is bypassed, otherwise MIXER could wait too long and causing
  *             underflow.
+ * @boot_path: Display path of the boot loader kept across power downs.
  *
  * Each MMSYS (multi-media system) may have different settings, they may use
  * different clock sources, mux settings, reset control ...etc., and these
@@ -139,6 +224,7 @@ struct mtk_mmsys_driver_data {
 	const u32 num_resets;
 	const bool is_vppsys;
 	const u8 vsync_len;
+	const struct mtk_mmsys_boot_path *boot_path;
 };
 
 /*

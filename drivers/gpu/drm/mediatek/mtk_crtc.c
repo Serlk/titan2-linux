@@ -45,6 +45,7 @@ struct mtk_crtc {
 	bool				pending_needs_vblank;
 	/* the output drives a command mode panel: frames are sent on request */
 	bool				cmd_mode;
+	bool				cmd_frame_armed;
 	struct drm_pending_vblank_event	*event;
 
 	struct drm_plane		*planes;
@@ -572,6 +573,15 @@ static void mtk_crtc_cmd_mode_frame(struct mtk_crtc *mtk_crtc)
 	struct mtk_ddp_comp *output = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
 
 	mtk_crtc_ddp_config(&mtk_crtc->base, NULL);
+	if (READ_ONCE(mtk_drm_cmd_te_sync)) {
+		unsigned long flags;
+
+		/* Registers are ready; the TE IRQ will kick mutex and DSI. */
+		spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+		mtk_crtc->cmd_frame_armed = true;
+		spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+		return;
+	}
 
 	mtk_mutex_enable(mtk_crtc->mutex);
 	mtk_ddp_comp_trigger(output);
@@ -680,6 +690,29 @@ static void mtk_crtc_ddp_irq(void *data)
 	struct drm_crtc *crtc = data;
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
+	unsigned long flags;
+
+	if (mtk_crtc->cmd_mode && READ_ONCE(mtk_drm_cmd_te_sync)) {
+		struct mtk_ddp_comp *output;
+
+		if (!mtk_crtc->enabled)
+			return;
+		/* This callback is the real TE edge, including idle refreshes. */
+		drm_crtc_handle_vblank(crtc);
+		spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+		if (!mtk_crtc->config_updating && mtk_crtc->cmd_frame_armed) {
+			mtk_crtc->cmd_frame_armed = false;
+			output = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+			mtk_mutex_enable(mtk_crtc->mutex);
+			mtk_ddp_comp_trigger(output);
+			if (mtk_crtc->pending_needs_vblank) {
+				mtk_crtc_finish_page_flip(mtk_crtc);
+				mtk_crtc->pending_needs_vblank = false;
+			}
+		}
+		spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+		return;
+	}
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;
@@ -710,6 +743,8 @@ static int mtk_crtc_enable_vblank(struct drm_crtc *crtc)
 	 * a timer at the refresh rate of the mode count the vblanks. The end of
 	 * a frame still completes the page flip.
 	 */
+	if (mtk_crtc->cmd_mode && READ_ONCE(mtk_drm_cmd_te_sync))
+		return 0;
 	if (mtk_crtc->cmd_mode)
 		return drm_crtc_vblank_start_timer(crtc);
 
@@ -722,6 +757,9 @@ static void mtk_crtc_disable_vblank(struct drm_crtc *crtc)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+
+	if (mtk_crtc->cmd_mode && READ_ONCE(mtk_drm_cmd_te_sync))
+		return;
 
 	if (mtk_crtc->cmd_mode) {
 		drm_crtc_vblank_cancel_timer(crtc);
@@ -861,6 +899,7 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 	struct drm_device *dev = mtk_crtc->base.dev;
+	unsigned long flags;
 	int i;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
@@ -874,6 +913,9 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	 */
 	if (mtk_crtc->cmd_mode) {
 		mutex_lock(&mtk_crtc->hw_lock);
+		spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+		mtk_crtc->cmd_frame_armed = false;
+		spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
 		mtk_ddp_comp_wait_idle(mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]);
 		mutex_unlock(&mtk_crtc->hw_lock);
 		goto hw_fini;

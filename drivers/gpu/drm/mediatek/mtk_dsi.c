@@ -165,6 +165,8 @@
 
 /* longest a command mode frame may take, waiting for the TE edge included */
 #define MTK_DSI_FRAME_TIMEOUT_MS	100
+/* about 1 ms of read acknowledges in the interrupt handler */
+#define MTK_DSI_IRQ_RACK_TRIES		1000
 
 /*
  * Command mode panels: start frames on the tearing effect signal of the
@@ -197,6 +199,25 @@ struct mtk_phy_timing {
 	u32 clk_hs_prepare;
 	u32 clk_hs_post;
 	u32 clk_hs_exit;
+};
+
+/*
+ * MT6878: the TX buffer of the controller (and two control registers) that
+ * the MediaTek driver programs on every power up and this driver does not.
+ * Kept as the boot loader set them and written back after a power down of
+ * the domain; BUF_CON0 (buffer enable) last.
+ */
+static const u16 mtk_dsi_boot_regs[] = {
+	0x0f0,	/* DSI_RESERVED */
+	0x170,	/* DSI_DEBUG_SEL */
+	0x404,	/* DSI_BUF_CON1 */
+	0x410,	/* DSI_TX_BUF_RW_TIMES */
+	0x414, 0x418,	/* DSI_BUF_SODI_HIGH/LOW */
+	0x424, 0x428,	/* DSI_BUF_PREULTRA_HIGH/LOW */
+	0x42c, 0x430,	/* DSI_BUF_ULTRA_HIGH/LOW */
+	0x434, 0x438,	/* DSI_BUF_URGENT_HIGH/LOW */
+	0x43c,	/* DSI_BUF_PREURGENT_HIGH */
+	0x400,	/* DSI_BUF_CON0 */
 };
 
 struct phy;
@@ -242,6 +263,11 @@ struct mtk_dsi {
 	bool lanes_from_boot;
 	/* engine and digital clocks kept on from probe to the first power on */
 	bool boot_clks_held;
+	/* mtk_dsi_boot_regs as found at probe, if the link was left on */
+	u32 boot_regs[ARRAY_SIZE(mtk_dsi_boot_regs)];
+	bool boot_regs_valid;
+	/* the state of a stuck frame was logged since the last power on */
+	bool stuck_logged;
 
 	/* command mode: a frame has been started and is not done yet */
 	bool frame_pending;
@@ -690,6 +716,8 @@ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 
 	if (mtk_dsi_is_cmd_mode(dsi))
 		inten |= FRAME_DONE_INT_FLAG;
+	if (mtk_dsi_is_cmd_mode(dsi) && READ_ONCE(mtk_drm_cmd_te_sync))
+		inten |= TE_RDY_INT_FLAG;
 
 	writel(inten, dsi->regs + DSI_INTEN);
 }
@@ -740,7 +768,8 @@ static bool mtk_dsi_frame_done(struct mtk_dsi *dsi)
 	pending = dsi->frame_pending;
 	dsi->frame_pending = false;
 	if (pending) {
-		vblank_cb = dsi->vblank_cb;
+		if (!READ_ONCE(mtk_drm_cmd_te_sync))
+			vblank_cb = dsi->vblank_cb;
 		vblank_cb_data = dsi->vblank_cb_data;
 	}
 	spin_unlock_irqrestore(&dsi->frame_lock, flags);
@@ -758,6 +787,10 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG |
 		   FRAME_DONE_INT_FLAG;
 	u32 frame_flags = CMD_DONE_INT_FLAG | FRAME_DONE_INT_FLAG;
+	bool te_sync = mtk_dsi_is_cmd_mode(dsi) && READ_ONCE(mtk_drm_cmd_te_sync);
+
+	if (te_sync)
+		flag |= TE_RDY_INT_FLAG;
 
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
@@ -776,11 +809,39 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 		status &= ~FRAME_DONE_INT_FLAG;
 	}
 
+	if (te_sync && (status & TE_RDY_INT_FLAG)) {
+		void (*callback)(void *data);
+		void *callback_data;
+		unsigned long flags;
+
+		mtk_dsi_mask(dsi, DSI_INTSTA, TE_RDY_INT_FLAG, 0);
+		spin_lock_irqsave(&dsi->frame_lock, flags);
+		callback = dsi->vblank_cb;
+		callback_data = dsi->vblank_cb_data;
+		spin_unlock_irqrestore(&dsi->frame_lock, flags);
+		if (callback)
+			callback(callback_data);
+		status &= ~TE_RDY_INT_FLAG;
+	}
+
 	if (status) {
+		unsigned int tries = MTK_DSI_IRQ_RACK_TRIES;
+
+		/*
+		 * Bounded: a controller that stays busy (a frame stuck in the
+		 * pipeline, e.g. after a power loss of the display path) would
+		 * otherwise hold this CPU in hard interrupt context for good.
+		 */
 		do {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
+			if (!(tmp & DSI_BUSY))
+				break;
+			udelay(1);
+		} while (--tries);
+		if (!tries)
+			dev_warn_ratelimited(dsi->dev, "still busy in the interrupt (INTSTA 0x%08x), giving up\n",
+					     tmp);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
@@ -835,6 +896,30 @@ static void mtk_dsi_release_boot_clks(struct mtk_dsi *dsi)
 	clk_disable_unprepare(dsi->digital_clk);
 	clk_disable_unprepare(dsi->engine_clk);
 	dsi->boot_clks_held = false;
+}
+
+/* Write back the boot loader registers a power down of the domain reset */
+static void mtk_dsi_restore_boot_regs(struct mtk_dsi *dsi)
+{
+	unsigned int i, restored = 0;
+	u32 val;
+
+	if (!dsi->boot_regs_valid)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(mtk_dsi_boot_regs); i++) {
+		val = readl(dsi->regs + mtk_dsi_boot_regs[i]);
+		if (val == dsi->boot_regs[i])
+			continue;
+		dev_dbg(dsi->dev, "%#05x: %08x, boot loader left %08x\n",
+			mtk_dsi_boot_regs[i], val, dsi->boot_regs[i]);
+		writel(dsi->boot_regs[i], dsi->regs + mtk_dsi_boot_regs[i]);
+		restored++;
+	}
+
+	if (restored)
+		dev_info(dsi->dev, "wrote back %u buffer registers of the boot loader\n",
+			 restored);
 }
 
 static int mtk_dsi_poweron(struct mtk_dsi *dsi)
@@ -900,14 +985,24 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 
 	mtk_dsi_release_boot_clks(dsi);
 
-	mtk_dsi_enable(dsi);
-
+	/*
+	 * Shadow bypass first: after a power down of the domain the shadow
+	 * control is back at its reset value, and an enable written before
+	 * it would go to the shadow register only (MT6878 read DSI_EN 0 in
+	 * the first frame after such a resume).
+	 */
 	if (dsi->driver_data->has_shadow_ctl)
 		writel(FORCE_COMMIT | BYPASS_SHADOW,
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
+	mtk_dsi_enable(dsi);
 	mtk_dsi_reset_engine(dsi);
+	if (!(readl(dsi->regs + DSI_CON_CTRL) & DSI_EN))
+		dev_warn(dev, "enable does not read back (CON_CTRL %08x)\n",
+			 readl(dsi->regs + DSI_CON_CTRL));
+	mtk_dsi_restore_boot_regs(dsi);
 	mtk_dsi_phy_timconfig(dsi);
+	dsi->stuck_logged = false;
 
 	if (mtk_dsi_is_cmd_mode(dsi)) {
 		mtk_dsi_config_cmd_mode(dsi);
@@ -979,11 +1074,11 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 	if (mtk_dsi_is_cmd_mode(dsi)) {
 		/*
 		 * The panel is initialized by now. Frames are started by the
-		 * CRTC, see mtk_dsi_ddp_trigger(); with dsi_te each transfer
-		 * waits for the tearing effect signal of the panel (not
-		 * before: an uninitialized panel gives no TE).
+		 * CRTC, see mtk_dsi_ddp_trigger(). Enable the panel TE input
+		 * only after initialization; cmd_te_sync uses its interrupt
+		 * to start transfers and count real display refreshes.
 		 */
-		if (dsi_te)
+		if (dsi_te || READ_ONCE(mtk_drm_cmd_te_sync))
 			mtk_dsi_mask(dsi, DSI_TXRX_CTRL, EXT_TE_EN, EXT_TE_EN);
 	} else {
 		mtk_dsi_start(dsi);
@@ -1137,6 +1232,26 @@ void mtk_dsi_ddp_unregister_vblank_cb(struct device *dev)
 }
 
 /*
+ * Once per power on, the controller state of the first frame that did not
+ * end: whether the link, the queue or the pixel input is what waits.
+ */
+static void mtk_dsi_log_stuck(struct mtk_dsi *dsi)
+{
+	dev_info(dsi->dev, "stuck frame: con %08x mode %08x txrx %08x ps %08x size %08x cmdq_size %08x cmdq0 %08x lccon %08x ld0con %08x dbg6 %08x dbg7 %08x buf %08x %08x\n",
+		 readl(dsi->regs + DSI_CON_CTRL),
+		 readl(dsi->regs + DSI_MODE_CTRL),
+		 readl(dsi->regs + DSI_TXRX_CTRL),
+		 readl(dsi->regs + DSI_PSCTRL),
+		 readl(dsi->regs + DSI_SIZE_CON),
+		 readl(dsi->regs + DSI_CMDQ_SIZE),
+		 readl(dsi->regs + dsi->driver_data->reg_cmdq_off),
+		 readl(dsi->regs + DSI_PHY_LCCON),
+		 readl(dsi->regs + DSI_PHY_LD0CON),
+		 readl(dsi->regs + 0x160), readl(dsi->regs + 0x164),
+		 readl(dsi->regs + 0x400), readl(dsi->regs + 0x404));
+}
+
+/*
  * Command mode: wait for the frame started last. A frame that never ends
  * is completed here, so that its page flip is not left hanging, and the
  * engine is reset.
@@ -1157,6 +1272,10 @@ static void mtk_dsi_wait_frame_done(struct mtk_dsi *dsi)
 	dev_warn_ratelimited(dsi->dev, "frame not done after %u ms (INTSTA 0x%08x)\n",
 			     MTK_DSI_FRAME_TIMEOUT_MS,
 			     readl(dsi->regs + DSI_INTSTA));
+	if (!dsi->stuck_logged) {
+		dsi->stuck_logged = true;
+		mtk_dsi_log_stuck(dsi);
+	}
 	mtk_dsi_enable(dsi);
 	mtk_dsi_reset_engine(dsi);
 }
@@ -1176,8 +1295,8 @@ void mtk_dsi_ddp_wait_idle(struct device *dev)
 /*
  * Send one frame to a command mode panel: a DCS write_memory_start long
  * packet whose payload is the output of the display pipeline. The mutex
- * of the CRTC must have been enabled before. With EXT_TE_EN the transfer
- * starts on the next tearing effect edge of the panel.
+ * of the CRTC must have been enabled before. In cmd_te_sync mode the TE
+ * interrupt invokes this after process context has waited for idle.
  */
 void mtk_dsi_ddp_trigger(struct device *dev)
 {
@@ -1189,8 +1308,15 @@ void mtk_dsi_ddp_trigger(struct device *dev)
 	if (!dsi->enabled || !mtk_dsi_is_cmd_mode(dsi))
 		return;
 
-	mtk_dsi_wait_frame_done(dsi);
-	mtk_dsi_wait_for_idle(dsi);
+	if (READ_ONCE(mtk_drm_cmd_te_sync)) {
+		/* The process-context update waited for EOF before arming TE. */
+		if (WARN_ON_ONCE(READ_ONCE(dsi->frame_pending) ||
+				 (readl(dsi->regs + DSI_INTSTA) & DSI_BUSY)))
+			return;
+	} else {
+		mtk_dsi_wait_frame_done(dsi);
+		mtk_dsi_wait_for_idle(dsi);
+	}
 
 	/* commands sent in between have overwritten the queue */
 	writel(FIELD_PREP(CONFIG, HSTX | FRAME_PACKET) |
@@ -1283,7 +1409,6 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 {
 	struct mtk_dsi *dsi = host_to_dsi(host);
 	struct device *dev = host->dev;
-	struct drm_device *drm = dsi->bridge.dev;
 	int ret;
 
 	dsi->lanes = device->lanes;
@@ -1306,9 +1431,8 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 
 	ret = component_add(host->dev, &mtk_dsi_component_ops);
 	if (ret) {
-		drm_err(drm, "failed to add dsi_host component: %d\n", ret);
 		drm_bridge_remove(&dsi->bridge);
-		return ret;
+		return dev_err_probe(dev, ret, "failed to add dsi_host component\n");
 	}
 
 	return 0;
@@ -1553,6 +1677,12 @@ static void mtk_dsi_read_boot_state(struct mtk_dsi *dsi)
 	 */
 	dsi->boot_clks_held = true;
 	dsi->lanes_from_boot = true;
+
+	for (i = 0; i < ARRAY_SIZE(mtk_dsi_boot_regs); i++)
+		dsi->boot_regs[i] = readl(dsi->regs + mtk_dsi_boot_regs[i]);
+	dsi->boot_regs_valid = true;
+	dev_dbg(dev, "buffer: BUF_CON0 %08x BUF_CON1 %08x\n",
+		dsi->boot_regs[ARRAY_SIZE(mtk_dsi_boot_regs) - 1], dsi->boot_regs[2]);
 	dev_info(dev, "command mode link left on at %lu bps, keeping its D-PHY timings %08x %08x %08x %08x\n",
 		 dsi->boot_rate, dsi->boot_timcon[0], dsi->boot_timcon[1],
 		 dsi->boot_timcon[2], dsi->boot_timcon[3]);

@@ -10,6 +10,9 @@
 #include "mtk_ddp_comp.h"
 
 #define MAX_CONNECTOR	2
+
+/* MT6878 command-mode TE synchronization; change only with the output off. */
+extern bool mtk_drm_cmd_te_sync;
 #define DDP_COMPONENT_DRM_OVL_ADAPTOR (DDP_COMPONENT_ID_MAX + 1)
 #define DDP_COMPONENT_DRM_ID_MAX (DDP_COMPONENT_DRM_OVL_ADAPTOR + 1)
 
