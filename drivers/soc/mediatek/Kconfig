@@ -137,4 +137,14 @@ config MTK_TINYSYS_IPI
 source "drivers/soc/mediatek/scp/Kconfig"
 source "drivers/soc/mediatek/sensorhub/Kconfig"
 
+config MTK_ATF_LOG
+	bool "MediaTek TF-A log buffer (debugfs, read only)"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF && DEBUG_FS
+	help
+	  Show the log ring of the MediaTek TF-A (BL31) firmware, which the
+	  boot loader reserves as "mediatek,atf-log-reserved", in
+	  /sys/kernel/debug/mtk-atf-log. Read only: the buffer is never
+	  written.
+
 endmenu
