@@ -1351,6 +1351,8 @@ enum {
 	MCU_CE_CMD_REMOVE_STA_RECORD = 0x14,
 	MCU_CE_CMD_SET_PS_PROFILE = 0x05,
 	MCU_CE_CMD_SET_RX_FILTER = 0x0a,
+	MCU_CE_CMD_SET_IP_ADDRESS = 0x10,
+	MCU_CE_CMD_ADDBA_REJECT = 0x20,
 	MCU_CE_CMD_SET_CHAN_DOMAIN = 0x0f,
 	MCU_CE_CMD_SET_BSS_CONNECTED = 0x16,
 	MCU_CE_CMD_SET_BSS_ABORT = 0x17,
@@ -1358,6 +1360,8 @@ enum {
 	MCU_CE_CMD_SET_ROC = 0x1c,
 	MCU_CE_CMD_SET_EDCA_PARMS = 0x1d,
 	MCU_CE_CMD_SET_P2P_OPPPS = 0x33,
+	MCU_CE_CMD_SET_WOWLAN = 0x4a,
+	MCU_CE_CMD_SET_SUSPEND_MODE = 0x58,
 	MCU_CE_CMD_SET_CLC = 0x5c,
 	MCU_CE_CMD_SET_RATE_TX_POWER = 0x5d,
 	MCU_CE_CMD_SCHED_SCAN_ENABLE = 0x61,
@@ -1371,6 +1375,7 @@ enum {
 	MCU_CE_CMD_FWLOG_2_HOST = 0xc5,
 	MCU_CE_CMD_GET_WTBL = 0xcd,
 	MCU_CE_CMD_GET_TXPWR = 0xd0,
+	MCU_CE_CMD_HIF_CTRL = 0xf6,
 };
 
 enum {
@@ -1444,6 +1449,8 @@ enum {
 	MT_NIC_CAP_ANTSWP = 0x16,
 	MT_NIC_CAP_WFDMA_REALLOC,
 	MT_NIC_CAP_6G,
+	MT_NIC_CAP_HOST_STATUS_EMI_OFFSET = 0x19,
+	MT_NIC_CAP_HOST_SUSPEND_INFO = 0x1f,
 	MT_NIC_CAP_CHIP_CAP = 0x20,
 	MT_NIC_CAP_EML_CAP = 0x22,
 };
@@ -2059,6 +2066,15 @@ int mt76_connac_legacy_bss_info(struct mt76_dev *dev, struct ieee80211_vif *vif,
 int mt76_connac_legacy_add_key(struct mt76_dev *dev, struct mt76_vif_link *mvif,
 			       struct ieee80211_key_conf *key, const u8 *peer,
 			       u8 wlan_idx, bool add);
+int mt76_connac_legacy_suspend_mode(struct mt76_dev *dev, u8 bss_idx,
+				    bool enable, u8 mdtim, bool wow);
+int mt76_connac_legacy_set_ip_addr(struct mt76_dev *dev, u8 bss_idx,
+				   const __be32 *addr, const __be32 *mask,
+				   int count);
+int mt76_connac_legacy_addba_reject(struct mt76_dev *dev, bool reject);
+int mt76_connac_legacy_set_wowlan(struct mt76_dev *dev, bool start,
+				  u8 detect, u16 detect_ext, u16 filter,
+				  u8 hif, u8 gpio_pin, u8 trigger_lvl);
 void mt76_connac_mcu_fill_hw_scan(struct mt76_phy *phy,
 				  struct ieee80211_vif *vif,
 				  struct ieee80211_scan_request *scan_req,

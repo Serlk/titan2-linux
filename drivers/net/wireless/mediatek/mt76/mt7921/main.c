@@ -687,7 +687,8 @@ mt7921_sniffer_interface_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
 	pm->enable = pm->enable_user && !monitor;
 	pm->ds_enable = pm->ds_enable_user && !monitor;
 
-	mt76_connac_mcu_set_deep_sleep(&dev->mt76, pm->ds_enable);
+	if (!dev->ds_fw_default || monitor)
+		mt76_connac_mcu_set_deep_sleep(&dev->mt76, pm->ds_enable);
 
 	if (monitor)
 		mt7921_mcu_set_beacon_filter(dev, vif, false);
@@ -700,11 +701,18 @@ void mt7921_set_runtime_pm(struct mt792x_dev *dev)
 	bool monitor = !!(hw->conf.flags & IEEE80211_CONF_MONITOR);
 
 	pm->enable = pm->enable_user && !monitor;
-	ieee80211_iterate_active_interfaces(hw,
-					    IEEE80211_IFACE_ITER_RESUME_ALL,
-					    mt7921_pm_interface_iter, dev);
+	/*
+	 * The SoC firmware tracks the beacons of the BSS itself once it is
+	 * connected (and has no unified beacon filter command): the beacon
+	 * filter and connection monitor stay as they are.
+	 */
+	if (!dev->soc_axi)
+		ieee80211_iterate_active_interfaces(hw,
+						    IEEE80211_IFACE_ITER_RESUME_ALL,
+						    mt7921_pm_interface_iter, dev);
 	pm->ds_enable = pm->ds_enable_user && !monitor;
-	mt76_connac_mcu_set_deep_sleep(&dev->mt76, pm->ds_enable);
+	if (!dev->ds_fw_default)
+		mt76_connac_mcu_set_deep_sleep(&dev->mt76, pm->ds_enable);
 }
 
 static int mt7921_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
@@ -1295,6 +1303,17 @@ mt7921_set_antenna(struct ieee80211_hw *hw, int radio_idx,
 }
 
 #ifdef CONFIG_PM
+/* the SoC firmware: CMD_SUSPEND_MODE_SETTING per BSS, no WoW filters */
+static void mt7921_soc_suspend_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
+{
+	struct mt792x_dev *dev = priv;
+	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+	bool suspend = !test_bit(MT76_STATE_RUNNING, &dev->mphy.state);
+
+	mt76_connac_legacy_suspend_mode(&dev->mt76, mvif->bss_conf.mt76.idx,
+					suspend, 1, false);
+}
+
 static int mt7921_suspend(struct ieee80211_hw *hw,
 			  struct cfg80211_wowlan *wowlan)
 {
@@ -1310,10 +1329,17 @@ static int mt7921_suspend(struct ieee80211_hw *hw,
 	mt792x_mutex_acquire(dev);
 
 	clear_bit(MT76_STATE_RUNNING, &phy->mt76->state);
-	ieee80211_iterate_active_interfaces(hw,
-					    IEEE80211_IFACE_ITER_RESUME_ALL,
-					    mt7921_mcu_set_suspend_iter,
-					    &dev->mphy);
+	if (dev->soc_axi)
+		/* no unified commands: the legacy suspend mode, the platform
+		 * sleep callback does the rest (soc.c) */
+		ieee80211_iterate_active_interfaces(hw,
+						    IEEE80211_IFACE_ITER_RESUME_ALL,
+						    mt7921_soc_suspend_iter, dev);
+	else
+		ieee80211_iterate_active_interfaces(hw,
+						    IEEE80211_IFACE_ITER_RESUME_ALL,
+						    mt7921_mcu_set_suspend_iter,
+						    &dev->mphy);
 
 	mt792x_mutex_release(dev);
 
@@ -1328,10 +1354,15 @@ static int mt7921_resume(struct ieee80211_hw *hw)
 	mt792x_mutex_acquire(dev);
 
 	set_bit(MT76_STATE_RUNNING, &phy->mt76->state);
-	ieee80211_iterate_active_interfaces(hw,
-					    IEEE80211_IFACE_ITER_RESUME_ALL,
-					    mt76_connac_mcu_set_suspend_iter,
-					    &dev->mphy);
+	if (dev->soc_axi)
+		ieee80211_iterate_active_interfaces(hw,
+						    IEEE80211_IFACE_ITER_RESUME_ALL,
+						    mt7921_soc_suspend_iter, dev);
+	else
+		ieee80211_iterate_active_interfaces(hw,
+						    IEEE80211_IFACE_ITER_RESUME_ALL,
+						    mt76_connac_mcu_set_suspend_iter,
+						    &dev->mphy);
 
 	ieee80211_queue_delayed_work(hw, &phy->mt76->mac_work,
 				     MT792x_WATCHDOG_TIME);

@@ -261,8 +261,31 @@ struct mt792x_dev {
 	bool regd_change:1;
 	/* MT6878 CONNSYS (SOC7_0) on AXI: firmware preloaded by the boot loader */
 	bool soc_axi:1;
+
+	/*
+	 * SoC firmware: where the host says it is suspended (capability
+	 * HOST_STATUS_EMI_OFFSET or HOST_SUSPEND_INFO), see soc.c.
+	 */
+	struct {
+		u8 type;	/* 0 none, 1 EMI word, 2 reg rmw, 3 set/clr regs */
+		u8 shift;
+		u32 set_addr;
+		u32 clr_addr;
+		u32 mask;
+	} host_suspend;
 	/* the firmware reported its single SKU info (NIC capability) */
 	bool fw_single_sku:1;
+	/*
+	 * SoC: never send CHIP_CONFIG "KeepFullPwr" on its own, leave the
+	 * firmware default (MediaTek's AXI driver never sends it); cleared
+	 * once the user sets deep sleep through debugfs.
+	 */
+	bool ds_fw_default:1;
+	/* last low power (sleepy) event of the firmware, SoC runtime PM */
+	bool fw_sleepy;
+	u32 fw_sleepy_events;
+	/* SoC: log this many packets after a system sleep (what woke it) */
+	u8 wake_probe;
 	wait_queue_head_t wait;
 
 	struct work_struct init_work;

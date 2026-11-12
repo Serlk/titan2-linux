@@ -26,6 +26,8 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/iopoll.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
@@ -109,6 +111,7 @@
 #define  WB_GPS_L5_EN_ADDR		(WT_SLP + 0x098)
 #define  WB_SLP_TOP_CK_0		(WT_SLP + 0x120)
 #define  WB_SLP_TOP_CK_1		(WT_SLP + 0x124)
+#define  WB_SLP_TOP_CK_2		(WT_SLP + 0x128)
 #define   WB_SLP_TOP_CK_EN		BIT(0)
 #define   WB_SLP_TOP_CK_BSY		BIT(1)
 
@@ -127,6 +130,7 @@
 #define  CFG_CMDBT_FETCH_START_ADDR0	(CFG + 0x050)
 #define  CFG_EMI_CTL_0			(CFG + 0x100)
 #define  CFG_EMI_CTL_WF			(CFG + 0x114)
+#define  CFG_EMI_CTL_BT			(CFG + 0x118)
 
 /* conn_infra_clkgen_top */
 #define CLKGEN				0x12000
@@ -197,10 +201,23 @@
 #define HOST_CSR			0x60000
 #define  HOST_CONN_INFRA_WAKEPU_TOP	(HOST_CSR + 0x1a0)
 #define  HOST_CONN_INFRA_WAKEPU_WF	(HOST_CSR + 0x1a4)
+#define  HOST_CONN_INFRA_WAKEPU_BT	(HOST_CSR + 0x1a8)
+#define  HOST_CONN_INFRA_WAKEPU_GPS	(HOST_CSR + 0x1ac)
 /* secure only: reads 0 and ignores writes from the non-secure side */
 #define  HOST_CONN2AP_REMAP_MCU_EMI	(HOST_CSR + 0x354)
 #define   CONN2AP_REMAP_BASE		GENMASK(19, 0)	/* address >> 16 */
+#define  HOST_CR_CFG_ON_DBG_MUX_SEL	(HOST_CSR + 0x15c)
+#define   CFG_ON_DBG_MUX_SEL		GENMASK(2, 0)
 #define  HOST_CONN_INFRA_SLP_CNT_CTL	(HOST_CSR + 0x380)
+#define   SLP_CNT_SEL			GENMASK(3, 1)
+#define   SLP_CNT_RD_TRIGGER		BIT(4)
+#define  HOST_CONN_INFRA_SLP_CNT_STOP	(HOST_CSR + 0x384)
+#define   SLP_IN_SLEEP			GENMASK(23, 16)	/* 23 infra, 18 bt, 17 wf, 16 gps */
+#define   SLP_CNT_CLR			(BIT(15) | BIT(10) | BIT(9) | BIT(8))
+#define   SLP_CNT_STOP			(BIT(7) | BIT(2) | BIT(1) | BIT(0))
+#define  HOST_CONN_INFRA_SLP_TIMER	(HOST_CSR + 0x388)	/* 32 kHz ticks */
+#define  HOST_CONN_INFRA_SLP_COUNTER	(HOST_CSR + 0x38c)
+#define  HOST_CONN_INFRA_CFG_ON_DBG	(HOST_CSR + 0xa04)
 #define  HOST_CONNSYS_PWR_STATES	(HOST_CSR + 0xa10)
 #define   PWR_STATES_WFSYS_RGU_OFF_RST_B BIT(30)
 #define  HOST_WF_ON_MONFLG_EN		(HOST_CSR + 0xb00)
@@ -211,6 +228,8 @@
 /* conn_semaphore, as master M2 (the AP) */
 #define SEMA_M2_OWN_STA(n)		(0x70000 + 0x2000 + 4 * (n))
 #define SEMA_M2_OWN_REL(n)		(0x70000 + 0x2200 + 4 * (n))
+/* per-master summary the downstream BT driver dumps (M0 WF, M1 BT, M2 AP, M3) */
+#define SEMA_MN_STATUS(n)		(0x70400 + 0x1000 * (n))
 #define SEMA_RFSPI			12
 #define SEMA_COMMON_SYSRAM		23
 #define SEMA_TIMEOUT_US			1000
@@ -357,15 +376,45 @@ struct mtk_conninfra {
 	/* Wi-Fi starts (power-on to calibration done): BT on/off waits */
 	bool wifi_starting;
 	wait_queue_head_t wifi_start_wq;
+	/* BT starts (BGF ROM boot to function on): WFSYS on waits */
+	bool bt_starting;
 
 	spinlock_t spi_lock;		/* RF SPI semaphore holder, IRQs off */
 	unsigned long spi_flags;
+
+	/* system sleep statistics, see sleep_stats */
+	bool slp_counting;
+	ktime_t slp_start;
 };
 
 static bool allow_no_emi;
 module_param(allow_no_emi, bool, 0644);
 MODULE_PARM_DESC(allow_no_emi,
 		 "Start WFSYS even if the CONNSYS EMI is not known to be remapped (unsafe)");
+
+/*
+ * The factory firmware boot (Titan 2 Android, conninfra pre-cal) starts BT, lets it
+ * reach its idle loop, turns the BT function on and off, and only then
+ * powers the WM MCU on. Our boots that released the BGF CPU while the
+ * WFSYS power-on ran failed now and then with the BGF ROM stuck.
+ */
+static unsigned int bt_start_wait_ms = 3000;
+module_param(bt_start_wait_ms, uint, 0644);
+MODULE_PARM_DESC(bt_start_wait_ms,
+		 "Longest wait of the WFSYS power-on for a BT start in progress, ms (0: do not wait)");
+
+/*
+ * What CONNSYS did in a system sleep, as the downstream conninfra does around
+ * every suspend (connv2_suspend_notify clears the hardware sleep counters
+ * of conn_host_csr_top, the resume work reads them): at the start of the
+ * sleep who keeps the CONN oscillator on and which parts are asleep, at
+ * resume how long CONN_INFRA, the WF MCU, BGF, WFSYS and GPS slept. Only
+ * always-on registers of conn_host_csr_top are touched, no wakeup.
+ */
+static bool sleep_stats = true;
+module_param(sleep_stats, bool, 0644);
+MODULE_PARM_DESC(sleep_stats,
+		 "Log the CONNSYS sleep counters and oscillator owners around system sleep (default true)");
 
 /* ------------------------------------------------------------------ */
 /* register helpers                                                    */
@@ -897,7 +946,9 @@ static int mtk_conninfra_adie_xo_buffers(struct mtk_conninfra *ci,
 	const unsigned long bgf = BIT(MTK_CONNINFRA_BT) | BIT(MTK_CONNINFRA_GPS) |
 				  BIT(MTK_CONNINFRA_FM);
 	unsigned long changed = cur ^ next;
-	int ret;
+	bool bgf_on = (changed & next) & bgf;
+	u32 xo7 = 0;
+	int ret, rd = -ENODATA;
 
 	ret = mtk_conninfra_adie_top_ck(ci, true);
 	if (ret)
@@ -914,12 +965,18 @@ static int mtk_conninfra_adie_xo_buffers(struct mtk_conninfra *ci,
 		mtk_conninfra_spi_write(ci, SPI_TOP, ADIE6637_RG_TOP_XO_03,
 					on ? 0xe0000000 : 0x0);
 	}
-	if ((changed & next) & bgf)
+	if (bgf_on) {
 		mtk_conninfra_spi_write(ci, SPI_TOP, ADIE6637_RG_TOP_XO_07, 0x7);
+		/* debug: the failure dump of a BT start read 0 here */
+		rd = mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_RG_TOP_XO_07, &xo7);
+	}
 	if ((cur & bgf) && !(next & bgf))
 		mtk_conninfra_spi_write(ci, SPI_TOP, ADIE6637_RG_TOP_XO_07, 0x0);
 
 	mtk_conninfra_spi_unlock(ci);
+	if (bgf_on)
+		dev_info(ci->dev, "A-die TOP_XO_07 0x%08x after writing 0x7 (radios 0x%lx, read %d)\n",
+			 xo7, next, rd);
 out:
 	mtk_conninfra_adie_top_ck(ci, false);
 	return ret;
@@ -1327,6 +1384,31 @@ void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci, bool starting)
 }
 EXPORT_SYMBOL_GPL(mtk_conninfra_wifi_starting);
 
+/**
+ * mtk_conninfra_bt_started() - end of a BT start begun by radio_on(BT)
+ * @ci: CONNINFRA
+ *
+ * mtk_conninfra_radio_on(MTK_CONNINFRA_BT) marks a BT start; the BT
+ * driver calls this once the BGF MCU is up and the BT function is on
+ * (or the start failed). A WFSYS power-on waits for it.
+ */
+void mtk_conninfra_bt_started(struct mtk_conninfra *ci)
+{
+	WRITE_ONCE(ci->bt_starting, false);
+	wake_up_all(&ci->wifi_start_wq);
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_bt_started);
+
+static void mtk_conninfra_wait_bt_start(struct mtk_conninfra *ci)
+{
+	if (!bt_start_wait_ms || !READ_ONCE(ci->bt_starting))
+		return;
+	dev_info(ci->dev, "WFSYS power-on waits for the BT start\n");
+	if (!wait_event_timeout(ci->wifi_start_wq, !READ_ONCE(ci->bt_starting),
+				msecs_to_jiffies(bt_start_wait_ms)))
+		dev_warn(ci->dev, "BT still starting after %u ms\n", bt_start_wait_ms);
+}
+
 int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio radio)
 {
 	unsigned long cur;
@@ -1370,6 +1452,8 @@ int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio ra
 	}
 
 	ci->radios |= BIT(radio);
+	if (radio == MTK_CONNINFRA_BT)
+		WRITE_ONCE(ci->bt_starting, true);
 	dev_info(ci->dev, "radio %d on, radios 0x%lx\n", radio, ci->radios);
 out:
 	mutex_unlock(&ci->lock);
@@ -1383,6 +1467,9 @@ void mtk_conninfra_radio_off(struct mtk_conninfra *ci, enum mtk_conninfra_radio 
 
 	if (radio >= MTK_CONNINFRA_RADIO_MAX)
 		return;
+	/* a WFSYS power-on may wait for this BT: never wait for it back */
+	if (radio == MTK_CONNINFRA_BT)
+		mtk_conninfra_bt_started(ci);
 	mtk_conninfra_wait_wifi_start(ci, radio);
 
 	mutex_lock(&ci->lock);
@@ -1458,8 +1545,11 @@ static int mtk_conninfra_wf_wake(struct mtk_conninfra *ci)
 	}
 
 	ret = mtk_conninfra_poll_ip_version(ci, false);
-	if (ret)
+	if (ret) {
+		/* no CONN_INFRA: do not leave the Wi-Fi wake-up behind */
+		ci_clr(ci, HOST_CONN_INFRA_WAKEPU_WF, BIT(0));
 		return ret;
+	}
 
 	ret = ci_poll(ci, CFG_ON_PWRCTRL1, PWRCTRL1_CONN_INFRA_RDY,
 		      PWRCTRL1_CONN_INFRA_RDY, 500, 5500);
@@ -1619,6 +1709,7 @@ int mtk_conninfra_wfsys_on(struct mtk_conninfra *ci)
 	if (!ci->wfsys)
 		return -ENODEV;
 
+	mtk_conninfra_wait_bt_start(ci);
 	mutex_lock(&ci->lock);
 	if (!(ci->radios & BIT(MTK_CONNINFRA_WIFI))) {
 		ret = -ENODEV;
@@ -1708,6 +1799,60 @@ int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2])
 }
 EXPORT_SYMBOL_GPL(mtk_conninfra_adie_uid);
 
+/**
+ * mtk_conninfra_dump() - log the shared CONN_INFRA state a radio start needs
+ * @ci: CONNINFRA
+ * @who: prefix for the log lines
+ *
+ * For a radio driver whose subsystem did not start: force-on bits, power
+ * states, A-die top clock requests, EMI requests, hardware semaphores and
+ * the MT6637 XO buffers. Sleeps; does nothing while all radios are off.
+ */
+void mtk_conninfra_dump(struct mtk_conninfra *ci, const char *who)
+{
+	u32 xo[3] = { };
+	int ret;
+
+	mutex_lock(&ci->lock);
+	dev_info(ci->dev, "%s: radios 0x%lx hw_on %d wake_cnt %u wfsys_on %d wifi_starting %d bt_starting %d\n",
+		 who, ci->radios, ci->hw_on, ci->wake_cnt, ci->wfsys_on,
+		 READ_ONCE(ci->wifi_starting), READ_ONCE(ci->bt_starting));
+	if (!ci->radios || __mtk_conninfra_wakeup(ci))
+		goto out;
+
+	dev_info(ci->dev, "%s: wake top/wf/bt/gps %x %x %x %x, PWR_STATES 0x%08x, PWRCTRL1 0x%08x, radio status 0x%08x, clock type %u\n",
+		 who, ci_rd(ci, HOST_CONN_INFRA_WAKEPU_TOP),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_WF),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_BT),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_GPS),
+		 ci_rd(ci, HOST_CONNSYS_PWR_STATES), ci_rd(ci, CFG_ON_PWRCTRL1),
+		 ci_rd(ci, SW_CR_RADIO_STATUS), ci_rd(ci, SW_CR_CLOCK_TYPE));
+	dev_info(ci->dev, "%s: A-die top_ck_en 0/1/2 %08x %08x %08x, EMI_CTL 0/WF/BT %08x %08x %08x, sema M0-M3 %08x %08x %08x %08x\n",
+		 who, ci_rd(ci, WB_SLP_TOP_CK_0), ci_rd(ci, WB_SLP_TOP_CK_1),
+		 ci_rd(ci, WB_SLP_TOP_CK_2), ci_rd(ci, CFG_EMI_CTL_0),
+		 ci_rd(ci, CFG_EMI_CTL_WF), ci_rd(ci, CFG_EMI_CTL_BT),
+		 ci_rd(ci, SEMA_MN_STATUS(0)), ci_rd(ci, SEMA_MN_STATUS(1)),
+		 ci_rd(ci, SEMA_MN_STATUS(2)), ci_rd(ci, SEMA_MN_STATUS(3)));
+
+	ret = mtk_conninfra_adie_top_ck(ci, true);
+	if (!ret) {
+		ret = mtk_conninfra_spi_lock(ci);
+		if (!ret) {
+			mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_RG_TOP_XO_02, &xo[0]);
+			mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_RG_TOP_XO_03, &xo[1]);
+			mtk_conninfra_spi_read(ci, SPI_TOP, ADIE6637_RG_TOP_XO_07, &xo[2]);
+			mtk_conninfra_spi_unlock(ci);
+		}
+		mtk_conninfra_adie_top_ck(ci, false);
+	}
+	dev_info(ci->dev, "%s: A-die TOP_XO_02/03/07 %08x %08x %08x (%d)\n",
+		 who, xo[0], xo[1], xo[2], ret);
+	__mtk_conninfra_sleep(ci);
+out:
+	mutex_unlock(&ci->lock);
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_dump);
+
 int mtk_conninfra_get_emi(struct mtk_conninfra *ci, phys_addr_t *base, u32 *size)
 {
 	if (!ci->emi_base)
@@ -1717,6 +1862,57 @@ int mtk_conninfra_get_emi(struct mtk_conninfra *ci, phys_addr_t *base, u32 *size
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_conninfra_get_emi);
+
+u32 mtk_conninfra_clock_schematic(struct mtk_conninfra *ci)
+{
+	/* the Titan 2 runs on the co-clock (clock type 21 of the factory configuration) */
+	return ci->co_clock_52m ? 0x51 : 0x21;
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_clock_schematic);
+
+int mtk_conninfra_spi_update_bits(struct mtk_conninfra *ci,
+				  enum mtk_conninfra_spi_bus bus, u32 addr,
+				  u32 mask, u32 val)
+{
+	enum mtk_conninfra_spi sys;
+	u32 data;
+	int ret;
+
+	switch (bus) {
+	case MTK_CONNINFRA_SPI_GPS:
+		sys = SPI_GPS;
+		break;
+	case MTK_CONNINFRA_SPI_TOP:
+		sys = SPI_TOP;
+		break;
+	default:
+		return -EINVAL;
+	}
+	mutex_lock(&ci->lock);
+	if (!ci->hw_on) {
+		mutex_unlock(&ci->lock);
+		return -ENODEV;
+	}
+	/* the RF SPI master is in the CONN_INFRA off domain */
+	ret = __mtk_conninfra_wakeup(ci);
+	if (ret) {
+		mutex_unlock(&ci->lock);
+		return ret;
+	}
+	ret = mtk_conninfra_spi_lock(ci);
+	if (!ret) {
+		ret = mtk_conninfra_spi_read(ci, sys, addr, &data);
+		if (!ret) {
+			data = (data & ~mask) | (val & mask);
+			ret = mtk_conninfra_spi_write(ci, sys, addr, data);
+		}
+		mtk_conninfra_spi_unlock(ci);
+	}
+	__mtk_conninfra_sleep(ci);
+	mutex_unlock(&ci->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mtk_conninfra_spi_update_bits);
 
 static void mtk_conninfra_put_device(void *data)
 {
@@ -1988,6 +2184,17 @@ static int mtk_conninfra_probe(struct platform_device *pdev)
 	ci->co_clock_52m = of_property_read_bool(dev->of_node, "mediatek,co-clock-52mhz");
 	mtk_conninfra_get_emi_from_dt(ci);
 
+	/*
+	 * The radios keep running through system sleep (the Wi-Fi and the
+	 * Bluetooth firmware sleep on their own, the downstream kernel never
+	 * switches the CONN MTCMOS in suspend): as a wakeup device in an
+	 * active-wakeup power domain, genpd leaves the domain as it is in the
+	 * noirq phases instead of cutting it behind the running radios.
+	 */
+	ret = devm_device_init_wakeup(dev);
+	if (ret)
+		return ret;
+
 	ret = devm_pm_runtime_enable(dev);
 	if (ret)
 		return ret;
@@ -2021,6 +2228,124 @@ static void mtk_conninfra_remove(struct platform_device *pdev)
 		if (ci->radios & BIT(radio))
 			mtk_conninfra_radio_off(ci, radio);
 }
+
+/* ------------------------------------------------------------------ */
+/* system sleep statistics                                             */
+
+/* CONN_INFRA_CFG_ON_DBG, mux 0: who asks for the CONN oscillator (downstream order) */
+static const char * const mtk_conninfra_osc_names[] = {
+	[1] = "fm", [2] = "gps", [3] = "bgf", [4] = "wf", [5] = "bus",
+	[7] = "ap2conn", [12] = "pta", [13] = "spi", [15] = "thermal",
+};
+
+/* HOST_SLP_COUNTER_SEL values (conn_host_csr_top register description) */
+static const char * const mtk_conninfra_slp_names[] = {
+	"CONN_INFRA", "WF MCU", "BGF", "WFSYS", "GPS",
+};
+
+static u32 mtk_conninfra_osc_owners(struct mtk_conninfra *ci, char *buf,
+				    size_t len)
+{
+	u32 sel = ci_rd(ci, HOST_CR_CFG_ON_DBG_MUX_SEL);
+	unsigned int i;
+	size_t n = 0;
+	u32 v;
+
+	ci_wr(ci, HOST_CR_CFG_ON_DBG_MUX_SEL, sel & ~CFG_ON_DBG_MUX_SEL);
+	v = ci_rd(ci, HOST_CONN_INFRA_CFG_ON_DBG);
+	ci_wr(ci, HOST_CR_CFG_ON_DBG_MUX_SEL, sel);
+
+	for (i = 0; i < ARRAY_SIZE(mtk_conninfra_osc_names); i++)
+		if ((v & BIT(i)) && mtk_conninfra_osc_names[i])
+			n += scnprintf(buf + n, len - n, "%s%s", n ? "," : "",
+				       mtk_conninfra_osc_names[i]);
+	if (!n)
+		scnprintf(buf, len, "nobody");
+	return v;
+}
+
+static int mtk_conninfra_suspend_noirq(struct device *dev)
+{
+	struct mtk_conninfra *ci = dev_get_drvdata(dev);
+	char osc[64];
+	u32 dbg, stop;
+
+	if (!ci || !READ_ONCE(sleep_stats) || !mutex_trylock(&ci->lock))
+		return 0;
+	ci->slp_counting = false;
+	if (!ci->hw_on)
+		goto out;
+
+	dbg = mtk_conninfra_osc_owners(ci, osc, sizeof(osc));
+	stop = ci_rd(ci, HOST_CONN_INFRA_SLP_CNT_STOP);
+	dev_info(dev, "suspend: radios 0x%lx, AP wake-ups held %u (top/wf/bt/gps %x %x %x %x), asleep now:%s%s%s%s%s, oscillator on for %s (0x%08x)\n",
+		 ci->radios, ci->wake_cnt,
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_TOP),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_WF),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_BT),
+		 ci_rd(ci, HOST_CONN_INFRA_WAKEPU_GPS),
+		 stop & BIT(23) ? " conn_infra" : "", stop & BIT(17) ? " wf" : "",
+		 stop & BIT(18) ? " bt" : "", stop & BIT(16) ? " gps" : "",
+		 stop & SLP_IN_SLEEP ? "" : " nothing", osc, dbg);
+
+	/* the counters from zero and running, as connv2_suspend_notify */
+	ci_rmw(ci, HOST_CONN_INFRA_SLP_CNT_STOP, SLP_CNT_CLR | SLP_CNT_STOP,
+	       SLP_CNT_CLR);
+	usleep_range(150, 200);
+	ci_rmw(ci, HOST_CONN_INFRA_SLP_CNT_STOP, SLP_CNT_CLR, 0);
+	ci->slp_start = ktime_get_boottime();
+	ci->slp_counting = true;
+out:
+	mutex_unlock(&ci->lock);
+	return 0;
+}
+
+static int mtk_conninfra_resume_noirq(struct device *dev)
+{
+	struct mtk_conninfra *ci = dev_get_drvdata(dev);
+	u32 ms[ARRAY_SIZE(mtk_conninfra_slp_names)];
+	u32 cnt[ARRAY_SIZE(mtk_conninfra_slp_names)];
+	char osc[64];
+	unsigned int i;
+	s64 total;
+	u32 dbg;
+
+	if (!ci || !ci->slp_counting || !mutex_trylock(&ci->lock))
+		return 0;
+	ci->slp_counting = false;
+	if (!ci->hw_on)
+		goto out;
+
+	total = ktime_ms_delta(ktime_get_boottime(), ci->slp_start);
+	for (i = 0; i < ARRAY_SIZE(mtk_conninfra_slp_names); i++) {
+		/* the read trigger takes a rising edge, 150 us wide (downstream) */
+		ci_rmw(ci, HOST_CONN_INFRA_SLP_CNT_CTL,
+		       SLP_CNT_SEL | SLP_CNT_RD_TRIGGER,
+		       FIELD_PREP(SLP_CNT_SEL, i));
+		ci_set(ci, HOST_CONN_INFRA_SLP_CNT_CTL, SLP_CNT_RD_TRIGGER);
+		usleep_range(150, 200);
+		ci_clr(ci, HOST_CONN_INFRA_SLP_CNT_CTL, SLP_CNT_RD_TRIGGER);
+		ms[i] = div_u64((u64)ci_rd(ci, HOST_CONN_INFRA_SLP_TIMER) * 1000,
+				32768);
+		cnt[i] = ci_rd(ci, HOST_CONN_INFRA_SLP_COUNTER);
+		usleep_range(60, 100);
+	}
+	dbg = mtk_conninfra_osc_owners(ci, osc, sizeof(osc));
+	dev_info(dev, "resume: of %lld ms %s slept %u ms (%u times), %s %u ms (%u), %s %u ms (%u), %s %u ms (%u), %s %u ms (%u); oscillator on for %s (0x%08x)\n",
+		 total, mtk_conninfra_slp_names[0], ms[0], cnt[0],
+		 mtk_conninfra_slp_names[1], ms[1], cnt[1],
+		 mtk_conninfra_slp_names[2], ms[2], cnt[2],
+		 mtk_conninfra_slp_names[3], ms[3], cnt[3],
+		 mtk_conninfra_slp_names[4], ms[4], cnt[4], osc, dbg);
+out:
+	mutex_unlock(&ci->lock);
+	return 0;
+}
+
+static const struct dev_pm_ops mtk_conninfra_pm_ops = {
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(mtk_conninfra_suspend_noirq,
+				  mtk_conninfra_resume_noirq)
+};
 
 static const struct mtk_conninfra_data mt6878_6637_data = {
 	.ip_version = 0x02050401,
@@ -2060,6 +2385,7 @@ static struct platform_driver mtk_conninfra_driver = {
 	.driver = {
 		.name = "mtk-conninfra",
 		.of_match_table = mtk_conninfra_of_match,
+		.pm = pm_sleep_ptr(&mtk_conninfra_pm_ops),
 	},
 };
 module_platform_driver(mtk_conninfra_driver);

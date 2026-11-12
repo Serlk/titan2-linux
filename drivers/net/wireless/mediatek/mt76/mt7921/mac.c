@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2020 MediaTek Inc. */
 
+#include <linux/bitfield.h>
 #include <linux/devcoredump.h>
 #include <linux/etherdevice.h>
 #include <linux/timekeeping.h>
+#include <linux/unaligned.h>
 #include "mt7921.h"
 #include "../dma.h"
 #include "../mt76_connac2_mac.h"
@@ -589,6 +591,74 @@ bool mt7921_rx_check(struct mt76_dev *mdev, void *data, int len)
 }
 EXPORT_SYMBOL_GPL(mt7921_rx_check);
 
+/*
+ * SoC: the first packets after a system sleep, to tell what woke the host
+ * (a firmware event, a frame from the network and which one).
+ */
+static void mt7921_wake_probe(struct mt792x_dev *dev, enum rx_pkt_type type,
+			      struct sk_buff *skb)
+{
+	struct mt76_connac2_mcu_rxd *rxd = (void *)skb->data;
+	struct ieee80211_hdr *hdr = (void *)skb->data;
+	unsigned int hdrlen;
+	u16 fc;
+
+	if (!dev->wake_probe)
+		return;
+	/* firmware log lines print themselves, they do not count */
+	if (type == PKT_TYPE_RX_EVENT && skb->len >= sizeof(*rxd) &&
+	    rxd->eid == MCU_EVENT_DBG_MSG)
+		return;
+	dev->wake_probe--;
+
+	switch (type) {
+	case PKT_TYPE_RX_EVENT: {
+		/* EVENT_RX_ADDBA (0x0a), EVENT_RX_DELBA (0x0b) */
+		const u8 *b = skb->data + sizeof(*rxd);
+		unsigned int blen;
+
+		if (skb->len < sizeof(*rxd))
+			break;
+		blen = skb->len - sizeof(*rxd);
+		if (rxd->eid == 0x0a && blen >= 8) {
+			u16 param = get_unaligned_le16(b + 2);
+
+			dev_info(dev->mt76.dev, "after the sleep: firmware event 0x0a: the AP set up a block ack session (RX ADDBA): sta %u, tid %lu, buffer %lu, timeout %u TU, ssn %u, token %u\n",
+				 b[0], FIELD_GET(GENMASK(5, 2), param),
+				 FIELD_GET(GENMASK(15, 6), param),
+				 get_unaligned_le16(b + 4),
+				 get_unaligned_le16(b + 6) >> 4, b[1]);
+			return;
+		}
+		if (rxd->eid == 0x0b && blen >= 2) {
+			dev_info(dev->mt76.dev, "after the sleep: firmware event 0x0b: block ack session ended (RX DELBA): sta %u, tid %u\n",
+				 b[0], b[1]);
+			return;
+		}
+		dev_info(dev->mt76.dev, "after the sleep: firmware event 0x%02x (ext 0x%02x, seq %u, %u bytes): %*ph\n",
+			 rxd->eid, rxd->ext_eid, rxd->seq, skb->len,
+			 (int)min_t(unsigned int, 16, blen), b);
+		return;
+	}
+	case PKT_TYPE_NORMAL:
+	case PKT_TYPE_NORMAL_MCU:
+		if (skb->len < 24)
+			break;
+		fc = le16_to_cpu(hdr->frame_control);
+		hdrlen = ieee80211_hdrlen(hdr->frame_control);
+		dev_info(dev->mt76.dev, "after the sleep: frame fc 0x%04x to %pM from %pM (%pM), %u bytes, payload %*ph\n",
+			 fc, hdr->addr1, hdr->addr2, hdr->addr3, skb->len,
+			 (int)min_t(unsigned int, 16, skb->len > hdrlen ?
+				    skb->len - hdrlen : 0),
+			 skb->data + hdrlen);
+		return;
+	default:
+		break;
+	}
+	dev_info(dev->mt76.dev, "after the sleep: packet type %u, %u bytes\n",
+		 type, skb->len);
+}
+
 void mt7921_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
 			 struct sk_buff *skb, u32 *info)
 {
@@ -603,6 +673,10 @@ void mt7921_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
 
 	if (type == PKT_TYPE_RX_EVENT && flag == 0x1)
 		type = PKT_TYPE_NORMAL_MCU;
+
+	if (unlikely(READ_ONCE(dev->wake_probe)) &&
+	    type != PKT_TYPE_NORMAL && type != PKT_TYPE_NORMAL_MCU)
+		mt7921_wake_probe(dev, type, skb);
 
 	switch (type) {
 	case PKT_TYPE_TXRX_NOTIFY:
@@ -624,6 +698,8 @@ void mt7921_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
 	case PKT_TYPE_NORMAL_MCU:
 	case PKT_TYPE_NORMAL:
 		if (!mt7921_mac_fill_rx(dev, skb)) {
+			if (unlikely(READ_ONCE(dev->wake_probe)))
+				mt7921_wake_probe(dev, type, skb);
 			mt76_rx(&dev->mt76, q, skb);
 			return;
 		}

@@ -244,6 +244,13 @@ mt7921_mcu_low_power_event(struct mt792x_dev *dev, struct sk_buff *skb)
 	event = (struct mt7921_mcu_lp_event *)skb->data;
 
 	trace_lp_event(dev, event->state);
+
+	/*
+	 * EVENT_ID_SLEEPY_INFO: the firmware may sleep, the host may hand
+	 * it the core (the SoC glue waits for it, as MediaTek's driver).
+	 */
+	WRITE_ONCE(dev->fw_sleepy, !!event->state);
+	WRITE_ONCE(dev->fw_sleepy_events, dev->fw_sleepy_events + 1);
 }
 
 static void
@@ -667,6 +674,26 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
 		case MT_NIC_CAP_CHIP_CAP:
 			memcpy(&mphy->chip_cap, (void *)skb->data, sizeof(u64));
 			break;
+		case MT_NIC_CAP_HOST_STATUS_EMI_OFFSET:
+			/* the SoC firmware: a word in the CONNSYS EMI */
+			if (len >= 4 && !mphy->dev->host_suspend.type) {
+				mphy->dev->host_suspend.type = 1;
+				mphy->dev->host_suspend.set_addr =
+					le32_to_cpu(*(__le32 *)skb->data);
+				mphy->dev->host_suspend.mask = ~0;
+			}
+			break;
+		case MT_NIC_CAP_HOST_SUSPEND_INFO:
+			if (len >= 20) {
+				const __le32 *w = (const __le32 *)skb->data;
+
+				mphy->dev->host_suspend.type = le32_to_cpu(w[0]);
+				mphy->dev->host_suspend.set_addr = le32_to_cpu(w[1]);
+				mphy->dev->host_suspend.clr_addr = le32_to_cpu(w[2]);
+				mphy->dev->host_suspend.mask = le32_to_cpu(w[3]);
+				mphy->dev->host_suspend.shift = skb->data[16];
+			}
+			break;
 		default:
 			break;
 		}
@@ -674,8 +701,9 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
 	}
 
 	if (mphy->dev->soc_axi)
-		dev_info(phy->dev->dev, "firmware capabilities 0x%llx%s\n", tags,
-			 mphy->dev->fw_single_sku ? "" : ", no single SKU");
+		dev_info(phy->dev->dev, "firmware capabilities 0x%llx%s, host suspend flag type %u at 0x%x\n",
+			 tags, mphy->dev->fw_single_sku ? "" : ", no single SKU",
+			 mphy->dev->host_suspend.type, mphy->dev->host_suspend.set_addr);
 out:
 	dev_kfree_skb(skb);
 

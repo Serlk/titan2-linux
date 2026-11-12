@@ -11,6 +11,12 @@
 #include "mcu.h"
 #include "regd.h"
 
+#ifdef CONFIG_PM
+static const struct wiphy_wowlan_support mt7921_soc_wowlan_support = {
+	.flags = WIPHY_WOWLAN_ANY | WIPHY_WOWLAN_DISCONNECT,
+};
+#endif
+
 static ssize_t mt7921_thermal_temp_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
@@ -142,6 +148,16 @@ static void mt7921_init_work(struct work_struct *work)
 	if (ret)
 		return;
 
+#ifdef CONFIG_PM
+	/*
+	 * The SoC firmware wakes the host for every frame it passes up and
+	 * knows no WoW filters: "any", so that the association survives
+	 * system sleep once user space enables it (iw phy wowlan enable any).
+	 */
+	if (dev->soc_axi)
+		mt76_hw(dev)->wiphy->wowlan = &mt7921_soc_wowlan_support;
+#endif
+
 	mt76_set_stream_caps(&dev->mphy, true);
 	mt7921_set_stream_he_caps(&dev->phy);
 	mt792x_config_mac_addr_list(dev);
@@ -168,7 +184,8 @@ static void mt7921_init_work(struct work_struct *work)
 	/* we support chip reset now */
 	dev->hw_init_done = true;
 
-	mt76_connac_mcu_set_deep_sleep(&dev->mt76, dev->pm.ds_enable);
+	if (!dev->ds_fw_default)
+		mt76_connac_mcu_set_deep_sleep(&dev->mt76, dev->pm.ds_enable);
 }
 
 int mt7921_register_device(struct mt792x_dev *dev)

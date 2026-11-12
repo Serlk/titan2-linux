@@ -42,6 +42,13 @@ int mtk_conninfra_radio_on(struct mtk_conninfra *ci, enum mtk_conninfra_radio ra
 void mtk_conninfra_radio_off(struct mtk_conninfra *ci, enum mtk_conninfra_radio radio);
 /* Wi-Fi brackets its start with this; BT radio changes wait for the end */
 void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci, bool starting);
+/*
+ * radio_on(BT) begins a BT start, this ends it (BGF MCU up and the BT
+ * function on, or failed); a WFSYS power-on waits for the end.
+ */
+void mtk_conninfra_bt_started(struct mtk_conninfra *ci);
+/* Log the shared CONN_INFRA/A-die state, for a subsystem that did not start */
+void mtk_conninfra_dump(struct mtk_conninfra *ci, const char *who);
 
 /*
  * Keep the CONN_INFRA "off" domain (bus, clocks) awake for register
@@ -73,6 +80,23 @@ int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2]);
 /* CONNSYS EMI region set up by the boot loader (from "emi-addr"/"emi-size") */
 int mtk_conninfra_get_emi(struct mtk_conninfra *ci, phys_addr_t *base, u32 *size);
 
+/*
+ * The clock schematic word of the downstream driver, as the GNSS daemon
+ * expects it: 0x00 external TCXO, 0x21 26 MHz co-clock, 0x51 52 MHz co-clock.
+ */
+u32 mtk_conninfra_clock_schematic(struct mtk_conninfra *ci);
+
+/* RF SPI slaves of the A-die, numbered as the downstream driver does */
+enum mtk_conninfra_spi_bus {
+	MTK_CONNINFRA_SPI_GPS = 4,
+	MTK_CONNINFRA_SPI_TOP = 5,
+};
+
+/* Read-modify-write of an A-die register over the RF SPI. Sleeps. */
+int mtk_conninfra_spi_update_bits(struct mtk_conninfra *ci,
+				  enum mtk_conninfra_spi_bus bus, u32 addr,
+				  u32 mask, u32 val);
+
 #else
 
 static inline struct mtk_conninfra *devm_mtk_conninfra_get(struct device *dev)
@@ -93,6 +117,14 @@ static inline void mtk_conninfra_radio_off(struct mtk_conninfra *ci,
 
 static inline void mtk_conninfra_wifi_starting(struct mtk_conninfra *ci,
 					       bool starting)
+{
+}
+
+static inline void mtk_conninfra_bt_started(struct mtk_conninfra *ci)
+{
+}
+
+static inline void mtk_conninfra_dump(struct mtk_conninfra *ci, const char *who)
 {
 }
 
@@ -131,6 +163,16 @@ static inline int mtk_conninfra_adie_uid(struct mtk_conninfra *ci, u32 uid[2])
 
 static inline int mtk_conninfra_get_emi(struct mtk_conninfra *ci,
 					phys_addr_t *base, u32 *size)
+{
+	return -ENODEV;
+}
+static inline u32 mtk_conninfra_clock_schematic(struct mtk_conninfra *ci)
+{
+	return 0;
+}
+static inline int mtk_conninfra_spi_update_bits(struct mtk_conninfra *ci,
+						enum mtk_conninfra_spi_bus bus,
+						u32 addr, u32 mask, u32 val)
 {
 	return -ENODEV;
 }

@@ -22,21 +22,44 @@
  * APCFG/APRDEB/WIFI) installed as mediatek/mt6878/WIFI is used read-only
  * for the MAC address and the front end tags of the calibration request.
  *
- * Not done: suspend/resume, deep sleep with CONN_INFRA asleep, the
- * connfem front end description, transmit power tables from NVRAM.
+ * Power management follows MediaTek's AXI glue. When idle (runtime_pm)
+ * the core goes to the firmware (fw own) once the firmware has said it
+ * may sleep, and the driver lets go of CONN_INFRA, so that the WFSYS and
+ * CONN_INFRA can sleep and drop their 26 MHz/PMIC/VCORE requests. In fw
+ * own the host touches nothing but the always-on conn_host_csr_top: the
+ * WFDMA interrupt only disables its line and asks for driver own (wake
+ * CONN_INFRA, host CSR interrupt enables, LPCTL with the EINT check), as
+ * MediaTek's interrupt handler does. After a WFSYS sleep the hardware has
+ * restored the WFDMA from its backup but restarted the TX rings, which
+ * the driver sets back. System sleep: the firmware is told that the host
+ * sleeps (a word in the CONNSYS EMI or a CSR bit it names in its
+ * capabilities, and the SUSPEND_MODE command), the interrupts are wake-up
+ * sources, and with suspend_fw_own the core goes to fw own for the
+ * sleep. With WoWLAN "any" configured the association survives the
+ * sleep; without it cfg80211 disconnects before suspend.
+ *
+ * Not done: wake-on-wireless filters (the firmware wakes the host for
+ * every frame it passes up), the connfem front end description, transmit
+ * power tables from NVRAM.
  */
 
+#include <linux/atomic.h>
+#include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
 #include <linux/firmware.h>
+#include <linux/inetdevice.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/jhash.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeup.h>
+#include <linux/seq_file.h>
 #include <linux/soc/mediatek/mtk-conninfra.h>
 #include <linux/swiotlb.h>
 #include <linux/unaligned.h>
@@ -45,6 +68,7 @@
 #include "../mt76_connac2_mac.h"
 #include "../dma.h"
 #include "mcu.h"
+#include "regd.h"
 
 /* the AP sees CONNSYS at 0x1800_0000..0x186f_ffff (CONN_INFRA, then WFSYS) */
 #define MT7921_SOC_WINDOW		0x700000
@@ -60,6 +84,23 @@
 #define MT7921_SOC_CONN_IP_VERSION	0x7c011000
 #define MT7921_SOC_CONN_IP_MT6878	0x02050401
 #define MT7921_SOC_WAKEPU_WF		0x7c0601a4	/* Wi-Fi's force-on of CONN_INFRA */
+
+/*
+ * conn_host_csr_top (0x7c06_xxxx) is always on: the only part of the window
+ * the host may touch while the firmware owns the core and CONN_INFRA sleeps.
+ */
+#define MT7921_SOC_AON_BASE		0x060000
+#define MT7921_SOC_AON_SIZE		0x010000
+#define MT7921_SOC_WFSYS_BASE		0x400000
+
+/* driver own wakes the WM MCU through an EINT (CFG_CHECK_DRVOWN_EINT) */
+#define MT7921_SOC_EINT_SEL		0x7c060b00	/* bit 0: EINT CR select */
+#define MT7921_SOC_EINT_DBG_SEL		0x7c060b04	/* [4:0] = 6 */
+#define MT7921_SOC_EINT_DBG_SEL2	0x7c060b14	/* [2:0] = 1 */
+#define MT7921_SOC_WF_MCU_STATE		0x7c060a10	/* bit 4: WM MCU not asleep */
+#define MT7921_SOC_WF_AON_DBG_FLAG	0x7c060b10	/* bits 0 and 10: EINT lost */
+#define MT7921_SOC_EINT_DELAY_US	156		/* 5 periods of 32 kHz */
+#define MT7921_SOC_EINT_RETRIES		2
 
 /* AP2WF CCIF4 (CONN_INFRA on): software interrupts from the WM MCU */
 #define MT7921_SOC_CCIF_RCHNUM		0x7c03d010
@@ -106,14 +147,65 @@
 #define MT7921_SOC_INT_TX_DONE_ALL	(MT7921_SOC_INT_TX_DONE_MCU | \
 					 HOST_TX_DONE_INT_ENA0)
 
+/* power management counters, debugfs <dev>/pm */
+struct mt7921_soc_pm_stats {
+	u32 idle_fw_own;	/* runtime PM: core handed to the firmware */
+	u32 idle_not_sleepy;	/* runtime PM: firmware had not said it may sleep */
+	u32 idle_rx_pending;	/* runtime PM: a ring had something for the host */
+	u32 fw_own_fail;
+	u32 drv_own;		/* driver own handshakes from fw own */
+	u32 drv_own_fail;
+	u32 eint_retry;
+	u32 irq_fw_own;		/* WFDMA interrupts with the core in fw own */
+	u32 irq_asleep;		/* WFDMA interrupts in the last system sleep */
+	u32 wfdma_kept;		/* WFDMA lost nothing over a WFSYS sleep */
+	u32 tx_reinit;		/* TX rings set back after a WFSYS sleep */
+	u32 full_reinit;	/* whole WFDMA reset after a WFSYS sleep */
+	u32 off_limits;		/* register accesses refused in fw own */
+	u32 suspend_fw_own;	/* system sleeps with the core in fw own */
+	u32 last_fw_own_us;
+	u32 last_drv_own_us;
+	u32 max_drv_own_us;
+	u32 settle_timeout;	/* suspend: the firmware did not settle in time */
+	u32 wakepu_left;	/* suspend: WAKEPU_WF found set in fw own */
+	u32 fw_own_int_sta;	/* HOST_INT_STA at the last fw own (before ack) */
+	u32 wake_int_sta;	/* HOST_INT_STA at the last driver own from fw own */
+	u32 wake_mcu_cmd;	/* MCU2HOST software interrupt with it */
+	ktime_t fw_own_since;
+	u64 fw_own_ns;		/* total time in fw own */
+};
+
+/* the station's IPv4 addresses, collected for the ARP offload */
+struct mt7921_soc_ip {
+	int bss_idx;			/* -1: no connected station */
+	int count;
+	__be32 addr[IEEE80211_BSS_ARP_ADDR_LIST_LEN];
+	__be32 mask[IEEE80211_BSS_ARP_ADDR_LIST_LEN];
+};
+
 struct mt7921_soc_dev {
 	struct mt792x_dev dev;		/* must be first, see mt76_alloc_device() */
+	bool ip_offloaded;		/* addresses given to the firmware for the sleep */
+	u8 ip_bss_idx;
+	bool wow_on;			/* the firmware wake filter is set for this sleep */
+	bool addba_rejected;		/* ADDBA refused for this sleep */
+	bool rx_filter_set;		/* the RX filter was narrowed for this sleep */
 	struct mtk_conninfra *ci;
 	int irq;
 	int irq_sw;			/* WF2AP CCIF, optional */
 	bool radio_on;
-	bool awake;
+	bool awake;			/* the driver holds a CONN_INFRA wake-up */
+	atomic_t ci_refs;		/* CONN_INFRA wake-ups held, incl. awake */
 	bool wfsys_on;			/* gates every register access */
+	bool sleeping;			/* in system sleep */
+	bool irq_wake;
+	/* the firmware owns the core: WFSYS (and CONN_INFRA unless held) off limits */
+	bool fw_owned;
+	spinlock_t own_lock;		/* irq_defer, irq_masked vs. the IRQ path */
+	bool irq_defer;			/* the WFDMA interrupt only asks for driver own */
+	bool irq_masked;		/* its line is disabled until driver own */
+	struct mt7921_soc_pm_stats pm;
+	struct dentry *debugfs;
 
 	/* from the stock NVRAM file, if present */
 	u8 nvram_mac[ETH_ALEN];
@@ -162,10 +254,66 @@ module_param(fw_features, byte, 0444);
 MODULE_PARM_DESC(fw_features,
 		 "Firmware offload capabilities (BIT(7): CNM), not readable from the EMI image");
 
+/*
+ * Runtime power save (mt76 pm.enable): after pm.idle_timeout without
+ * activity the core goes to fw own and CONN_INFRA is let go, as MediaTek's
+ * AXI driver does when idle. debugfs mt76/runtime-pm switches it later.
+ */
 static bool runtime_pm;
 module_param(runtime_pm, bool, 0444);
 MODULE_PARM_DESC(runtime_pm,
-		 "Hand the core to the firmware (fw own) when idle; CONN_INFRA stays awake");
+		 "Hand the core to the firmware (fw own) when idle, let CONN_INFRA sleep (default false; debugfs mt76/runtime-pm switches it)");
+
+static bool fw_own_sleepy = true;
+module_param(fw_own_sleepy, bool, 0644);
+MODULE_PARM_DESC(fw_own_sleepy,
+		 "Runtime PM: fw own only after the firmware's sleepy event, as MediaTek's driver (default true)");
+
+static bool conninfra_sleep = true;
+module_param(conninfra_sleep, bool, 0644);
+MODULE_PARM_DESC(conninfra_sleep,
+		 "Runtime PM: release the CONN_INFRA wake-up while the firmware owns the core (default true)");
+
+static int wfdma_reinit;
+module_param(wfdma_reinit, int, 0644);
+MODULE_PARM_DESC(wfdma_reinit,
+		 "WFDMA after a WFSYS sleep: 0 set back the rings that lost their index (default), 1 always reset the whole WFDMA (mt7921e)");
+
+static unsigned int suspend_settle_ms = 200;
+module_param(suspend_settle_ms, uint, 0644);
+MODULE_PARM_DESC(suspend_settle_ms,
+		 "System sleep: wait up to this long for the firmware to take the commands and report sleepy before fw own (default 200, 0: no wait)");
+
+static bool suspend_ci_dump;
+module_param(suspend_ci_dump, bool, 0644);
+MODULE_PARM_DESC(suspend_ci_dump,
+		 "System sleep: log the shared CONN_INFRA state (wake-ups, power states, A-die) before fw own (default false)");
+
+/*
+ * ARP offload for the sleep: the IPv4 addresses of the station go to the
+ * firmware (CMD_ID_SET_IP_ADDRESS, as MediaTek's driver on every address
+ * change), so that it can answer ARP requests itself instead of waking the
+ * host for them; cleared again on resume.
+ */
+static bool arp_offload = true;
+module_param(arp_offload, bool, 0644);
+MODULE_PARM_DESC(arp_offload,
+		 "System sleep: give the firmware the IPv4 addresses for ARP offload (default true)");
+
+static unsigned int wake_probe = 6;
+module_param(wake_probe, uint, 0644);
+MODULE_PARM_DESC(wake_probe,
+		 "Log this many packets (events, frames) after each system sleep (default 3)");
+
+static bool drv_own_eint = true;
+module_param(drv_own_eint, bool, 0644);
+MODULE_PARM_DESC(drv_own_eint,
+		 "Driver own: check that the EINT woke the WM MCU, as MediaTek's driver (default true)");
+
+static int deep_sleep = -1;
+module_param(deep_sleep, int, 0444);
+MODULE_PARM_DESC(deep_sleep,
+		 "Firmware deep sleep: -1 firmware default, never sent, as MediaTek's AXI driver (default); 0 KeepFullPwr 1; 1 KeepFullPwr 0");
 
 static bool mcu_trace;
 module_param(mcu_trace, bool, 0644);
@@ -175,6 +323,109 @@ static bool phy_action = true;
 module_param(phy_action, bool, 0444);
 MODULE_PARM_DESC(phy_action,
 		 "Ask the ROM code to calibrate before the firmware starts, as the MediaTek downstream driver");
+
+/*
+ * System sleep: MediaTek's AXI driver does nothing at suspend (the core is
+ * in whatever state runtime power save left it, fw own when idle); without
+ * runtime PM the core has to be handed over here or CONN_INFRA keeps its
+ * clock requests through the sleep. The first version of this (06.11.2026)
+ * left the data path dead after resume: it switched LPCTL to fw own without
+ * telling mt76 (MT76_STATE_PM), so resume never took the core back. On by
+ * default since 11.11.2026 (phone runs B1-B3: CONN_INFRA asleep for 97 % of
+ * the sleep, Wi-Fi up 1 s after every resume).
+ */
+static bool suspend_fw_own = true;
+module_param(suspend_fw_own, bool, 0644);
+MODULE_PARM_DESC(suspend_fw_own,
+		 "Hand the core to the firmware (fw own) for system sleep (default true; false: stays driver-owned unless runtime PM)");
+
+/*
+ * The first system sleep after boot (three phone runs, 08.11 to 12.11)
+ * found HOST_CONN_INFRA_WAKEPU_WF set after fw own, with no holder on our
+ * side (conninfra wake-ups 0): CONN_INFRA then stays awake for the whole
+ * sleep. Every path of ours that sets it clears it again; who leaves it is
+ * not known. With this, a WAKEPU_WF found set once the core is the
+ * firmware's is cleared and logged.
+ */
+static bool suspend_wakepu_clear = true;
+module_param(suspend_wakepu_clear, bool, 0644);
+MODULE_PARM_DESC(suspend_wakepu_clear,
+		 "System sleep in fw own: clear a CONN_INFRA Wi-Fi wake-up (WAKEPU_WF) left set (default true)");
+
+/*
+ * Firmware wake filter for the sleep (CMD_ID_SET_WOWLAN, as gen4m's
+ * kalWowProcess with "Wow" on; the downstream AXI build ships with it off):
+ * the firmware wakes the host only on the detect types below and passes up
+ * only the frames of the filter flags, instead of every frame ("any").
+ * Defaults: magic packet, disconnect, GTK rekey failure, beacon lost;
+ * incoming IPv4/IPv6 TCP SYN and EAPOL requests; pass up unicast, 802.1X
+ * and ARP requests for us (with arp_offload the firmware answers ARP).
+ * Values: gen4m include/nic_cmd_event.h WOWLAN_DETECT_TYPE_*,
+ * WOWLAN_DETECT_TYPE_EXT_*, WOWLAN_FF_*. How the SoC firmware signals the
+ * host in this mode is not known from GPL code: wow_hif (gen4m ENUM_HIF_TYPE,
+ * its default 3 GPIO with pin 0xff) is a parameter to try.
+ */
+/* on by default since 12.11.2026: 299 of 300 s asleep with the router's traffic, a ping wakes */
+static bool wowlan = true;
+module_param(wowlan, bool, 0644);
+MODULE_PARM_DESC(wowlan,
+		 "System sleep: firmware wake filter instead of waking on every frame (default true)");
+
+static uint wow_detect = 0x1d;
+module_param(wow_detect, uint, 0644);
+MODULE_PARM_DESC(wow_detect,
+		 "Wake filter detect types: 1 magic, 2 any, 4 disconnect, 8 GTK rekey failure, 0x10 beacon lost (default 0x1d)");
+
+static uint wow_detect_ext = 0x0e;
+module_param(wow_detect_ext, uint, 0644);
+MODULE_PARM_DESC(wow_detect_ext,
+		 "Wake filter extended detect types: 2 IPv4 TCP SYN, 4 IPv6 TCP SYN, 8 EAPOL request, 0x20 IPv6 ICMP (default 0x0e)");
+
+static uint wow_filter = 0x70;
+module_param(wow_filter, uint, 0644);
+MODULE_PARM_DESC(wow_filter,
+		 "Wake filter flags: 1 drop all, 2 magic to host, 4 ARP, 8 broadcast/multicast, 0x10 unicast, 0x20 802.1X, 0x40 ARP requests to us (default 0x70)");
+
+static uint wow_hif = 3;
+module_param(wow_hif, uint, 0644);
+MODULE_PARM_DESC(wow_hif, "Wake filter host signal: 0 SDIO, 1 USB, 2 PCIe, 3 GPIO (default 3, as gen4m)");
+
+static uint wow_gpio = 0xff;
+module_param(wow_gpio, uint, 0644);
+MODULE_PARM_DESC(wow_gpio, "Wake filter GPIO pin (default 0xff, as gen4m)");
+
+static uint wow_trigger = 3;
+module_param(wow_trigger, uint, 0644);
+MODULE_PARM_DESC(wow_trigger, "Wake filter trigger level bits (default 3, as gen4m)");
+
+/*
+ * Phone runs 12.11 with the wake filter: every early wake-up was the
+ * firmware's RX ADDBA event (the AP setting up a block ack session before
+ * sending to us), which the firmware passes up whatever the filter. For the
+ * sleep the firmware refuses ADDBA (CMD_ID_ADDBA_REJECT), after the resume
+ * it accepts it again; the AP then sends without aggregation.
+ */
+static bool suspend_addba_reject = true;
+module_param(suspend_addba_reject, bool, 0644);
+MODULE_PARM_DESC(suspend_addba_reject,
+		 "System sleep: the firmware refuses the AP's block ack sessions (default true)");
+
+/*
+ * RX filter for the sleep (CMD_ID_SET_RX_FILTER, MT76_CONNAC_LEGACY_RX_FILTER_*
+ * bits of what to pass up): -1 leaves it as mac80211 set it; e.g. 1 passes
+ * only directed frames, 9 directed and broadcast. Restored on resume.
+ */
+static int suspend_rx_filter = -1;
+module_param(suspend_rx_filter, int, 0644);
+MODULE_PARM_DESC(suspend_rx_filter,
+		 "System sleep: RX filter bits (1 directed, 2 multicast list, 4 all multicast, 8 broadcast), -1 untouched (default)");
+
+/* the firmware deep sleeps while the system sleeps (as mt7921/pci.c does) */
+
+static bool suspend_deep_sleep;
+module_param(suspend_deep_sleep, bool, 0644);
+MODULE_PARM_DESC(suspend_deep_sleep,
+		 "Tell the firmware to deep sleep during system suspend (default false)");
 
 static struct mt7921_soc_dev *to_soc(struct mt792x_dev *dev)
 {
@@ -292,6 +543,27 @@ static u32 mt7921_soc_reg_addr(struct mt792x_dev *dev, u32 addr)
  * bus protection is engaged: no access before CONNINFRA reported WFSYS
  * on, and none after it has been switched off.
  */
+/*
+ * In fw own the WFSYS may be powered down and CONN_INFRA asleep: only
+ * conn_host_csr_top is always reachable, CONN_INFRA while a wake-up is held.
+ */
+static bool mt7921_soc_off_limits(struct mt792x_dev *dev, u32 addr)
+{
+	struct mt7921_soc_dev *soc = to_soc(dev);
+
+	if (likely(!READ_ONCE(soc->fw_owned)) ||
+	    addr >= MT7921_SOC_REG_IGNORE ||
+	    (addr >= MT7921_SOC_AON_BASE &&
+	     addr < MT7921_SOC_AON_BASE + MT7921_SOC_AON_SIZE) ||
+	    (addr < MT7921_SOC_WFSYS_BASE && atomic_read(&soc->ci_refs)))
+		return false;
+
+	soc->pm.off_limits++;
+	WARN_ONCE(1, "mt7921-soc: register 0x%06x accessed in fw own\n", addr);
+
+	return true;
+}
+
 static u32 mt7921_soc_rr(struct mt76_dev *mdev, u32 offset)
 {
 	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
@@ -301,7 +573,7 @@ static u32 mt7921_soc_rr(struct mt76_dev *mdev, u32 offset)
 		return ~0;
 
 	addr = mt7921_soc_reg_addr(dev, offset);
-	if (addr == MT7921_SOC_REG_INVALID)
+	if (addr == MT7921_SOC_REG_INVALID || mt7921_soc_off_limits(dev, addr))
 		return ~0;
 	if (addr == MT7921_SOC_REG_IGNORE)
 		return 0;
@@ -318,7 +590,7 @@ static void mt7921_soc_wr(struct mt76_dev *mdev, u32 offset, u32 val)
 		return;
 
 	addr = mt7921_soc_reg_addr(dev, offset);
-	if (addr >= MT7921_SOC_REG_IGNORE)
+	if (addr >= MT7921_SOC_REG_IGNORE || mt7921_soc_off_limits(dev, addr))
 		return;
 
 	dev->bus_ops->wr(mdev, addr, val);
@@ -333,7 +605,7 @@ static u32 mt7921_soc_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 		return ~0;
 
 	addr = mt7921_soc_reg_addr(dev, offset);
-	if (addr == MT7921_SOC_REG_INVALID)
+	if (addr == MT7921_SOC_REG_INVALID || mt7921_soc_off_limits(dev, addr))
 		return ~0;
 	if (addr == MT7921_SOC_REG_IGNORE)
 		return 0;
@@ -449,12 +721,314 @@ out:
 	mt76_clear(dev, MT7921_SOC_WAKEPU_WF, BIT(0));
 }
 
-/* hif drv_own: the CONN_INFRA off domain is kept awake while bound */
+/* ---- fw own / driver own ------------------------------------------------ */
+
+static int mt7921_soc_ci_get(struct mt7921_soc_dev *soc)
+{
+	int ret = mtk_conninfra_wakeup(soc->ci);
+
+	if (!ret)
+		atomic_inc(&soc->ci_refs);
+	return ret;
+}
+
+static void mt7921_soc_ci_put(struct mt7921_soc_dev *soc)
+{
+	if (WARN_ON(!atomic_read(&soc->ci_refs)))
+		return;
+	atomic_dec(&soc->ci_refs);
+	mtk_conninfra_sleep(soc->ci);
+}
+
+/* the CONN_INFRA wake-up the driver holds while it owns the core */
+static int mt7921_soc_hold_conninfra(struct mt7921_soc_dev *soc)
+{
+	int ret;
+
+	if (soc->awake)
+		return 0;
+	ret = mt7921_soc_ci_get(soc);
+	if (!ret)
+		soc->awake = true;
+	return ret;
+}
+
+static void mt7921_soc_release_conninfra(struct mt7921_soc_dev *soc)
+{
+	if (!soc->awake)
+		return;
+	soc->awake = false;
+	mt7921_soc_ci_put(soc);
+}
+
+/*
+ * asicConnac2xLowPowerOwnClear() with CFG_CHECK_DRVOWN_EINT: clearing the
+ * fw own raises an EINT that wakes the WM MCU. If the MCU was asleep and
+ * the always-on debug flags say the EINT was not taken, clear it again.
+ */
+static void mt7921_soc_eint_wake(struct mt792x_dev *dev)
+{
+	struct mt7921_soc_dev *soc = to_soc(dev);
+	int retry = 0;
+	u32 mcu, flag;
+
+	for (;;) {
+		mt76_set(dev, MT7921_SOC_EINT_SEL, BIT(0));
+		mt76_rmw(dev, MT7921_SOC_EINT_DBG_SEL, GENMASK(4, 0), 0x6);
+		mt76_rmw(dev, MT7921_SOC_EINT_DBG_SEL2, GENMASK(2, 0), 0x1);
+		mcu = mt76_rr(dev, MT7921_SOC_WF_MCU_STATE);
+		mt76_wr(dev, MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_CLR_OWN);
+		if (mcu & BIT(4))
+			return;
+
+		udelay(MT7921_SOC_EINT_DELAY_US);
+		flag = mt76_rr(dev, MT7921_SOC_WF_AON_DBG_FLAG);
+		if (!(flag & BIT(0)) || !(flag & BIT(10)))
+			return;
+
+		soc->pm.eint_retry++;
+		dev_warn_ratelimited(dev->mt76.dev,
+				     "driver own: EINT not taken (0x%08x), try %d\n",
+				     flag, retry + 1);
+		if (retry++ == MT7921_SOC_EINT_RETRIES)
+			return;
+	}
+}
+
+/*
+ * After a WFSYS sleep the hardware has restored the WFDMA from its backup,
+ * and the bit the driver keeps in the dummy CR is gone. MediaTek's AXI
+ * driver (CFG_MTK_WIFI_WFDMA_BK_RS) finds the TX rings restarted at index
+ * 0 and sets its own indices back; the RX rings keep their state. Here:
+ * every ring whose CPU index is not where mt76 left it is set back (TX)
+ * or makes the whole WFDMA reset (RX, or wfdma_reinit=1).
+ */
+static void mt7921_soc_wfdma_reinit_cond(struct mt7921_soc_dev *soc)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt76_queue *tx[__MT_TXQ_MAX + __MT_MCUQ_MAX];
+	unsigned long lost = 0;
+	int i, n = 0;
+
+	if (!mt792x_dma_need_reinit(dev))
+		return;
+
+	if (wfdma_reinit)
+		goto full;
+
+	mt76_for_each_q_rx(&dev->mt76, i) {
+		struct mt76_queue *q = &dev->mt76.q_rx[i];
+
+		if (Q_READ(q, cpu_idx) != q->head) {
+			dev_info(dev->mt76.dev,
+				 "WFDMA lost rx ring %d (cpu index %u, expected %u)\n",
+				 i, Q_READ(q, cpu_idx), q->head);
+			goto full;
+		}
+	}
+
+	/* the data queues of all ACs are one ring */
+	for (i = 0; i < __MT_TXQ_MAX + __MT_MCUQ_MAX; i++) {
+		struct mt76_queue *q = i < __MT_TXQ_MAX ? dev->mphy.q_tx[i] :
+				       dev->mt76.q_mcu[i - __MT_TXQ_MAX];
+		int j;
+
+		if (!q || !q->ndesc)
+			continue;
+		for (j = 0; j < n && tx[j] != q; j++)
+			;
+		if (j < n)
+			continue;
+		if (Q_READ(q, cpu_idx) != q->head)
+			__set_bit(n, &lost);
+		tx[n++] = q;
+	}
+
+	if (!lost) {
+		soc->pm.wfdma_kept++;
+	} else {
+		/* nothing is in flight: fw own waits for the tx tokens */
+		for (i = 0; i < n; i++) {
+			if (!test_bit(i, &lost))
+				continue;
+			mt76_queue_tx_cleanup(dev, tx[i], true);
+			mt76_queue_reset(dev, tx[i], true);
+		}
+		soc->pm.tx_reinit++;
+		dev_dbg(dev->mt76.dev, "WFDMA tx rings set back (0x%lx)\n", lost);
+	}
+	mt76_set(dev, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT);
+	return;
+
+full:
+	soc->pm.full_reinit++;
+	mt792x_wpdma_reinit_cond(dev);
+}
+
+/*
+ * hif drv_own: take CONN_INFRA, force the host CSR interrupt enables as
+ * MediaTek's driver does before every driver own, clear the fw own (EINT
+ * check), set the WFDMA back if the WFSYS slept, then serve interrupts.
+ */
 static int mt7921_soc_drv_own(struct mt792x_dev *dev)
 {
-	mt7921_soc_force_host_csr_irq(dev);
+	struct mt7921_soc_dev *soc = to_soc(dev);
+	struct mt76_phy *mphy = &dev->mt76.phy;
+	struct mt76_connac_pm *pm = &dev->pm;
+	bool was_fw = READ_ONCE(soc->fw_owned);
+	ktime_t start = ktime_get();
+	unsigned long flags;
+	u32 us;
+	int err;
 
-	return mt792xe_mcu_drv_pmctrl(dev);
+	err = mt7921_soc_hold_conninfra(soc);
+	if (err) {
+		dev_err(dev->mt76.dev, "driver own: CONN_INFRA wakeup failed: %d\n",
+			err);
+		soc->pm.drv_own_fail++;
+		return err;
+	}
+
+	mt7921_soc_force_host_csr_irq(dev);
+	if (drv_own_eint)
+		mt7921_soc_eint_wake(dev);
+	err = __mt792xe_mcu_drv_pmctrl(dev);
+	if (err) {
+		soc->pm.drv_own_fail++;
+		return err;
+	}
+
+	if (was_fw)
+		soc->pm.fw_own_ns += ktime_to_ns(ktime_sub(start,
+							   soc->pm.fw_own_since));
+	WRITE_ONCE(soc->fw_owned, false);
+
+	/* what the firmware raised in fw own (the tasklet serves it later) */
+	if (was_fw) {
+		soc->pm.wake_int_sta = mt76_rr(dev, MT_WFDMA0_HOST_INT_STA);
+		soc->pm.wake_mcu_cmd = soc->pm.wake_int_sta & MT_INT_MCU_CMD ?
+				       mt76_rr(dev, MT_MCU_CMD) : 0;
+	}
+
+	mt7921_soc_wfdma_reinit_cond(soc);
+
+	/* the interrupt is served again before mt76 may touch the core */
+	spin_lock_irqsave(&soc->own_lock, flags);
+	soc->irq_defer = false;
+	if (soc->irq_masked) {
+		soc->irq_masked = false;
+		enable_irq(soc->irq);
+	}
+	spin_unlock_irqrestore(&soc->own_lock, flags);
+
+	WRITE_ONCE(dev->fw_sleepy, false);
+	if (test_and_clear_bit(MT76_STATE_PM, &mphy->state)) {
+		pm->stats.last_wake_event = jiffies;
+		pm->stats.doze_time += pm->stats.last_wake_event -
+				       pm->stats.last_doze_event;
+	}
+	/* what came in meanwhile, and the interrupt mask mt76 keeps */
+	tasklet_schedule(&dev->mt76.irq_tasklet);
+
+	/* something woke the core while the system goes to sleep */
+	if (READ_ONCE(soc->sleeping))
+		pm_wakeup_event(dev->mt76.dev, 0);
+
+	us = ktime_us_delta(ktime_get(), start);
+	if (was_fw) {
+		soc->pm.drv_own++;
+		soc->pm.last_drv_own_us = us;
+		soc->pm.max_drv_own_us = max(soc->pm.max_drv_own_us, us);
+		dev_dbg(dev->mt76.dev, "driver own in %u us\n", us);
+	}
+
+	return 0;
+}
+
+/*
+ * fw own: from here on the host touches the always-on CSRs only. The
+ * WFDMA interrupt stays enabled for everything the firmware passes up; it
+ * disables its line and asks for driver own (MediaTek: the AXI interrupt
+ * handler only disables the IRQ, the main thread owns the core first).
+ */
+static int __mt7921_soc_fw_own(struct mt7921_soc_dev *soc, bool idle)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	const struct mt792x_irq_map *map = dev->irq_map;
+	u32 rx = map->rx.data_complete_mask | map->rx.wm_complete_mask |
+		 map->rx.wm2_complete_mask;
+	ktime_t start = ktime_get();
+	unsigned long flags;
+	int err;
+
+	if (idle) {
+		/* MediaTek: fw own only in the firmware's sleepy state */
+		if (fw_own_sleepy && !READ_ONCE(dev->fw_sleepy)) {
+			soc->pm.idle_not_sleepy++;
+			goto stay;
+		}
+		/* MediaTek: not with a frame waiting in a ring */
+		if (mt76_rr(dev, MT_WFDMA0_HOST_INT_STA) & rx) {
+			soc->pm.idle_rx_pending++;
+			goto stay;
+		}
+	}
+
+	/*
+	 * Only what the firmware passes up wakes the host in fw own: the TX
+	 * done bits (the MCU command ring right after the last command, the
+	 * unused ring 17 bit that stays set from boot) are acknowledged and
+	 * left disabled, or the line rises at once. The tasklet enables
+	 * them again after driver own.
+	 */
+	spin_lock_irqsave(&soc->own_lock, flags);
+	soc->pm.fw_own_int_sta = mt76_rr(dev, MT_WFDMA0_HOST_INT_STA);
+	if (soc->pm.fw_own_int_sta & ~(rx | MT_INT_MCU_CMD))
+		mt76_wr(dev, MT_WFDMA0_HOST_INT_STA,
+			soc->pm.fw_own_int_sta & ~(rx | MT_INT_MCU_CMD));
+	mt76_wr(dev, map->host_irq_enable, rx | MT_INT_MCU_CMD);
+	soc->irq_defer = true;
+	spin_unlock_irqrestore(&soc->own_lock, flags);
+
+	soc->pm.fw_own_since = ktime_get();
+	WRITE_ONCE(soc->fw_owned, true);
+	err = mt792xe_mcu_fw_pmctrl(dev);
+	if (err) {
+		WRITE_ONCE(soc->fw_owned, false);
+		spin_lock_irqsave(&soc->own_lock, flags);
+		soc->irq_defer = false;
+		if (soc->irq_masked) {
+			soc->irq_masked = false;
+			enable_irq(soc->irq);
+		}
+		spin_unlock_irqrestore(&soc->own_lock, flags);
+		tasklet_schedule(&dev->mt76.irq_tasklet);
+		soc->pm.fw_own_fail++;
+		return err;
+	}
+
+	if (!idle || conninfra_sleep)
+		mt7921_soc_release_conninfra(soc);
+
+	soc->pm.last_fw_own_us = ktime_us_delta(ktime_get(), start);
+	if (idle) {
+		soc->pm.idle_fw_own++;
+		dev_dbg(dev->mt76.dev, "fw own in %u us\n",
+			soc->pm.last_fw_own_us);
+	}
+
+	return 0;
+
+stay:
+	/* still driver-owned: the next activity schedules the power save again */
+	clear_bit(MT76_STATE_PM, &dev->mphy.state);
+	return 0;
+}
+
+/* hif fw_own: the runtime power save work (mt792x_mcu_fw_pmctrl) */
+static int mt7921_soc_fw_own(struct mt792x_dev *dev)
+{
+	return __mt7921_soc_fw_own(to_soc(dev), true);
 }
 
 /*
@@ -794,7 +1368,7 @@ static int mt7921_soc_mac_reset(struct mt792x_dev *dev)
 	struct mt7921_soc_dev *soc = to_soc(dev);
 	int i, err;
 
-	mt792xe_mcu_drv_pmctrl(dev);
+	mt7921_soc_drv_own(dev);
 
 	mt76_connac_free_pending_tx_skbs(&dev->pm, NULL);
 
@@ -863,22 +1437,127 @@ out:
 
 /*
  * mt76_set_irq_mask() writes the interrupt enable mask through the mapping
- * directly, at the PCIe BAR offset, where nothing is on this bus. Every
- * change of the mask (mt76_connac_irq_enable(), the NAPI and tx done
- * paths) ends up in this tasklet: write the mask through the bus ops.
+ * directly, at the PCIe BAR offset (0x180d_4204 here, some CONN_INFRA
+ * register). Every change of the mask (mt76_connac_irq_enable(), the NAPI
+ * and tx done paths) ends up in this tasklet, which keeps the mask only in
+ * memory and writes it through the bus ops. Otherwise as
+ * mt792x_irq_tasklet().
  */
+static void mt7921_soc_irq_serve(struct mt792x_dev *dev)
+{
+	const struct mt792x_irq_map *irq_map = dev->irq_map;
+	u32 intr, mask = 0;
+
+	mt76_wr(dev, irq_map->host_irq_enable, 0);
+
+	intr = mt76_rr(dev, MT_WFDMA0_HOST_INT_STA);
+	intr &= dev->mt76.mmio.irqmask;
+	mt76_wr(dev, MT_WFDMA0_HOST_INT_STA, intr);
+
+	mask |= intr & (irq_map->rx.data_complete_mask |
+			irq_map->rx.wm_complete_mask |
+			irq_map->rx.wm2_complete_mask);
+	if (intr & irq_map->tx.mcu_complete_mask)
+		mask |= irq_map->tx.mcu_complete_mask;
+
+	if (intr & MT_INT_MCU_CMD) {
+		u32 intr_sw = mt76_rr(dev, MT_MCU_CMD);
+
+		/* ack MCU2HOST_SW_INT_STA */
+		mt76_wr(dev, MT_MCU_CMD, intr_sw);
+		if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE) {
+			mask |= irq_map->rx.data_complete_mask;
+			intr |= irq_map->rx.data_complete_mask;
+		}
+	}
+
+	mt76_set_irq_mask(&dev->mt76, 0, mask, 0);
+
+	if (intr & irq_map->tx.all_complete_mask)
+		napi_schedule(&dev->mt76.tx_napi);
+	if (intr & irq_map->rx.wm_complete_mask)
+		napi_schedule(&dev->mt76.napi[MT_RXQ_MCU]);
+	if (intr & irq_map->rx.wm2_complete_mask)
+		napi_schedule(&dev->mt76.napi[MT_RXQ_MCU_WA]);
+	if (intr & irq_map->rx.data_complete_mask)
+		napi_schedule(&dev->mt76.napi[MT_RXQ_MAIN]);
+}
+
 static void mt7921_soc_irq_tasklet(unsigned long data)
 {
 	struct mt792x_dev *dev = (struct mt792x_dev *)data;
+	struct mt7921_soc_dev *soc = to_soc(dev);
 	unsigned long flags;
 
-	mt792x_irq_tasklet(data);
+	/* in fw own nothing is read: driver own schedules this again */
+	spin_lock_irqsave(&soc->own_lock, flags);
+	if (soc->irq_defer)
+		goto out;
 
-	spin_lock_irqsave(&dev->mt76.mmio.irq_lock, flags);
-	if (READ_ONCE(to_soc(dev)->wfsys_on))
+	/*
+	 * In system sleep with the core driver-owned: the interrupt has woken
+	 * the system (the hard handler masked it), the rings are served after
+	 * resume.
+	 */
+	if (READ_ONCE(soc->sleeping)) {
+		pm_wakeup_event(dev->mt76.dev, 0);
+		goto out;
+	}
+
+	mt7921_soc_irq_serve(dev);
+
+	spin_lock(&dev->mt76.mmio.irq_lock);
+	if (READ_ONCE(soc->wfsys_on))
 		mt76_wr(dev, dev->irq_map->host_irq_enable,
 			dev->mt76.mmio.irqmask);
-	spin_unlock_irqrestore(&dev->mt76.mmio.irq_lock, flags);
+	spin_unlock(&dev->mt76.mmio.irq_lock);
+out:
+	spin_unlock_irqrestore(&soc->own_lock, flags);
+}
+
+/*
+ * The WFDMA interrupt. Driver own: as mt792x_irq_handler(). Fw own: the
+ * registers are out of reach, disable the line and ask for driver own,
+ * which serves the rings and enables the line again.
+ */
+static irqreturn_t mt7921_soc_irq_handler(int irq, void *data)
+{
+	struct mt792x_dev *dev = data;
+	struct mt7921_soc_dev *soc = to_soc(dev);
+	bool sleeping;
+
+	if (test_bit(MT76_REMOVED, &dev->mt76.phy.state))
+		return IRQ_NONE;
+
+	spin_lock(&soc->own_lock);
+	if (soc->irq_defer) {
+		if (!soc->irq_masked) {
+			disable_irq_nosync(irq);
+			soc->irq_masked = true;
+		}
+		sleeping = READ_ONCE(soc->sleeping);
+		soc->pm.irq_fw_own++;
+		if (sleeping)
+			soc->pm.irq_asleep++;
+		spin_unlock(&soc->own_lock);
+
+		if (sleeping)
+			pm_wakeup_event(dev->mt76.dev, 0);
+		else
+			queue_work(dev->mt76.wq, &dev->pm.wake_work);
+		return IRQ_HANDLED;
+	}
+	if (READ_ONCE(soc->sleeping))
+		soc->pm.irq_asleep++;
+	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
+	spin_unlock(&soc->own_lock);
+
+	if (!test_bit(MT76_STATE_INITIALIZED, &dev->mphy.state))
+		return IRQ_NONE;
+
+	tasklet_schedule(&dev->mt76.irq_tasklet);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -895,8 +1574,12 @@ static irqreturn_t mt7921_soc_sw_irq(int irq, void *data)
 	    !READ_ONCE(soc->wfsys_on))
 		return IRQ_NONE;
 
+	/* the core may be in fw own with CONN_INFRA asleep */
+	if (mt7921_soc_ci_get(soc))
+		return IRQ_NONE;
 	status = mt76_rr(dev, MT7921_SOC_CCIF_RCHNUM);
 	mt76_wr(dev, MT7921_SOC_CCIF_ACK, status);
+	mt7921_soc_ci_put(soc);
 	if (!status || status == U32_MAX)
 		return IRQ_NONE;
 
@@ -990,10 +1673,7 @@ static void mt7921_soc_power_off(struct mt7921_soc_dev *soc)
 		soc->wfsys_on = false;
 		mtk_conninfra_wfsys_off(soc->ci);
 	}
-	if (soc->awake) {
-		soc->awake = false;
-		mtk_conninfra_sleep(soc->ci);
-	}
+	mt7921_soc_release_conninfra(soc);
 	if (soc->radio_on) {
 		soc->radio_on = false;
 		mtk_conninfra_radio_off(soc->ci, MTK_CONNINFRA_WIFI);
@@ -1028,16 +1708,14 @@ static int mt7921_soc_power_on(struct mt7921_soc_dev *soc)
 	soc->wfsys_on = true;
 
 	/*
-	 * Keep the CONN_INFRA off domain awake while the driver is bound:
-	 * the WFDMA host registers live there and the interrupt handler
-	 * touches them with the core in fw own as well.
+	 * Keep the CONN_INFRA off domain awake while the driver owns the
+	 * core: the WFDMA host registers live there. Fw own lets it go.
 	 */
-	ret = mtk_conninfra_wakeup(soc->ci);
+	ret = mt7921_soc_hold_conninfra(soc);
 	if (ret) {
 		dev_err(dev, "CONN_INFRA wakeup failed: %d\n", ret);
 		goto err;
 	}
-	soc->awake = true;
 
 	return 0;
 
@@ -1060,11 +1738,68 @@ static void mt7921_soc_unregister_device(struct mt792x_dev *dev)
 	cancel_work_sync(&dev->reset_work);
 
 	mt76_connac2_tx_token_put(&dev->mt76);
-	__mt792xe_mcu_drv_pmctrl(dev);
+	mt7921_soc_drv_own(dev);
 	mt792x_dma_cleanup(dev);
 	skb_queue_purge(&dev->mt76.mcu.res_q);
 
 	tasklet_disable(&dev->mt76.irq_tasklet);
+}
+
+/* debugfs <dev>/pm: own state and counters of the power management */
+static int mt7921_soc_pm_show(struct seq_file *s, void *data)
+{
+	struct mt7921_soc_dev *soc = dev_get_drvdata(s->private);
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt76_connac_pm *pm = &dev->pm;
+	struct mt7921_soc_pm_stats *st = &soc->pm;
+	bool fw = READ_ONCE(soc->fw_owned);
+	u64 fw_ns = st->fw_own_ns;
+
+	if (fw)
+		fw_ns += ktime_to_ns(ktime_sub(ktime_get(), st->fw_own_since));
+
+	seq_printf(s, "core: %s own, CONN_INFRA wake-ups held %d (driver %s), interrupt %s\n",
+		   fw ? "firmware" : "driver", atomic_read(&soc->ci_refs),
+		   soc->awake ? "yes" : "no",
+		   soc->irq_masked ? "masked until driver own" :
+		   soc->irq_defer ? "defers to driver own" : "served");
+	seq_printf(s, "runtime pm: %s, idle timeout %u ms, fw_own_sleepy %d, conninfra_sleep %d, firmware sleepy %d (%u events)\n",
+		   pm->enable ? "on" : "off", jiffies_to_msecs(pm->idle_timeout),
+		   fw_own_sleepy, conninfra_sleep, READ_ONCE(dev->fw_sleepy),
+		   READ_ONCE(dev->fw_sleepy_events));
+	seq_printf(s, "deep sleep: %s; suspend_fw_own %d, suspend_deep_sleep %d, wfdma_reinit %d, drv_own_eint %d\n",
+		   dev->ds_fw_default ? "firmware default" :
+		   pm->ds_enable ? "on (KeepFullPwr 0)" : "off (KeepFullPwr 1)",
+		   suspend_fw_own, suspend_deep_sleep, wfdma_reinit, drv_own_eint);
+	seq_printf(s, "idle fw own: %u (stayed: not sleepy %u, rx pending %u; failed %u), last %u us\n",
+		   st->idle_fw_own, st->idle_not_sleepy, st->idle_rx_pending,
+		   st->fw_own_fail, st->last_fw_own_us);
+	seq_printf(s, "driver own from fw own: %u (failed %u, EINT retries %u), last %u us, max %u us\n",
+		   st->drv_own, st->drv_own_fail, st->eint_retry,
+		   st->last_drv_own_us, st->max_drv_own_us);
+	seq_printf(s, "interrupts in fw own: %u; in the last system sleep: %u\n",
+		   st->irq_fw_own, st->irq_asleep);
+	seq_printf(s, "INT_STA at the last fw own 0x%08x, at the last driver own 0x%08x (MCU2HOST 0x%x); suspend settle timeouts %u, WAKEPU_WF left set %u\n",
+		   st->fw_own_int_sta, st->wake_int_sta, st->wake_mcu_cmd,
+		   st->settle_timeout, st->wakepu_left);
+	seq_printf(s, "WFDMA after a WFSYS sleep: kept %u, tx rings set back %u, full reset %u\n",
+		   st->wfdma_kept, st->tx_reinit, st->full_reinit);
+	seq_printf(s, "time in fw own: %llu ms (mt76: awake %u ms, doze %u ms)\n",
+		   div_u64(fw_ns, NSEC_PER_MSEC),
+		   jiffies_to_msecs(pm->stats.awake_time),
+		   jiffies_to_msecs(pm->stats.doze_time));
+	seq_printf(s, "system sleeps in fw own: %u; register accesses refused in fw own: %u\n",
+		   st->suspend_fw_own, st->off_limits);
+
+	return 0;
+}
+
+static void mt7921_soc_debugfs_init(struct mt7921_soc_dev *soc)
+{
+	struct device *dev = soc->dev.mt76.dev;
+
+	soc->debugfs = debugfs_create_dir(dev_name(dev), NULL);
+	debugfs_create_devm_seqfile(dev, "pm", soc->debugfs, mt7921_soc_pm_show);
 }
 
 static void mt7921_soc_release_rmem(void *data)
@@ -1099,7 +1834,7 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 		.reset = mt7921_soc_mac_reset,
 		.mcu_init = mt7921_soc_mcu_init,
 		.drv_own = mt7921_soc_drv_own,
-		.fw_own = mt792xe_mcu_fw_pmctrl,
+		.fw_own = mt7921_soc_fw_own,
 	};
 	static const struct mt792x_irq_map irq_map = {
 		.host_irq_enable = MT_WFDMA0_HOST_INT_ENA,
@@ -1213,8 +1948,12 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 	soc = to_soc(dev);
 	soc->ci = ci;
 	soc->irq = irq;
+	atomic_set(&soc->ci_refs, 0);
+	spin_lock_init(&soc->own_lock);
 	soc->irq_sw = platform_get_irq_byname_optional(pdev, "sw");
 	platform_set_drvdata(pdev, soc);
+	/* a frame for the host wakes the system (downstream: enable_irq_wake) */
+	device_init_wakeup(pdev_dev, true);
 
 	mt7921_soc_load_nvram(soc);
 
@@ -1269,7 +2008,7 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 
-	ret = devm_request_irq(pdev_dev, irq, mt792x_irq_handler, 0,
+	ret = devm_request_irq(pdev_dev, irq, mt7921_soc_irq_handler, 0,
 			       KBUILD_MODNAME, dev);
 	if (ret)
 		goto err_power_off;
@@ -1288,17 +2027,21 @@ static int mt7921_soc_probe(struct platform_device *pdev)
 		goto err_free_irq;
 
 	/*
-	 * Runtime PM only hands the core to the firmware (fw own); CONN_INFRA
-	 * stays awake, the WFDMA interrupt path needs it. No deep sleep.
+	 * Runtime PM: fw own when idle, CONN_INFRA let go. Deep sleep: the
+	 * firmware default unless asked for (MediaTek's AXI driver never
+	 * sends KeepFullPwr).
 	 */
 	dev->pm.enable_user = runtime_pm;
 	dev->pm.enable = runtime_pm;
-	dev->pm.ds_enable_user = false;
-	dev->pm.ds_enable = false;
+	dev->ds_fw_default = deep_sleep < 0;
+	dev->pm.ds_enable_user = deep_sleep > 0;
+	dev->pm.ds_enable = deep_sleep > 0;
 
 	ret = mt7921_register_device(dev);
 	if (ret)
 		goto err_free_irq;
+
+	mt7921_soc_debugfs_init(soc);
 
 	return 0;
 
@@ -1319,6 +2062,7 @@ static void mt7921_soc_remove(struct platform_device *pdev)
 	struct mt7921_soc_dev *soc = platform_get_drvdata(pdev);
 	struct mt792x_dev *dev = &soc->dev;
 
+	debugfs_remove_recursive(soc->debugfs);
 	mt7921_soc_unregister_device(dev);
 	set_bit(MT76_REMOVED, &dev->mt76.phy.state);
 	if (soc->irq_sw > 0)
@@ -1327,6 +2071,460 @@ static void mt7921_soc_remove(struct platform_device *pdev)
 	mt7921_soc_power_off(soc);
 	mt76_free_device(&dev->mt76);
 }
+
+/* ---- system sleep ------------------------------------------------------ */
+
+/*
+ * The interrupt enable mask goes through the bus ops (see the tasklet):
+ * write what mt76 keeps in mmio.irqmask.
+ */
+static void mt7921_soc_irq_apply(struct mt792x_dev *dev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->mt76.mmio.irq_lock, flags);
+	mt76_wr(dev, dev->irq_map->host_irq_enable, dev->mt76.mmio.irqmask);
+	spin_unlock_irqrestore(&dev->mt76.mmio.irq_lock, flags);
+}
+
+/*
+ * halSetSuspendFlagToFw(): the firmware names in its capabilities where
+ * the host reports that it sleeps: a word in the CONNSYS EMI (0x11111111
+ * asleep, 0x22222222 awake), a register bit, or a set/clear register pair.
+ */
+static void mt7921_soc_host_suspend_flag(struct mt7921_soc_dev *soc, bool suspend)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	u32 val;
+
+	switch (dev->host_suspend.type) {
+	case 1: {
+		phys_addr_t base;
+		u32 size;
+		__le32 *word;
+
+		if (mtk_conninfra_get_emi(soc->ci, &base, &size) ||
+		    dev->host_suspend.set_addr + 4 > size)
+			return;
+		word = memremap(base + dev->host_suspend.set_addr, 4, MEMREMAP_WB);
+		if (!word)
+			return;
+		*word = cpu_to_le32(suspend ? 0x11111111 : 0x22222222);
+		memunmap(word);
+		return;
+	}
+	case 2:
+		val = mt76_rr(dev, dev->host_suspend.set_addr);
+		if (suspend)
+			val |= dev->host_suspend.mask;
+		else
+			val &= ~dev->host_suspend.mask;
+		mt76_wr(dev, dev->host_suspend.set_addr, val);
+		return;
+	case 3:
+		mt76_wr(dev, suspend ? dev->host_suspend.set_addr :
+			dev->host_suspend.clr_addr, dev->host_suspend.mask);
+		return;
+	default:
+		return;
+	}
+}
+
+/*
+ * Before the sleep hand-over: let the firmware fetch the commands just
+ * sent (SUSPEND_MODE), answer them and report sleepy, and let the tasklet
+ * and NAPI take what it passed up. Whatever is still pending when the
+ * core goes to fw own raises the interrupt at once and ends the sleep.
+ */
+static void mt7921_soc_suspend_settle(struct mt7921_soc_dev *soc)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	const struct mt792x_irq_map *map = dev->irq_map;
+	u32 busy_mask = map->rx.data_complete_mask | map->rx.wm_complete_mask |
+			map->rx.wm2_complete_mask | MT_INT_MCU_CMD |
+			map->tx.mcu_complete_mask;
+	unsigned long end = jiffies + msecs_to_jiffies(suspend_settle_ms);
+	struct mt76_queue *q = dev->mt76.q_mcu[MT_MCUQ_WM];
+
+	if (!suspend_settle_ms)
+		return;
+
+	for (;;) {
+		bool busy = mt76_rr(dev, MT_WFDMA0_HOST_INT_STA) & busy_mask;
+
+		if (q && Q_READ(q, dma_idx) != q->head)
+			busy = true;
+		if (fw_own_sleepy && !READ_ONCE(dev->fw_sleepy))
+			busy = true;
+		if (!busy)
+			return;
+		if (time_after(jiffies, end)) {
+			soc->pm.settle_timeout++;
+			return;
+		}
+		usleep_range(2000, 3000);
+	}
+}
+
+/* system sleep: fw own whatever the power save state, mt76 told (MT76_STATE_PM) */
+static int mt7921_soc_suspend_fw_own(struct mt7921_soc_dev *soc)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	int err;
+
+	mutex_lock(&dev->pm.mutex);
+	set_bit(MT76_STATE_PM, &dev->mphy.state);
+	err = __mt7921_soc_fw_own(soc, false);
+	if (err)
+		/* resume takes the core back in any case */
+		set_bit(MT76_STATE_PM, &dev->mphy.state);
+	mutex_unlock(&dev->pm.mutex);
+
+	return err;
+}
+
+static void mt7921_soc_ip_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
+{
+	struct mt7921_soc_ip *ip = priv;
+	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+	struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);
+	struct in_device *in_dev;
+	int i, n;
+
+	if (ip->bss_idx >= 0 || vif->type != NL80211_IFTYPE_STATION ||
+	    !vif->cfg.assoc)
+		return;
+
+	ip->bss_idx = mvif->bss_conf.mt76.idx;
+	n = min_t(int, vif->cfg.arp_addr_cnt, IEEE80211_BSS_ARP_ADDR_LIST_LEN);
+	in_dev = wdev && wdev->netdev ? __in_dev_get_rcu(wdev->netdev) : NULL;
+	for (i = 0; i < n; i++) {
+		const struct in_ifaddr *ifa;
+
+		ip->addr[i] = vif->cfg.arp_addr_list[i];
+		ip->mask[i] = htonl(0xffffff00);
+		if (!in_dev)
+			continue;
+		in_dev_for_each_ifa_rcu(ifa, in_dev) {
+			if (ifa->ifa_local == ip->addr[i]) {
+				ip->mask[i] = ifa->ifa_mask;
+				break;
+			}
+		}
+	}
+	ip->count = n;
+}
+
+static void mt7921_soc_assoc_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
+{
+	bool *assoc = priv;
+
+	if (vif->type == NL80211_IFTYPE_STATION && vif->cfg.assoc)
+		*assoc = true;
+}
+
+/* the firmware wake filter and the RX filter for the sleep, or back */
+static void mt7921_soc_wow(struct mt7921_soc_dev *soc, bool suspend)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt76_dev *mdev = &dev->mt76;
+	bool assoc = false;
+	int err;
+
+	if (!suspend) {
+		if (soc->addba_rejected) {
+			err = mt76_connac_legacy_addba_reject(mdev, false);
+			if (err)
+				dev_warn(mdev->dev, "ADDBA accept: %d\n", err);
+			soc->addba_rejected = false;
+		}
+		if (soc->wow_on) {
+			err = mt76_connac_legacy_set_wowlan(mdev, false, 0, 0, 0,
+							    wow_hif, wow_gpio,
+							    wow_trigger);
+			if (err)
+				dev_warn(mdev->dev, "wake filter stop: %d\n", err);
+			soc->wow_on = false;
+		}
+		if (soc->rx_filter_set) {
+			/* what mt7921_configure_filter() keeps set */
+			u32 all = MT76_CONNAC_LEGACY_RX_FILTER_DIRECTED |
+				  MT76_CONNAC_LEGACY_RX_FILTER_MULTICAST |
+				  MT76_CONNAC_LEGACY_RX_FILTER_ALL_MULTICAST |
+				  MT76_CONNAC_LEGACY_RX_FILTER_BROADCAST;
+
+			mt76_connac_legacy_set_rx_filter(mdev, all);
+			soc->rx_filter_set = false;
+		}
+		return;
+	}
+
+	rcu_read_lock();
+	ieee80211_iterate_active_interfaces_atomic(mt76_hw(dev),
+						   IEEE80211_IFACE_ITER_NORMAL,
+						   mt7921_soc_assoc_iter, &assoc);
+	rcu_read_unlock();
+	if (!assoc)
+		return;
+
+	if (suspend_rx_filter >= 0) {
+		err = mt76_connac_legacy_set_rx_filter(mdev, suspend_rx_filter);
+		soc->rx_filter_set = !err;
+	}
+	if (suspend_addba_reject) {
+		err = mt76_connac_legacy_addba_reject(mdev, true);
+		soc->addba_rejected = !err;
+		if (err)
+			dev_warn(mdev->dev, "ADDBA reject: %d\n", err);
+		else
+			dev_info(mdev->dev, "ADDBA refused for the sleep\n");
+	}
+	if (!wowlan)
+		return;
+	err = mt76_connac_legacy_set_wowlan(mdev, true, wow_detect,
+					    wow_detect_ext, wow_filter,
+					    wow_hif, wow_gpio, wow_trigger);
+	if (err) {
+		dev_warn(mdev->dev, "wake filter: %d\n", err);
+		return;
+	}
+	soc->wow_on = true;
+	dev_info(mdev->dev, "wake filter for the sleep: detect 0x%02x ext 0x%04x, pass 0x%04x, host signal %u pin 0x%02x%s\n",
+		 wow_detect, wow_detect_ext, wow_filter, wow_hif, wow_gpio,
+		 soc->rx_filter_set ? ", RX filter narrowed" : "");
+}
+
+/* the station's IPv4 addresses to the firmware for the sleep, or cleared */
+static void mt7921_soc_ip_offload(struct mt7921_soc_dev *soc, bool suspend)
+{
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt7921_soc_ip ip = { .bss_idx = -1 };
+	int err;
+
+	if (!suspend) {
+		if (!soc->ip_offloaded)
+			return;
+		soc->ip_offloaded = false;
+		err = mt76_connac_legacy_set_ip_addr(&dev->mt76, soc->ip_bss_idx,
+						     NULL, NULL, 0);
+		if (err)
+			dev_warn(dev->mt76.dev, "ARP offload: clearing failed: %d\n",
+				 err);
+		return;
+	}
+
+	if (!arp_offload)
+		return;
+
+	rcu_read_lock();
+	ieee80211_iterate_active_interfaces_atomic(mt76_hw(dev),
+						   IEEE80211_IFACE_ITER_NORMAL,
+						   mt7921_soc_ip_iter, &ip);
+	rcu_read_unlock();
+	if (ip.bss_idx < 0 || !ip.count)
+		return;
+
+	err = mt76_connac_legacy_set_ip_addr(&dev->mt76, ip.bss_idx, ip.addr,
+					     ip.mask, ip.count);
+	if (err) {
+		dev_warn(dev->mt76.dev, "ARP offload: %d\n", err);
+		return;
+	}
+	soc->ip_offloaded = true;
+	soc->ip_bss_idx = ip.bss_idx;
+	dev_info(dev->mt76.dev, "ARP offload for the sleep: bss %d, %pI4/%pI4%s\n",
+		 ip.bss_idx, &ip.addr[0], &ip.mask[0],
+		 ip.count > 1 ? " and more" : "");
+}
+
+static const char *mt7921_soc_ds_name(struct mt792x_dev *dev)
+{
+	if (dev->ds_fw_default && !suspend_deep_sleep)
+		return "firmware default";
+	return dev->pm.ds_enable || suspend_deep_sleep ? "on" : "off";
+}
+
+static int mt7921_soc_suspend(struct device *device)
+{
+	struct mt7921_soc_dev *soc = dev_get_drvdata(device);
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt76_dev *mdev = &dev->mt76;
+	struct mt76_connac_pm *pm = &dev->pm;
+	ktime_t start = ktime_get();
+	bool fw_own = false;
+	s64 own_us = 0;
+	int err;
+
+	/* the core is down (a reset is in progress): nothing to put to sleep */
+	if (!READ_ONCE(soc->wfsys_on) || !soc->radio_on)
+		return 0;
+
+	pm->suspended = true;
+	flush_work(&dev->reset_work);
+	cancel_delayed_work_sync(&pm->ps_work);
+	cancel_work_sync(&pm->wake_work);
+	mt7921_roc_abort_sync(dev);
+
+	/* runtime PM may have handed the core over already */
+	err = mt792x_mcu_drv_pmctrl(dev);
+	if (err < 0)
+		goto restore;
+
+	wait_event_timeout(dev->wait, !dev->regd_in_progress, 5 * HZ);
+
+	/* the host sleeps: listen every DTIM, keep the links */
+	WRITE_ONCE(dev->fw_sleepy, false);
+	mt7921_soc_ip_offload(soc, true);
+	mt76_connac_legacy_suspend_mode(mdev, 0, true, 1, wowlan);
+	if (suspend_deep_sleep)
+		mt76_connac_mcu_set_deep_sleep(mdev, true);
+	/* as gen4m: the wake filter is the last command before the sleep */
+	mt7921_soc_wow(soc, true);
+	mt7921_soc_host_suspend_flag(soc, true);
+	if (suspend_fw_own)
+		mt7921_soc_suspend_settle(soc);
+	if (suspend_ci_dump)
+		mtk_conninfra_dump(soc->ci, "wifi suspend");
+
+	soc->pm.irq_asleep = 0;
+	WRITE_ONCE(soc->sleeping, true);
+	if (device_may_wakeup(device)) {
+		if (!enable_irq_wake(soc->irq))
+			soc->irq_wake = true;
+		if (soc->irq_sw > 0)
+			enable_irq_wake(soc->irq_sw);
+	}
+
+	if (suspend_fw_own) {
+		ktime_t t = ktime_get();
+
+		err = mt7921_soc_suspend_fw_own(soc);
+		own_us = ktime_us_delta(ktime_get(), t);
+		if (!err) {
+			fw_own = true;
+			soc->pm.suspend_fw_own++;
+		} else {
+			dev_warn(device, "fw own for the sleep failed (%d), staying driver-owned\n",
+				 err);
+			err = 0;
+		}
+	}
+	/* the firmware wakes CONN_INFRA for the interrupt */
+	mt7921_soc_release_conninfra(soc);
+	if (fw_own) {
+		u32 wakepu = mt76_rr(dev, MT7921_SOC_WAKEPU_WF);
+
+		if (wakepu & BIT(0)) {
+			soc->pm.wakepu_left++;
+			if (suspend_wakepu_clear)
+				mt76_clear(dev, MT7921_SOC_WAKEPU_WF, BIT(0));
+			dev_info(device, "suspend: CONN_INFRA Wi-Fi wake-up was left set (0x%08x)%s\n",
+				 wakepu, suspend_wakepu_clear ? ", cleared" : "");
+		}
+	}
+
+	dev_info(device, "asleep in %lld us: %s owns the core (fw own %lld us, INT_STA 0x%08x, firmware sleepy %d, %u sleepy events, settle timeouts %u), CONN_INFRA released (wake-ups held %d), deep sleep %s, wake IRQ %s\n",
+		 ktime_us_delta(ktime_get(), start),
+		 fw_own ? "firmware" : "driver", own_us,
+		 fw_own ? soc->pm.fw_own_int_sta : 0,
+		 READ_ONCE(dev->fw_sleepy), READ_ONCE(dev->fw_sleepy_events),
+		 soc->pm.settle_timeout,
+		 atomic_read(&soc->ci_refs), mt7921_soc_ds_name(dev),
+		 soc->irq_wake ? "on" : "off");
+
+	return 0;
+
+restore:
+	pm->suspended = false;
+	mt792x_reset(mdev);
+	return err;
+}
+
+static int mt7921_soc_resume(struct device *device)
+{
+	struct mt7921_soc_dev *soc = dev_get_drvdata(device);
+	struct mt792x_dev *dev = &soc->dev;
+	struct mt76_dev *mdev = &dev->mt76;
+	struct mt76_connac_pm *pm = &dev->pm;
+	u32 kept = soc->pm.wfdma_kept, tx = soc->pm.tx_reinit;
+	u32 full = soc->pm.full_reinit;
+	ktime_t start = ktime_get();
+	const char *wfdma;
+	bool was_fw;
+	int i, err;
+
+	if (!pm->suspended)
+		return 0;
+
+	err = mt7921_soc_hold_conninfra(soc);
+	if (err) {
+		dev_err(device, "CONN_INFRA wakeup after sleep failed: %d\n", err);
+		pm->suspended = false;
+		return err;
+	}
+
+	if (soc->irq_wake) {
+		disable_irq_wake(soc->irq);
+		soc->irq_wake = false;
+		if (soc->irq_sw > 0)
+			disable_irq_wake(soc->irq_sw);
+	}
+
+	/* what the firmware passes up first tells what woke the system */
+	WRITE_ONCE(dev->wake_probe, min(wake_probe, 255U));
+
+	/* take the core back if the firmware has it */
+	was_fw = test_bit(MT76_STATE_PM, &dev->mphy.state);
+	WRITE_ONCE(soc->sleeping, false);
+	err = mt792x_mcu_drv_pmctrl(dev);
+	if (err < 0)
+		goto failed;
+
+	mt7921_soc_host_suspend_flag(soc, false);
+	if (suspend_deep_sleep && !pm->ds_enable && !dev->ds_fw_default)
+		mt76_connac_mcu_set_deep_sleep(mdev, false);
+	mt76_connac_legacy_suspend_mode(mdev, 0, false, 1, false);
+	mt7921_soc_wow(soc, false);
+	mt7921_soc_ip_offload(soc, false);
+
+	/* what the firmware raised while asleep was only masked: serve it */
+	mt76_connac_irq_enable(mdev, dev->irq_map->tx.all_complete_mask |
+			       MT_INT_RX_DONE_ALL | MT_INT_MCU_CMD);
+	mt7921_soc_irq_apply(dev);
+	local_bh_disable();
+	mt76_for_each_q_rx(mdev, i)
+		napi_schedule(&mdev->napi[i]);
+	napi_schedule(&mdev->tx_napi);
+	local_bh_enable();
+
+	mt7921_mcu_regd_update(dev, mdev->alpha2, dev->country_ie_env);
+
+	if (soc->pm.full_reinit != full)
+		wfdma = "reset";
+	else if (soc->pm.tx_reinit != tx)
+		wfdma = "tx rings set back";
+	else if (soc->pm.wfdma_kept != kept)
+		wfdma = "kept over a WFSYS sleep";
+	else
+		wfdma = "untouched";
+	dev_info(device, "resumed in %lld us: driver owns the core (%s, driver own %u us), WFDMA %s, %u interrupts in the sleep, woken with INT_STA 0x%08x (MCU2HOST 0x%x), IRQ status 0x%08x\n",
+		 ktime_us_delta(ktime_get(), start),
+		 was_fw ? "was firmware-owned" : "stayed driver-owned",
+		 was_fw ? soc->pm.last_drv_own_us : 0, wfdma,
+		 soc->pm.irq_asleep, was_fw ? soc->pm.wake_int_sta : 0,
+		 was_fw ? soc->pm.wake_mcu_cmd : 0,
+		 mt76_rr(dev, MT_WFDMA0_HOST_INT_STA));
+failed:
+	if (err < 0)
+		dev_err(device, "resume: driver own failed: %d\n", err);
+	pm->suspended = false;
+	if (err < 0)
+		mt792x_reset(mdev);
+	return err;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mt7921_soc_pm_ops, mt7921_soc_suspend,
+				mt7921_soc_resume);
 
 static const struct of_device_id mt7921_soc_of_match[] = {
 	{ .compatible = "mediatek,mt6878-wifi" },
@@ -1338,6 +2536,7 @@ static struct platform_driver mt7921_soc_driver = {
 	.driver = {
 		.name = "mt7921-soc",
 		.of_match_table = mt7921_soc_of_match,
+		.pm = pm_sleep_ptr(&mt7921_soc_pm_ops),
 	},
 	.probe = mt7921_soc_probe,
 	.remove = mt7921_soc_remove,

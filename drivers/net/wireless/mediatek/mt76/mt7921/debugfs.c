@@ -196,9 +196,11 @@ mt7921_deep_sleep_set(void *data, u64 val)
 		return -EOPNOTSUPP;
 
 	mt792x_mutex_acquire(dev);
-	if (pm->ds_enable_user == enable)
+	if (pm->ds_enable_user == enable && !dev->ds_fw_default)
 		goto out;
 
+	/* from now on the driver sets the firmware's deep sleep */
+	dev->ds_fw_default = false;
 	pm->ds_enable_user = enable;
 	pm->ds_enable = enable && !monitor;
 	mt76_connac_mcu_set_deep_sleep(&dev->mt76, pm->ds_enable);

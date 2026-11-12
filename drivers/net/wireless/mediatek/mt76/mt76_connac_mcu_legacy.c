@@ -727,3 +727,155 @@ int mt76_connac_legacy_add_key(struct mt76_dev *dev, struct mt76_vif_link *mvif,
 				 sizeof(req), false);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_legacy_add_key);
+
+/* CMD_SUSPEND_MODE_SETTING: the host sleeps; wow says whether it wakes it */
+struct mt76_connac_legacy_suspend_mode {
+	u8 bss_idx;
+	u8 enable;
+	u8 mdtim;		/* listen interval in DTIMs while the host sleeps */
+	u8 wow_suspend;
+	u8 rsv[64];
+} __packed;
+
+int mt76_connac_legacy_suspend_mode(struct mt76_dev *dev, u8 bss_idx,
+				    bool enable, u8 mdtim, bool wow)
+{
+	struct mt76_connac_legacy_suspend_mode req = {
+		.bss_idx = bss_idx,
+		.enable = enable,
+		.mdtim = mdtim,
+		.wow_suspend = wow,
+	};
+
+	BUILD_BUG_ON(sizeof(req) != 68);
+
+	return mt76_mcu_send_msg(dev, MCU_CE_CMD(SET_SUSPEND_MODE), &req,
+				 sizeof(req), false);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_legacy_suspend_mode);
+
+/*
+ * CMD_SET_NETWORK_ADDRESS_LIST (CMD_ID_SET_IP_ADDRESS, version 1): the
+ * IPv4 addresses of the BSS, for the firmware's ARP offload while the
+ * host sleeps (MediaTek's driver sends it on every address change).
+ */
+#define MT76_CONNAC_LEGACY_MAX_IP	4
+
+int mt76_connac_legacy_set_ip_addr(struct mt76_dev *dev, u8 bss_idx,
+				   const __be32 *addr, const __be32 *mask,
+				   int count)
+{
+	struct {
+		u8 bss_idx;
+		u8 count;
+		u8 version;
+		u8 rsv;
+		struct {
+			__be32 addr;
+			__be32 mask;
+		} ip[MT76_CONNAC_LEGACY_MAX_IP];
+	} __packed req = {
+		.bss_idx = bss_idx,
+		.version = 1,
+	};
+	int i, len;
+
+	count = clamp(count, 0, MT76_CONNAC_LEGACY_MAX_IP);
+	req.count = count;
+	for (i = 0; i < count; i++) {
+		req.ip[i].addr = addr[i];
+		req.ip[i].mask = mask[i];
+	}
+	/* as MediaTek's driver: room for one address even with none */
+	len = offsetof(typeof(req), ip) + max(count, 1) * sizeof(req.ip[0]);
+
+	return mt76_mcu_send_msg(dev, MCU_CE_CMD(SET_IP_ADDRESS), &req, len,
+				 false);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_legacy_set_ip_addr);
+
+/*
+ * CMD_WOWLAN_PARAM (CMD_ID_SET_WOWLAN 0x4a) of MediaTek's gen4m driver
+ * (include/wsys_cmd_handler_fw.h, flags in include/nic_cmd_event.h,
+ * sent by kalWowProcess() as the last command before the host sleeps,
+ * PM_WOWLAN_REQ_STOP after it): what wakes the host and which frames the
+ * firmware passes up while it sleeps.
+ */
+#define MT76_CONNAC_LEGACY_WOW_PORTS	20
+
+struct mt76_connac_legacy_wow_hif {
+	u8 hif;			/* ENUM_HIF_TYPE: 0 SDIO, 1 USB, 2 PCIe, 3 GPIO */
+	u8 gpio_pin;
+	u8 trigger_lvl;
+	u8 rsv1;
+	__le32 gpio_interval;
+	u8 rsv2[4];
+} __packed;
+
+struct mt76_connac_legacy_wowlan {
+	u8 cmd;			/* 1 start, 2 stop */
+	u8 detect_type;
+	__le16 filter_flag;
+	u8 scenario_id;
+	u8 block_count;
+	u8 rsv1[2];
+	struct mt76_connac_legacy_wow_hif wake_hif[2];
+	struct {
+		u8 ipv4_udp_cnt, ipv4_tcp_cnt, ipv6_udp_cnt, ipv6_tcp_cnt;
+		__le16 ipv4_udp[MT76_CONNAC_LEGACY_WOW_PORTS];
+		__le16 ipv4_tcp[MT76_CONNAC_LEGACY_WOW_PORTS];
+		__le16 ipv6_udp[MT76_CONNAC_LEGACY_WOW_PORTS];
+		__le16 ipv6_tcp[MT76_CONNAC_LEGACY_WOW_PORTS];
+	} __packed port;
+	__le16 detect_type_ext;
+	u8 rsv2[30];
+} __packed;
+
+int mt76_connac_legacy_set_wowlan(struct mt76_dev *dev, bool start,
+				  u8 detect, u16 detect_ext, u16 filter,
+				  u8 hif, u8 gpio_pin, u8 trigger_lvl)
+{
+	struct mt76_connac_legacy_wowlan req = {
+		.cmd = start ? 1 : 2,
+		.block_count = 1,	/* gen4m "WowPinCnt" default */
+		.wake_hif[0] = {
+			.hif = hif,
+			.gpio_pin = gpio_pin,
+			.trigger_lvl = trigger_lvl,
+		},
+	};
+
+	BUILD_BUG_ON(sizeof(req) != 228);
+	if (start) {
+		req.detect_type = detect;
+		req.detect_type_ext = cpu_to_le16(detect_ext);
+		req.filter_flag = cpu_to_le16(filter);
+	}
+
+	return mt76_mcu_send_msg(dev, MCU_CE_CMD(SET_WOWLAN), &req,
+				 sizeof(req), false);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_legacy_set_wowlan);
+
+/*
+ * CMD_ADDBA_REJECT (CMD_ID_ADDBA_REJECT 0x20, gen4m include/nic/que_mgt.h):
+ * the firmware answers the AP's ADDBA requests itself and only reports the
+ * session (EVENT_ID_RX_ADDBA); with reject set it refuses them. gen4m sends
+ * {1, 1} when it limits RX BA to 1 (BT coex) and {0, 1} when the BA size is
+ * set back (wlan_lib.c, nic_cmd_event.c).
+ */
+int mt76_connac_legacy_addba_reject(struct mt76_dev *dev, bool reject)
+{
+	struct {
+		u8 enable;
+		u8 apply;
+		u8 rsv[2];
+	} __packed req = {
+		.enable = reject,
+		.apply = 1,
+	};
+
+	return mt76_mcu_send_msg(dev, MCU_CE_CMD(ADDBA_REJECT), &req,
+				 sizeof(req), false);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_legacy_addba_reject);
