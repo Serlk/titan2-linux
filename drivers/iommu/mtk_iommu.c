@@ -149,6 +149,48 @@
 #define INT_ID_PORT_WIDTH_6		BIT(19)
 #define CFG_IFA_MASTER_IN_ATF		BIT(20)
 #define DL_WITH_MULTI_LARB		BIT(21)
+/*
+ * The page table base is owned by the hypervisor, which walks its own copy
+ * of the kernel table and updates it on TLB range invalidations (and, in
+ * "type 2" mode, on an explicit SMC). Mappings made while the M4U is off
+ * must still reach it. MediaTek kernel: IOMMU_SEC_EN with hyp-mmu.
+ */
+#define HYP_PGTABLE_SYNC		BIT(22)
+
+/*
+ * Hypervisor (GZ) page table calls, as used by the MediaTek kernel
+ * (kernel_device_modules drivers/iommu/mtk_iommu.c, GPL-2.0).
+ */
+#define MTK_HYP_PMM_GET_TYPE2_EN	0xbb00ffa4
+#define MTK_HYP_PMM_IOVA_TO_PHYS	0xbb00ffa6
+#define MTK_HYP_PMM_TYPE2_INV		0xbb00ffa7
+#define MTK_HYP_MM_TABLE		0
+
+static bool hyp_smc = true;
+module_param(hyp_smc, bool, 0444);
+MODULE_PARM_DESC(hyp_smc, "query the hypervisor page table mode by SMC (HYP_PGTABLE_SYNC)");
+
+/*
+ * MT6878: keep the IOVAs of boot loader carveouts that the secure side and
+ * the hypervisor use out of the DMA allocator of region 0: the boot frame buffer
+ * ("mediatek,framebuffer", 0xfe04f000 +0x1fb0000 on Titan 2; a display buffer
+ * there showed the boot loader picture) and the protected page tables of the
+ * hypervisor ("mediatek,platform_mtksmmu_protpgd", 0xf9e00000 +0x4200000,
+ * holding the page table base the M4U reports; display buffers there stayed
+ * black). The carveouts are found by compatible in /reserved-memory (the
+ * boot loader adds them); without them the fallback window below is used.
+ */
+#define MT6878_RESV_FALLBACK_IOVA	0xf9e00000UL
+#define MT6878_RESV_FALLBACK_SIZE	(SZ_4G - MT6878_RESV_FALLBACK_IOVA)
+
+static const char * const mt6878_resv_compats[] = {
+	"mediatek,framebuffer",
+	"mediatek,platform_mtksmmu_protpgd",
+};
+
+static bool resv_boot_fb = true;
+module_param(resv_boot_fb, bool, 0444);
+MODULE_PARM_DESC(resv_boot_fb, "MT6878: keep the boot frame buffer and protected page table carveouts out of the IOVA space (default on)");
 
 #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
 				((((pdata)->flags) & (mask)) == (_x))
@@ -169,6 +211,7 @@ enum mtk_iommu_plat {
 	M4U_MT2712,
 	M4U_MT6779,
 	M4U_MT6795,
+	M4U_MT6878,
 	M4U_MT8167,
 	M4U_MT8173,
 	M4U_MT8183,
@@ -191,6 +234,7 @@ struct mtk_iommu_suspend_reg {
 	u32			ctrl_reg;
 	u32			vld_pa_rng;
 	u32			wr_len_ctrl;
+	bool			saved;
 
 	u32			int_control[MTK_IOMMU_BANK_MAX];
 	u32			int_main_control[MTK_IOMMU_BANK_MAX];
@@ -241,6 +285,12 @@ struct mtk_iommu_plat_data {
 	};
 
 	unsigned char       larbid_remap[MTK_LARB_COM_MAX][MTK_LARB_SUBCOM_MAX];
+
+	/*
+	 * Larb ids of MM masters that reach the smi-common without an SMI
+	 * larb (no larb device, no MMU_EN bit to set), as bits.
+	 */
+	u32			larbless_msk;
 };
 
 struct mtk_iommu_bank_data {
@@ -279,6 +329,12 @@ struct mtk_iommu_data {
 	struct list_head		hw_list_head;
 	struct list_head		list;
 	struct mtk_smi_larb_iommu	larb_imu[MTK_LARB_NR_MAX];
+
+	/* HYP_PGTABLE_SYNC: IOVA range changed while the M4U was off */
+	spinlock_t			pend_lock;
+	bool				pend;
+	unsigned long			pend_start, pend_end;
+	bool				hyp_type2;
 };
 
 struct mtk_iommu_domain {
@@ -401,6 +457,253 @@ static void mtk_iommu_tlb_flush_all(struct mtk_iommu_data *data)
 	spin_unlock_irqrestore(&bank->tlb_lock, flags);
 }
 
+/* Remember a range for the invalidation at the next runtime resume. */
+static void mtk_iommu_pend_range(struct mtk_iommu_data *data,
+				 unsigned long iova, size_t size)
+{
+	unsigned long flags, end = iova + size - 1;
+
+	spin_lock_irqsave(&data->pend_lock, flags);
+	if (!data->pend) {
+		data->pend_start = iova;
+		data->pend_end = end;
+		data->pend = true;
+	} else {
+		data->pend_start = min(data->pend_start, iova);
+		data->pend_end = max(data->pend_end, end);
+	}
+	spin_unlock_irqrestore(&data->pend_lock, flags);
+}
+
+/* Range invalidation of one bank; the caller has the M4U powered. */
+static int mtk_iommu_tlb_inv_range_hw(struct mtk_iommu_data *data,
+				      struct mtk_iommu_bank_data *bank,
+				      unsigned long iova, unsigned long end)
+{
+	void __iomem *base = bank->base;
+	unsigned long flags;
+	int ret;
+	u32 tmp;
+
+	spin_lock_irqsave(&bank->tlb_lock, flags);
+	writel_relaxed(F_INVLD_EN1 | F_INVLD_EN0, base + data->plat_data->inv_sel_reg);
+	writel_relaxed(MTK_IOMMU_TLB_ADDR(iova), base + REG_MMU_INVLD_START_A);
+	writel_relaxed(MTK_IOMMU_TLB_ADDR(end), base + REG_MMU_INVLD_END_A);
+	writel_relaxed(F_MMU_INV_RANGE, base + REG_MMU_INVALIDATE);
+	ret = readl_poll_timeout_atomic(base + REG_MMU_CPE_DONE, tmp, tmp != 0,
+					10, 1000);
+	writel_relaxed(0, base + REG_MMU_CPE_DONE);
+	spin_unlock_irqrestore(&bank->tlb_lock, flags);
+	return ret;
+}
+
+/*
+ * Debug: "echo <iova> > /sys/module/mtk_iommu/parameters/walk_iova" logs what
+ * the kernel page table of bank 0 maps that IOVA to, and the page table base
+ * the M4U reports (read only while it is runtime active). Compare with the
+ * address a master is programmed with (e.g. the OVL layer address).
+ */
+static struct mtk_iommu_data *mtk_iommu_walk_data;
+
+/* the hypervisor's normal table entry of an IOVA as a PA, 0 if none */
+static u64 mtk_iommu_hyp_walk(u64 iova, unsigned long *raw)
+{
+	struct arm_smccc_res res;
+	u32 ns;
+
+	arm_smccc_smc(MTK_HYP_PMM_IOVA_TO_PHYS, lower_32_bits(iova),
+		      upper_32_bits(iova), MTK_HYP_MM_TABLE, 0, 0, 0, 0, &res);
+	*raw = res.a0;
+	ns = lower_32_bits(res.a0);
+	return ((u64)(ns & 0x7) << 32) | (ns & ~0xfffU);
+}
+
+/*
+ * "iova,size": compare the kernel table and the hypervisor's normal table
+ * for every 4 KiB page of the range; log the first mismatches and a summary.
+ */
+static void mtk_iommu_walk_range(struct mtk_iommu_data *data,
+				 struct mtk_iommu_domain *dom, u64 iova, u64 size)
+{
+	unsigned int pages = 0, bad = 0, unmapped = 0;
+	unsigned long raw;
+	u64 a, end;
+
+	size = min_t(u64, size, SZ_64M);
+	end = iova + size;
+	for (a = iova & ~0xfffULL; a < end; a += SZ_4K) {
+		u64 ours = dom->iop->iova_to_phys(dom->iop, a) & ~0xfffULL;
+		u64 hyp = mtk_iommu_hyp_walk(a, &raw) & ~0xfffULL;
+
+		pages++;
+		if (!ours)
+			unmapped++;
+		if (ours == hyp)
+			continue;
+		if (bad++ < 16)
+			dev_info(data->dev,
+				 "walk 0x%llx: kernel 0x%llx, hyp 0x%llx (raw 0x%lx)\n",
+				 a, ours, hyp, raw);
+		cond_resched();
+	}
+	dev_info(data->dev,
+		 "walk 0x%llx+0x%llx: %u pages, %u differ from the hypervisor table, %u unmapped in the kernel table\n",
+		 iova, size, pages, bad, unmapped);
+}
+
+static int mtk_iommu_walk_set(const char *val, const struct kernel_param *kp)
+{
+	struct mtk_iommu_data *data = READ_ONCE(mtk_iommu_walk_data);
+	struct mtk_iommu_domain *dom;
+	char buf[48], *comma;
+	u64 iova, size = 0;
+	phys_addr_t pa;
+	u32 pt = 0;
+	bool on;
+	int ret;
+
+	strscpy(buf, val, sizeof(buf));
+	comma = strchr(buf, ',');
+	if (comma) {
+		*comma = 0;
+		ret = kstrtou64(strim(comma + 1), 0, &size);
+		if (ret)
+			return ret;
+	}
+	ret = kstrtou64(strim(buf), 0, &iova);
+	if (ret)
+		return ret;
+	if (!data || !data->bank[0].m4u_dom)
+		return -ENODEV;
+	if (size) {
+		if (!hyp_smc)
+			return -EOPNOTSUPP;
+		mtk_iommu_walk_range(data, data->bank[0].m4u_dom, iova, size);
+		return 0;
+	}
+
+	dom = data->bank[0].m4u_dom;
+	pa = dom->iop->iova_to_phys(dom->iop, iova);
+	on = pm_runtime_get_if_in_use(data->dev) > 0;
+	if (on) {
+		pt = readl_relaxed(data->bank[0].base + REG_MMU_PT_BASE_ADDR);
+		pm_runtime_put(data->dev);
+	}
+	dev_info(data->dev,
+		 "walk 0x%llx -> %pa (domain ttbr 0x%08x, pt_base reg %s0x%08x, hyp type2 %d)\n",
+		 iova, &pa, dom->cfg.arm_v7s_cfg.ttbr, on ? "" : "not read, M4U off, ",
+		 pt, data->hyp_type2);
+
+	/*
+	 * The hypervisor's own view of the IOVA, as the MediaTek kernel dumps it
+	 * on a fault (mtee_iova_to_phys(), MM table): a0[31:0] the normal table,
+	 * a0[63:32] the protected one, each PA[31:12] | type[9:8] | sr[7:3] |
+	 * PA[34:32] (lvl in [11:10]).
+	 */
+	if (hyp_smc) {
+		struct arm_smccc_res res;
+		u32 ns, prot;
+
+		arm_smccc_smc(MTK_HYP_PMM_IOVA_TO_PHYS, lower_32_bits(iova),
+			      upper_32_bits(iova), MTK_HYP_MM_TABLE, 0, 0, 0, 0,
+			      &res);
+		ns = lower_32_bits(res.a0);
+		prot = upper_32_bits(res.a0);
+		dev_info(data->dev,
+			 "walk 0x%llx: hyp normal table -> 0x%llx (type %lu sr %lu lvl %lu), protected -> 0x%llx (type %lu sr %lu lvl %lu), raw 0x%lx\n",
+			 iova,
+			 ((u64)(ns & 0x7) << 32) | (ns & ~0xfffU),
+			 (unsigned long)((ns >> 8) & 3), (unsigned long)((ns >> 3) & 0x1f),
+			 (unsigned long)((ns >> 10) & 3),
+			 ((u64)(prot & 0x7) << 32) | (prot & ~0xfffU),
+			 (unsigned long)((prot >> 8) & 3), (unsigned long)((prot >> 3) & 0x1f),
+			 (unsigned long)((prot >> 10) & 3), res.a0);
+	}
+	return 0;
+}
+
+/*
+ * Debug: "echo 1 > /sys/module/mtk_iommu/parameters/dump_regs" logs, while
+ * the M4U is runtime active, the control, interrupt and fault registers of
+ * bank 0, the debug registers and the request slot status of both MMUs (the
+ * slots hold the IOVA, the descriptor the walker fetched and the second
+ * level table base of recent translations: the register layout the MediaTek
+ * kernel dumps for hang issues, mtk_dump_rs_sta_info(), 16 slots of 16 bytes
+ * at 0x380 + mmu * 0x300). Read only.
+ */
+#define MTK_M4U_RS_BASE(mmu)		(0x380 + (mmu) * 0x300)
+#define MTK_M4U_RS_NR			16
+
+static int mtk_iommu_dump_set(const char *val, const struct kernel_param *kp)
+{
+	static const u16 regs[] = {
+		0x008, 0x048, 0x050, 0x054, 0x110, 0x114, 0x118, 0x120, 0x124,
+		0x130, 0x134, 0x138, 0x13c, 0x140, 0x144, 0x148, 0x150, 0x154,
+		0x060, 0x064, 0x068, 0x06c, 0x070, 0x074, 0x078,
+	};
+	struct mtk_iommu_data *data = READ_ONCE(mtk_iommu_walk_data);
+	void __iomem *base;
+	unsigned int i, mmu;
+	bool on;
+	int ret;
+
+	ret = kstrtobool(val, &on);
+	if (ret || !on)
+		return ret;
+	if (!data)
+		return -ENODEV;
+	if (pm_runtime_get_if_in_use(data->dev) <= 0)
+		return -EAGAIN;	/* registers only while it is powered */
+
+	base = data->bank[0].base;
+	for (i = 0; i < ARRAY_SIZE(regs); i++)
+		dev_info(data->dev, "dump 0x%03x = 0x%08x\n", regs[i],
+			 readl_relaxed(base + regs[i]));
+	for (mmu = 0; mmu < 2; mmu++) {
+		for (i = 0; i < MTK_M4U_RS_NR; i++) {
+			void __iomem *rs = base + MTK_M4U_RS_BASE(mmu) + i * 16;
+			u32 va = readl_relaxed(rs), desc = readl_relaxed(rs + 4);
+			u32 l2 = readl_relaxed(rs + 8), sta = readl_relaxed(rs + 12);
+
+			if (!va && !desc && !l2 && !sta)
+				continue;
+			dev_info(data->dev,
+				 "dump mmu%u rs%02u: iova/bank 0x%08x descriptor 0x%08x 2nd-base 0x%08x status 0x%08x\n",
+				 mmu, i, va, desc, l2, sta);
+		}
+	}
+	pm_runtime_put(data->dev);
+	return 0;
+}
+
+static const struct kernel_param_ops mtk_iommu_dump_ops = {
+	.set = mtk_iommu_dump_set,
+};
+module_param_cb(dump_regs, &mtk_iommu_dump_ops, NULL, 0200);
+MODULE_PARM_DESC(dump_regs, "debug: write 1 to log the bank 0 fault/control registers and the request slots of both MMUs");
+
+static const struct kernel_param_ops mtk_iommu_walk_ops = {
+	.set = mtk_iommu_walk_set,
+};
+module_param_cb(walk_iova, &mtk_iommu_walk_ops, NULL, 0200);
+MODULE_PARM_DESC(walk_iova, "debug: log the kernel (and hypervisor) table walk of \"iova\" or compare a range \"iova,size\" page by page (write only)");
+
+/* Type 2 hypervisor: have it re-read the kernel table for a range. */
+static void mtk_iommu_hyp_inv(struct mtk_iommu_data *data, unsigned long iova,
+			      size_t size)
+{
+	struct arm_smccc_res res;
+
+	if (!data->hyp_type2)
+		return;
+	arm_smccc_smc(MTK_HYP_PMM_TYPE2_INV, MTK_IOMMU_TLB_ADDR(iova),
+		      MTK_IOMMU_TLB_ADDR(iova + size - 1), MTK_HYP_MM_TABLE,
+		      0, 0, 0, 0, &res);
+	if (res.a0)
+		dev_warn_ratelimited(data->dev, "hyp type2 inv 0x%lx+0x%zx: %ld\n",
+				     iova, size, (long)res.a0);
+}
+
 static void mtk_iommu_tlb_flush_range_sync(unsigned long iova, size_t size,
 					   struct mtk_iommu_bank_data *bank)
 {
@@ -432,8 +735,11 @@ static void mtk_iommu_tlb_flush_range_sync(unsigned long iova, size_t size,
 		check_pm_status = !MTK_IOMMU_HAS_FLAG(data->plat_data, PM_CLK_AO);
 
 		if (check_pm_status) {
-			if (pm_runtime_get_if_in_use(data->dev) <= 0)
+			if (pm_runtime_get_if_in_use(data->dev) <= 0) {
+				if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_PGTABLE_SYNC))
+					mtk_iommu_pend_range(data, iova, size);
 				continue;
+			}
 		}
 
 		curbank = &data->bank[bank->id];
@@ -526,6 +832,20 @@ static irqreturn_t mtk_iommu_isr(int irq, void *dev_id)
 			"fault type=0x%x iova=0x%llx pa=0x%llx master=0x%x(larb=%d port=%d) layer=%d %s\n",
 			int_state, fault_iova, fault_pa, regval, fault_larb, fault_port,
 			layer, str_write_read(write));
+		/*
+		 * Is the IOVA mapped in the table the domain owns, and is that
+		 * the table the hardware walks?
+		 */
+		if (dom) {
+			phys_addr_t sw_pa = dom->iop->iova_to_phys(dom->iop, fault_iova);
+
+			dev_err_ratelimited(bank->parent_dev,
+					    "fault: pt_base reg 0x%08x, domain ttbr 0x%08x, sw walk of 0x%llx -> %pa; ctrl 0x%08x vld_pa_rng 0x%08x\n",
+					    readl_relaxed(base + REG_MMU_PT_BASE_ADDR),
+					    dom->cfg.arm_v7s_cfg.ttbr, fault_iova, &sw_pa,
+					    readl_relaxed(data->bank[0].base + REG_MMU_CTRL_REG),
+					    readl_relaxed(data->bank[0].base + REG_MMU_VLD_PA_RNG));
+		}
 	}
 
 	/* Interrupt clear */
@@ -610,6 +930,11 @@ static int mtk_iommu_config(struct mtk_iommu_data *data, struct device *dev,
 	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_MM)) {
 		/* All ports should be in the same larb. just use 0 here */
 		larbid = MTK_M4U_TO_LARB(fwspec->ids[0]);
+		if (BIT(larbid) & data->plat_data->larbless_msk) {
+			dev_dbg(dev, "%s iommu for larb-less master %d port 0x%lx region %d.\n",
+				str_enable_disable(enable), larbid, portid_msk, regionid);
+			return 0;
+		}
 		larb_mmu = &data->larb_imu[larbid];
 		region = data->plat_data->iova_region + regionid;
 
@@ -766,6 +1091,9 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 		}
 		bank->m4u_dom = dom;
 		writel(dom->cfg.arm_v7s_cfg.ttbr, bank->base + REG_MMU_PT_BASE_ADDR);
+		dev_info(m4udev, "bank %u: page table base 0x%08x (read back 0x%08x) for %s\n",
+			 bankid, dom->cfg.arm_v7s_cfg.ttbr,
+			 readl(bank->base + REG_MMU_PT_BASE_ADDR), dev_name(dev));
 
 		pm_runtime_put(m4udev);
 	}
@@ -846,6 +1174,7 @@ static void mtk_iommu_iotlb_sync(struct iommu_domain *domain,
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 	size_t length = gather->end - gather->start + 1;
 
+	mtk_iommu_hyp_inv(dom->bank->parent_data, gather->start, length);
 	mtk_iommu_tlb_flush_range_sync(gather->start, length, dom->bank);
 }
 
@@ -854,6 +1183,7 @@ static int mtk_iommu_sync_map(struct iommu_domain *domain, unsigned long iova,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 
+	mtk_iommu_hyp_inv(dom->bank->parent_data, iova, size);
 	mtk_iommu_tlb_flush_range_sync(iova, size, dom->bank);
 	return 0;
 }
@@ -881,6 +1211,7 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
 	struct device *larbdev;
 	unsigned long larbid_msk = 0;
 	unsigned int larbid, larbidx, i;
+	bool comm_link = false;
 
 	if (!MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_MM))
 		return &data->iommu;
@@ -909,10 +1240,29 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
 		}
 	}
 
+	/*
+	 * The larb-less masters have no larb to link with; they reach the
+	 * smi-common directly, link them with it so that it and the M4U are
+	 * powered while they run.
+	 */
+	if (larbid_msk & data->plat_data->larbless_msk) {
+		larbid_msk &= ~(unsigned long)data->plat_data->larbless_msk;
+		link = device_link_add(dev, data->smicomm_dev,
+				       DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
+		if (!link) {
+			dev_err(dev, "Unable to link %s\n", dev_name(data->smicomm_dev));
+			return ERR_PTR(-ENODEV);
+		}
+		comm_link = true;
+	}
+
 	for_each_set_bit(larbid, &larbid_msk, 32) {
 		larbdev = data->larb_imu[larbid].dev;
-		if (!larbdev)
+		if (!larbdev) {
+			if (comm_link)
+				device_link_remove(dev, data->smicomm_dev);
 			return ERR_PTR(-EINVAL);
+		}
 
 		link = device_link_add(dev, larbdev,
 				       DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
@@ -929,6 +1279,8 @@ link_remove:
 		larbdev = data->larb_imu[i].dev;
 		device_link_remove(dev, larbdev);
 	}
+	if (comm_link)
+		device_link_remove(dev, data->smicomm_dev);
 
 	return ERR_PTR(-ENODEV);
 }
@@ -948,6 +1300,10 @@ static void mtk_iommu_release_device(struct device *dev)
 	for (i = 0; i < fwspec->num_ids; i++) {
 		larbid = MTK_M4U_TO_LARB(fwspec->ids[i]);
 		larbid_msk |= BIT(larbid);
+	}
+	if (larbid_msk & data->plat_data->larbless_msk) {
+		larbid_msk &= ~(unsigned long)data->plat_data->larbless_msk;
+		device_link_remove(dev, data->smicomm_dev);
 	}
 
 	for_each_set_bit(larbid, &larbid_msk, 32) {
@@ -1024,6 +1380,55 @@ static int mtk_iommu_of_xlate(struct device *dev,
 	return iommu_fwspec_add_ids(dev, args->args, 1);
 }
 
+/* the MT6878 boot loader carveouts inside region 0, see resv_boot_fb */
+static void mtk_iommu_mt6878_resv(const struct mtk_iommu_iova_region *dom,
+				  struct list_head *head)
+{
+	u64 dom_end = dom->iova_base + dom->size;
+	struct iommu_resv_region *region;
+	bool found = false;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(mt6878_resv_compats); i++) {
+		struct device_node *np;
+		struct resource res;
+
+		np = of_find_compatible_node(NULL, NULL, mt6878_resv_compats[i]);
+		if (!np)
+			continue;
+		/*
+		 * Clamp to the domain: region 0 ends 8 MiB below 4 GiB
+		 * (MTK_IOMMU_IOVA_SZ_4G), so the boot frame buffer carveout
+		 * (0xfe04f000..0xffffefff) only partly lies inside it. Skipping
+		 * it left 0xfe04f000..0xff7fffff allocatable, and a display
+		 * buffer mapped there showed the boot loader's picture.
+		 */
+		if (!of_address_to_resource(np, 0, &res) &&
+		    res.end >= dom->iova_base && res.start < dom_end) {
+			u64 start = max_t(u64, res.start, dom->iova_base);
+			u64 end = min_t(u64, (u64)res.end + 1, dom_end);
+
+			region = iommu_alloc_resv_region(start, end - start, 0,
+							 IOMMU_RESV_RESERVED,
+							 GFP_KERNEL);
+			if (region) {
+				list_add_tail(&region->list, head);
+				found = true;
+			}
+		}
+		of_node_put(np);
+	}
+
+	if (found)
+		return;
+
+	region = iommu_alloc_resv_region(MT6878_RESV_FALLBACK_IOVA,
+					 MT6878_RESV_FALLBACK_SIZE, 0,
+					 IOMMU_RESV_RESERVED, GFP_KERNEL);
+	if (region)
+		list_add_tail(&region->list, head);
+}
+
 static void mtk_iommu_get_resv_regions(struct device *dev,
 				       struct list_head *head)
 {
@@ -1052,6 +1457,10 @@ static void mtk_iommu_get_resv_regions(struct device *dev,
 
 		list_add_tail(&region->list, head);
 	}
+
+	if (resv_boot_fb && data->plat_data->m4u_plat == M4U_MT6878 &&
+	    regionid == 0)
+		mtk_iommu_mt6878_resv(curdom, head);
 }
 
 static const struct iommu_ops mtk_iommu_ops = {
@@ -1224,21 +1633,21 @@ static int mtk_iommu_mm_dts_parse(struct device *dev, struct component_match **m
 		}
 
 		/* Get smi-(sub)-common dev from the last larb. */
-		smi_subcomm_node = of_parse_phandle(larbnode, "mediatek,smi", 0);
-		if (!smi_subcomm_node) {
+		smicomm_node = of_parse_phandle(larbnode, "mediatek,smi", 0);
+		if (!smicomm_node) {
 			ret = -EINVAL;
 			goto err_larbdev_put;
 		}
 
 		/*
-		 * It may have two level smi-common. the node is smi-sub-common if it
-		 * has a new mediatek,smi property. otherwise it is smi-commmon.
+		 * There may be one or more levels of smi-sub-common. A node is a
+		 * smi-sub-common if it has its own mediatek,smi property, walk up
+		 * until the smi-common.
 		 */
-		smicomm_node = of_parse_phandle(smi_subcomm_node, "mediatek,smi", 0);
-		if (smicomm_node)
-			of_node_put(smi_subcomm_node);
-		else
+		while ((smi_subcomm_node = of_parse_phandle(smicomm_node, "mediatek,smi", 0))) {
+			of_node_put(smicomm_node);
 			smicomm_node = smi_subcomm_node;
+		}
 
 		/*
 		 * All the larbs that connect to one IOMMU must connect with the same
@@ -1308,6 +1717,7 @@ static int mtk_iommu_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOMEM;
 	data->dev = dev;
+	spin_lock_init(&data->pend_lock);
 	data->plat_data = of_device_get_match_data(dev);
 
 	/* Protect memory. HW will access here while translation fault.*/
@@ -1417,6 +1827,17 @@ static int mtk_iommu_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, data);
 	mutex_init(&data->mutex);
 
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_PGTABLE_SYNC) && hyp_smc) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(MTK_HYP_PMM_GET_TYPE2_EN, 0, 0, 0, 0, 0, 0, 0, &res);
+		data->hyp_type2 = res.a0 == 1;
+		dev_info(dev, "hypervisor page table: type2 query returned %ld%s\n",
+			 (long)res.a0, data->hyp_type2 ? ", syncing by SMC" : "");
+	}
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_PGTABLE_SYNC))
+		WRITE_ONCE(mtk_iommu_walk_data, data);
+
 	if (MTK_IOMMU_HAS_FLAG(data->plat_data, SHARE_PGTABLE)) {
 		list_add_tail(&data->list, data->plat_data->hw_list);
 		data->hw_list = data->plat_data->hw_list;
@@ -1465,6 +1886,8 @@ static void mtk_iommu_remove(struct platform_device *pdev)
 	struct mtk_iommu_bank_data *bank;
 	int i;
 
+	if (READ_ONCE(mtk_iommu_walk_data) == data)
+		WRITE_ONCE(mtk_iommu_walk_data, NULL);
 	iommu_device_sysfs_remove(&data->iommu);
 	iommu_device_unregister(&data->iommu);
 
@@ -1507,6 +1930,7 @@ static int __maybe_unused mtk_iommu_runtime_suspend(struct device *dev)
 		reg->int_main_control[i] = readl_relaxed(base + REG_MMU_INT_MAIN_CONTROL);
 		reg->ivrp_paddr[i] = readl_relaxed(base + REG_MMU_IVRP_PADDR);
 	} while (++i < data->plat_data->banks_num);
+	reg->saved = true;
 	clk_disable_unprepare(data->bclk);
 	return 0;
 }
@@ -1527,9 +1951,10 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
 
 	/*
 	 * Uppon first resume, only enable the clk and return, since the values of the
-	 * registers are not yet set.
+	 * registers are not yet set. Do not use a register value as the marker:
+	 * WR_LEN_CTRL may read 0 on SoCs that leave it at its reset value.
 	 */
-	if (!reg->wr_len_ctrl)
+	if (!reg->saved)
 		return 0;
 
 	base = data->bank[i].base;
@@ -1547,6 +1972,9 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
 		writel_relaxed(reg->int_main_control[i], base + REG_MMU_INT_MAIN_CONTROL);
 		writel_relaxed(reg->ivrp_paddr[i], base + REG_MMU_IVRP_PADDR);
 		writel(m4u_dom->cfg.arm_v7s_cfg.ttbr, base + REG_MMU_PT_BASE_ADDR);
+		dev_dbg(dev, "resume: bank %d page table base 0x%08x (read back 0x%08x)\n",
+			i, m4u_dom->cfg.arm_v7s_cfg.ttbr,
+			readl_relaxed(base + REG_MMU_PT_BASE_ADDR));
 	} while (++i < data->plat_data->banks_num);
 
 	/*
@@ -1555,6 +1983,29 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
 	 * Thus, make sure to update the tlb after each PM resume.
 	 */
 	mtk_iommu_tlb_flush_all(data);
+
+	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_PGTABLE_SYNC)) {
+		unsigned long flags, start = 0, end = 0;
+		bool pend;
+
+		spin_lock_irqsave(&data->pend_lock, flags);
+		pend = data->pend;
+		if (pend) {
+			start = data->pend_start;
+			end = data->pend_end;
+			data->pend = false;
+		}
+		spin_unlock_irqrestore(&data->pend_lock, flags);
+
+		if (pend) {
+			ret = mtk_iommu_tlb_inv_range_hw(data, &data->bank[0],
+							 start, end);
+			dev_dbg(dev, "resume: invalidated 0x%lx..0x%lx (%d)\n",
+				start, end, ret);
+			if (ret)
+				dev_warn(dev, "range invalidation at resume timed out\n");
+		}
+	}
 	return 0;
 }
 
@@ -1600,6 +2051,56 @@ static const struct mtk_iommu_plat_data mt6795_data = {
 	.iova_region  = single_domain,
 	.iova_region_nr = ARRAY_SIZE(single_domain),
 	.larbid_remap = {{0}, {1}, {2}, {3}, {4}}, /* Linear mapping. */
+};
+
+/*
+ * MT6878: the masters behind larbs are in 0 ~ 4G, so the larb BANK_SEL bits
+ * stay 0 and no engine has to drive address bits above 31. The larb-less
+ * masters keep the IOVA windows of MediaTek's kernel for them: the video
+ * uP (VCP) in VDO_UP, CCU0/CCU1 in theirs. There they are normal regions,
+ * not shared with the hypervisor.
+ */
+static const struct mtk_iommu_iova_region mt6878_multi_dom[] = {
+	{ .iova_base = 0x0,		.size = MTK_IOMMU_IOVA_SZ_4G},	/* 0 ~ 4G */
+#if IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT)
+	{ .iova_base = 0x110000000ULL,	.size = 0x60000000},	/* VDO_UP */
+	{ .iova_base = 0x108000000ULL,	.size = SZ_64M},	/* CCU0 */
+	{ .iova_base = 0x10c000000ULL,	.size = SZ_64M},	/* CCU1 */
+#endif
+};
+
+/* Index: the larb ids of mediatek,mt6878-memory-port.h */
+static const u32 mt6878_larb_region_msk[][MTK_LARB_NR_MAX] = {
+	[0] = {[0 ... 20] = ~0, [23] = BIT(0) | BIT(1)}, /* larbs, GCE */
+	[1] = {[23] = BIT(2)},				  /* video uP */
+	[2] = {[21] = BIT(0)},				  /* CCU0 */
+	[3] = {[22] = BIT(0)},				  /* CCU1 */
+};
+
+/*
+ * MT6878 has one MM IOMMU for all multimedia larbs. Only bank 0 (the
+ * normal world one) is used; the downstream kernel hands banks 1-4 to the
+ * secure world. Larbs 39-41 (CCU0, CCU1, GCE and video uP; ids 21-23 in the
+ * port header) are larb-less masters.
+ *
+ * The fault ID of this M4U carries a 6-bit bus code of the larb in bits
+ * 12:7 rather than a common/larb index, so the larb cannot be decoded with
+ * larbid_remap and is reported as invalid; the port (bits 6:2) and the raw
+ * master ID are right.
+ */
+static const struct mtk_iommu_plat_data mt6878_data_mm = {
+	.m4u_plat	= M4U_MT6878,
+	.flags		= OUT_ORDER_WR_EN | IOVA_34_EN | PGTABLE_PA_35_EN |
+			  MTK_IOMMU_TYPE_MM | HYP_PGTABLE_SYNC,
+	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+	.banks_num	= 1,
+	.banks_enable	= {true},
+	.iova_region	= mt6878_multi_dom,
+	.iova_region_nr	= ARRAY_SIZE(mt6878_multi_dom),
+	.iova_region_larb_msk = mt6878_larb_region_msk,
+	.larbless_msk	= BIT(21) | BIT(22) | BIT(23),
+	.larbid_remap	= {[0 ... MTK_LARB_COM_MAX - 1] = {
+				[0 ... MTK_LARB_SUBCOM_MAX - 1] = MTK_INVALID_LARBID}},
 };
 
 static const unsigned int mt8192_larb_region_msk[MT8192_MULTI_REGION_NR_MAX][MTK_LARB_NR_MAX] = {
@@ -1903,6 +2404,7 @@ static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt2712-m4u", .data = &mt2712_data},
 	{ .compatible = "mediatek,mt6779-m4u", .data = &mt6779_data},
 	{ .compatible = "mediatek,mt6795-m4u", .data = &mt6795_data},
+	{ .compatible = "mediatek,mt6878-iommu-mm", .data = &mt6878_data_mm},
 	{ .compatible = "mediatek,mt6893-iommu-mm", .data = &mt6893_data},
 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},
 	{ .compatible = "mediatek,mt8173-m4u", .data = &mt8173_data},
