@@ -26,6 +26,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
+#include <linux/pm_wakeup.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
@@ -828,31 +829,122 @@ void mtk_ccci_irq_wake(struct mtk_ccci *ccci, bool on)
 	ccci->sleep.wake_irqs = 0;
 }
 
+/* CCIF channel names for the log: "ringq5 ccb", at most @size bytes */
+static void mtk_ccci_ccif_ch_text(u32 mask, char *buf, size_t size)
+{
+	unsigned int ch;
+	size_t n = 0;
+
+	buf[0] = '\0';
+	for (ch = 0; ch < MTK_CCIF_CH_NUM && n < size; ch++) {
+		if (!(mask & BIT(ch)))
+			continue;
+		if (mtk_ccif_ch_names[ch])
+			n += scnprintf(buf + n, size - n, "%s%s", n ? " " : "",
+				       mtk_ccif_ch_names[ch]);
+		else
+			n += scnprintf(buf + n, size - n, "%sch%u", n ? " " : "",
+				       ch);
+	}
+	if (!n)
+		scnprintf(buf, size, "-");
+}
+
+/* bit i: CCIF0 line i stands at the interrupt controller */
+static u32 mtk_ccci_ccif_lines_pending(struct mtk_ccci *ccci)
+{
+	unsigned int i;
+	u32 lines = 0;
+	bool p;
+
+	for (i = 0; i < ARRAY_SIZE(ccci->irq_ccif); i++)
+		if (ccci->irq_ccif[i] > 0 &&
+		    !irq_get_irqchip_state(ccci->irq_ccif[i],
+					   IRQCHIP_STATE_PENDING, &p) && p)
+			lines |= BIT(i);
+	return lines;
+}
+
 /**
- * mtk_ccci_ccif_resume_noirq() - what woke the AP, as TF-A and CCIF see it
+ * mtk_ccci_ccif_suspend_noirq() - what is in flight when the AP goes to sleep
  * @ccci: driver state
  *
- * As the downstream CCIF resume_noirq: ask TF-A whether CCIF0 woke the AP and,
- * if so, log the channels the modem raised. The channels are only read
- * here, not acknowledged: the interrupt, still pending, and the RX worker
- * take them once interrupts are resumed.
+ * Read only, for the log (one line, it survives in pstore): channels the
+ * modem raised and the AP has not taken (rch), channels the AP raised and
+ * the modem has not taken (busy), ring queues with data their reader has
+ * not read in either direction, whether TF-A sees the modem asleep, and
+ * the interrupt numbers armed as wakeup interrupts, to match
+ * "PM: Triggering wakeup from IRQ N". Anything the AP sent the modem
+ * last (tx) is answered in the sleep, waking it.
  */
-void mtk_ccci_ccif_resume_noirq(struct mtk_ccci *ccci)
+void mtk_ccci_ccif_suspend_noirq(struct mtk_ccci *ccci)
 {
 	struct mtk_ccci_sleep *sl = &ccci->sleep;
-	u32 rch;
+	u32 rch, busy, rx, tx;
+	char rch_txt[64];
 
 	if (!READ_ONCE(ccci->hif_on))
 		return;
 
 	rch = readl(ccci->ccif_ap + CCIF_RCHNUM);
-	sl->last_rch = rch;
-	if (!mtk_ccci_wake_src_query(ccci, MTK_CCCI_WAKE_SRC_CCIF0,
-				     sl->wake_query))
+	busy = readl(ccci->ccif_ap + CCIF_BUSY);
+	mtk_ccci_rings_pending(ccci, &rx, &tx);
+	sl->md_asleep_at_suspend = mtk_ccci_md_sleep_mode(ccci);
+	mtk_ccci_ccif_ch_text(rch, rch_txt, sizeof(rch_txt));
+	dev_info(ccci->dev, "suspend: modem %s, CCIF from the modem %#x (%s), to the modem %#x, rings unread rx %#x tx %#x, wake irqs ccif0 %d ccif1 %d wdt %d\n",
+		 sl->md_asleep_at_suspend == 1 ? "asleep" :
+		 sl->md_asleep_at_suspend == 0 ? "awake" : "sleep unknown",
+		 rch, rch_txt, busy, rx, tx,
+		 sl->wake_irqs & BIT(0) ? ccci->irq_ccif[0] : -1,
+		 sl->wake_irqs & BIT(1) ? ccci->irq_ccif[1] : -1,
+		 sl->wake_irqs & BIT(2) ? ccci->irq_wdt : -1);
+}
+
+/**
+ * mtk_ccci_ccif_resume_noirq() - what woke the AP, as TF-A and CCIF see it
+ * @ccci: driver state
+ *
+ * As the downstream CCIF resume_noirq: ask TF-A whether CCIF0 woke the AP.
+ * On the Titan 2 TF-A answered 0 even for an SPM wake-up by
+ * CCIF0_EVENT_B (08.11), so the channels the modem raised and the state
+ * of the CCIF0 lines count as well: the interrupts are still suspended
+ * here, a channel raised in the sleep is still in RCHNUM and its line
+ * stands. The channels are only read, not acknowledged: the interrupt
+ * and the RX worker take them once interrupts are resumed; the first
+ * packet the worker finds is named in the log (or "no packet").
+ */
+void mtk_ccci_ccif_resume_noirq(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_sleep *sl = &ccci->sleep;
+	char rch_txt[64];
+	u32 rch, lines;
+	bool tfa;
+
+	if (!READ_ONCE(ccci->hif_on))
 		return;
-	sl->ccif_wakeups++;
+
+	rch = readl(ccci->ccif_ap + CCIF_RCHNUM);
+	lines = mtk_ccci_ccif_lines_pending(ccci);
+	sl->last_rch = rch;
+	tfa = mtk_ccci_wake_src_query(ccci, MTK_CCCI_WAKE_SRC_CCIF0,
+				      sl->wake_query);
+	if (!tfa && !rch)
+		return;
+	if (tfa)
+		sl->ccif_wakeups++;
+	else
+		sl->ccif_raised++;
 	sl->last_wake_ch = rch;
-	dev_info(ccci->dev, "woken by CCIF0 (%lu): channels %#x%s\n",
-		 sl->ccif_wakeups, rch,
-		 rch & BIT(MTK_CCIF_CH_CCB_WAKEUP) ? " (CCB)" : "");
+	/* the RX worker names the first packet that follows */
+	sl->wake_rx_ch = MTK_CCCI_CH_NUM;
+	sl->wake_rx_what[0] = '\0';
+	WRITE_ONCE(sl->wake_pending, true);
+	WRITE_ONCE(sl->wake_check, true);
+	/* a wakeup event of this device: visible in /sys/class/wakeup */
+	pm_wakeup_event(ccci->dev, 0);
+	mtk_ccci_ccif_ch_text(rch, rch_txt, sizeof(rch_txt));
+	dev_info(ccci->dev, "%s CCIF0 (%lu): channels %#x (%s), lines pending %#x\n",
+		 tfa ? "woken by" : "in sleep the modem raised",
+		 tfa ? sl->ccif_wakeups : sl->ccif_raised, rch, rch_txt,
+		 lines);
 }

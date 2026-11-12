@@ -370,6 +370,17 @@ enum mtk_ccci_wake_src {
 	MTK_CCCI_WAKE_SRC_DPMAIF = 4,
 };
 
+/*
+ * The modem's sleep record in SMEM LOW_POWER (the downstream lpm debug
+ * logger's struct md_sleep_status): what is kept of one reading.
+ */
+struct mtk_ccci_md_lp {
+	bool valid;
+	u32 cnt;			/* record count, bumped by the modem */
+	u64 sleep_32k;			/* total sleep, 32 kHz ticks */
+	u64 rat_us[5];			/* MD, 2G, 3G, 4G, 5G FR1, us */
+};
+
 /* system sleep with the modem running, see mtk_ccci_md.c */
 struct mtk_ccci_sleep {
 	unsigned long suspends;		/* noirq suspends with the modem up */
@@ -380,6 +391,29 @@ struct mtk_ccci_sleep {
 	u32 last_rch;			/* CCIF channels pending at the last resume */
 	unsigned long wake_query[4];	/* the last TF-A answer, a0..a3 */
 	u32 wake_irqs;			/* bit i: irq_ccif[i] armed; bit 2: wdt */
+	/* the first packet after a CCIF0 wake-up: what the modem sent */
+	bool wake_pending;		/* CCIF0 woke the AP, no packet seen yet */
+	u32 wake_rx_ch;			/* its channel, MTK_CCCI_CH_NUM: none yet */
+	u32 wake_rx_q;			/* its ring queue */
+	char wake_rx_what[24];		/* MIPC message id or AT result prefix */
+	bool wake_check;		/* the first RX run after resume names it */
+	unsigned long ccif_raised;	/* CCIF0 raised at resume, TF-A said no */
+	/* the modem's own sleep record (SMEM LOW_POWER), at suspend and resume */
+	void __iomem *md_lp;
+	struct mtk_ccci_md_lp md_lp_before;
+	u64 md_lp_slept_ms;		/* last sleep: how long the modem slept */
+	int md_lp_state;		/* last sleep: 1 slept, 0 not, <0 unknown */
+	int md_asleep_at_suspend;	/* TF-A MD_GET_SLEEP_MODE in suspend_noirq */
+};
+
+/* wakeup sources for received packets, by kind of channel */
+enum mtk_ccci_rx_ws {
+	MTK_CCCI_WS_AT,
+	MTK_CCCI_WS_MIPC,
+	MTK_CCCI_WS_FS,
+	MTK_CCCI_WS_RPC,
+	MTK_CCCI_WS_CTL,		/* control, system, status, others */
+	MTK_CCCI_WS_NUM,
 };
 
 /* per-start statistics, for debugfs */
@@ -419,6 +453,7 @@ struct mtk_ccci {
 	int irq_wdt;
 	bool irqs_on;
 	bool wdt_on;
+	bool ccif_clk_req;		/* TF-A CCIF_CLK_REQUEST held */
 
 	/* read-only outside CCIF, optional */
 	struct regmap *scpsys;
@@ -476,6 +511,7 @@ struct mtk_ccci {
 	struct delayed_work poll_work;
 	struct mtk_ccci_stats stats;
 	struct mtk_ccci_sleep sleep;
+	struct wakeup_source *rx_ws[MTK_CCCI_WS_NUM];
 
 	/* ports */
 	struct mtk_ccci_port *ports;
@@ -526,6 +562,7 @@ void mtk_ccci_ccif_irq_stop(struct mtk_ccci *ccci);
 int mtk_ccci_wdt_irq_start(struct mtk_ccci *ccci);
 void mtk_ccci_wdt_irq_stop(struct mtk_ccci *ccci);
 void mtk_ccci_irq_wake(struct mtk_ccci *ccci, bool on);
+void mtk_ccci_ccif_suspend_noirq(struct mtk_ccci *ccci);
 void mtk_ccci_ccif_resume_noirq(struct mtk_ccci *ccci);
 
 /* mtk_ccci_ring.c */
@@ -533,6 +570,7 @@ int mtk_ccci_rings_init(struct mtk_ccci *ccci, void __iomem *base, u32 size);
 int mtk_ccci_rings_exp_init(struct mtk_ccci *ccci, void __iomem *base,
 			    u32 size);
 int mtk_ccci_ring_readable(const struct mtk_ccci_ring *ring);
+void mtk_ccci_rings_pending(struct mtk_ccci *ccci, u32 *rx, u32 *tx);
 int mtk_ccci_ring_peek(const struct mtk_ccci_ring *ring, void *buf, u32 len);
 void mtk_ccci_ring_consume(struct mtk_ccci_ring *ring, u32 len);
 int mtk_ccci_ring_read(struct mtk_ccci_ring *ring, void *buf, u32 len);
@@ -606,6 +644,7 @@ int mtk_ccci_net_init(struct mtk_ccci *ccci);
 int mtk_ccci_fsm_init(struct mtk_ccci *ccci);
 void mtk_ccci_fsm_debugfs_init(struct mtk_ccci *ccci);
 const char *mtk_ccci_fsm_state_name(enum mtk_ccci_fsm_state state);
+int mtk_ccci_md_sleep_mode(struct mtk_ccci *ccci);
 bool mtk_ccci_wake_src_query(struct mtk_ccci *ccci, enum mtk_ccci_wake_src src,
 			     unsigned long res[4]);
 

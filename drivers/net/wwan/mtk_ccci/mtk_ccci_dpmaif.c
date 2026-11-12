@@ -49,6 +49,7 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/pm_wakeup.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/ip.h>
@@ -1446,6 +1447,7 @@ void mtk_ccci_dpmaif_resume_noirq(struct mtk_ccci *ccci)
 	if (mtk_ccci_wake_src_query(ccci, MTK_CCCI_WAKE_SRC_DPMAIF,
 				    dp->wake_query)) {
 		dp->wakeups++;
+		pm_wakeup_event(ccci->dev, 0);
 		dev_info(dp->dev, "woken by the DPMAIF (%lu): dl status %#x\n",
 			 dp->wakeups, readl(dp->pd + PD_AP_DL_L2TISAR0));
 	}

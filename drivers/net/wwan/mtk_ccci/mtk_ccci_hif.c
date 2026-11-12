@@ -20,11 +20,15 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/ctype.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/io.h>
+#include <linux/module.h>
+#include <linux/pm_wakeup.h>
 #include <linux/seq_file.h>
 #include <linux/skbuff.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #include "mtk_ccci.h"
@@ -32,6 +36,104 @@
 #define MTK_CCCI_RX_BUDGET		64
 #define MTK_CCCI_POLL_BOOT_MS		20
 #define MTK_CCCI_POLL_READY_MS		200
+
+/*
+ * As the downstream port layer (a wakeup source per port, held HZ/2 for
+ * every packet): a packet from the modem keeps the system awake long
+ * enough for its reader to take it, also when it arrives while user space
+ * is deciding to suspend. 0: no wakeup event per packet (the old way:
+ * only the CCIF0 wake-up itself counts).
+ */
+static unsigned int rx_wake_ms = 500;
+module_param(rx_wake_ms, uint, 0644);
+MODULE_PARM_DESC(rx_wake_ms, "Wakeup event per received packet, ms (default 500, 0 = none)");
+
+static const char * const mtk_ccci_rx_ws_names[MTK_CCCI_WS_NUM] = {
+	[MTK_CCCI_WS_AT] = "ccci-at",
+	[MTK_CCCI_WS_MIPC] = "ccci-mipc",
+	[MTK_CCCI_WS_FS] = "ccci-fs",
+	[MTK_CCCI_WS_RPC] = "ccci-rpc",
+	[MTK_CCCI_WS_CTL] = "ccci-ctl",
+};
+
+static enum mtk_ccci_rx_ws mtk_ccci_rx_ws_of(u32 ch)
+{
+	if (ch == MTK_CCCI_CH_UART2_RX)
+		return MTK_CCCI_WS_AT;
+	if (ch >= MTK_CCCI_CH_MIPC0_RX && ch < MTK_CCCI_CH_MIPC0_RX + 20 &&
+	    !((ch - MTK_CCCI_CH_MIPC0_RX) & 1))
+		return MTK_CCCI_WS_MIPC;
+	if (ch == MTK_CCCI_CH_FS_RX)
+		return MTK_CCCI_WS_FS;
+	if (ch == MTK_CCCI_CH_RPC_RX)
+		return MTK_CCCI_WS_RPC;
+	return MTK_CCCI_WS_CTL;
+}
+
+/* MIPC: the message id is at byte 10 of the MIPC header (magic, ...) */
+#define MTK_CCCI_MIPC_MSG_ID_OFF	10
+
+/*
+ * The first packet after a CCIF0 wake-up says what the modem wanted, as the
+ * downstream CCIF driver logs it ("CCIF_MD wakeup source"): its channel
+ * and, for MIPC, the message id, for AT the result code prefix ("+CEREG"),
+ * never the parameters (numbers, cell ids).
+ */
+static void mtk_ccci_rx_wake_note(struct mtk_ccci *ccci, unsigned int qno,
+				  u32 ch, const struct sk_buff *skb)
+{
+	struct mtk_ccci_sleep *sl = &ccci->sleep;
+	const u8 *p = skb->data + sizeof(struct mtk_ccci_header);
+	unsigned int len = skb->len - sizeof(struct mtk_ccci_header);
+	unsigned int i, n = 0;
+
+	sl->wake_rx_ch = ch;
+	sl->wake_rx_q = qno;
+	switch (mtk_ccci_rx_ws_of(ch)) {
+	case MTK_CCCI_WS_MIPC:
+		if (len >= MTK_CCCI_MIPC_MSG_ID_OFF + 2)
+			snprintf(sl->wake_rx_what, sizeof(sl->wake_rx_what),
+				 "mipc msg %#06x",
+				 get_unaligned_le16(p + MTK_CCCI_MIPC_MSG_ID_OFF));
+		break;
+	case MTK_CCCI_WS_AT:
+		for (i = 0; i < len && (p[i] == '\r' || p[i] == '\n'); i++)
+			;
+		for (; i < len && n < sizeof(sl->wake_rx_what) - 1; i++) {
+			if (p[i] == ':' || p[i] == '\r' || p[i] == '\n' ||
+			    p[i] == ' ' || !isprint(p[i]))
+				break;
+			sl->wake_rx_what[n++] = p[i];
+		}
+		sl->wake_rx_what[n] = '\0';
+		break;
+	default:
+		snprintf(sl->wake_rx_what, sizeof(sl->wake_rx_what), "%s",
+			 mtk_ccci_rx_ws_names[mtk_ccci_rx_ws_of(ch)]);
+		break;
+	}
+	dev_info(ccci->dev, "woken by the modem: queue %u channel %u (%s) %s\n",
+		 qno, ch, mtk_ccci_rx_ws_names[mtk_ccci_rx_ws_of(ch)],
+		 sl->wake_rx_what);
+}
+
+static void mtk_ccci_rx_wake(struct mtk_ccci *ccci, unsigned int qno,
+			     const struct sk_buff *skb)
+{
+	const struct mtk_ccci_header *hdr = (const void *)skb->data;
+	unsigned int ms = READ_ONCE(rx_wake_ms);
+	u32 ch;
+
+	if (skb->len < sizeof(*hdr))
+		return;
+	ch = FIELD_GET(MTK_CCCI_H_CHANNEL, le32_to_cpu(hdr->status));
+	if (READ_ONCE(ccci->sleep.wake_pending)) {
+		WRITE_ONCE(ccci->sleep.wake_pending, false);
+		mtk_ccci_rx_wake_note(ccci, qno, ch, skb);
+	}
+	if (ms)
+		__pm_wakeup_event(ccci->rx_ws[mtk_ccci_rx_ws_of(ch)], ms);
+}
 
 struct sk_buff *mtk_ccci_alloc_skb(unsigned int len, gfp_t gfp)
 {
@@ -227,6 +329,7 @@ static bool mtk_ccci_rx_queue(struct mtk_ccci *ccci, unsigned int qno)
 			return false;
 		}
 		memcpy(&hdr, skb->data, sizeof(hdr));
+		mtk_ccci_rx_wake(ccci, qno, skb);
 
 		ret = mtk_ccci_rx_dispatch(ccci, skb);
 		if (ret == -EBUSY) {
@@ -273,6 +376,16 @@ static void mtk_ccci_rx_work(struct work_struct *work)
 	for (qno = 0; qno < MTK_CCCI_RINGQ_NUM; qno++)
 		if (ccci->ring[qno].rx_len)
 			again |= mtk_ccci_rx_queue(ccci, qno);
+
+	/* a CCIF0 wake-up the modem sent no packet for: say so once */
+	if (READ_ONCE(ccci->sleep.wake_check)) {
+		WRITE_ONCE(ccci->sleep.wake_check, false);
+		if (READ_ONCE(ccci->sleep.wake_pending)) {
+			WRITE_ONCE(ccci->sleep.wake_pending, false);
+			dev_info(ccci->dev, "woken by the modem: no packet in the rings (CCIF channels %#x)\n",
+				 pending);
+		}
+	}
 
 	if (again)
 		queue_work(ccci->wq, &ccci->rx_work);
@@ -409,9 +522,35 @@ static void mtk_ccci_hif_cleanup(void *data)
 	destroy_workqueue(ccci->wq);
 }
 
+static void mtk_ccci_rx_ws_cleanup(void *data)
+{
+	struct mtk_ccci *ccci = data;
+	unsigned int i;
+
+	for (i = 0; i < MTK_CCCI_WS_NUM; i++)
+		wakeup_source_unregister(ccci->rx_ws[i]);
+}
+
 int mtk_ccci_hif_init(struct mtk_ccci *ccci)
 {
 	unsigned int i;
+	int ret;
+
+	ccci->sleep.wake_rx_ch = MTK_CCCI_CH_NUM;
+	ccci->sleep.md_lp_state = -1;
+	ccci->sleep.md_asleep_at_suspend = -1;
+	for (i = 0; i < MTK_CCCI_WS_NUM; i++) {
+		ccci->rx_ws[i] = wakeup_source_register(ccci->dev,
+							mtk_ccci_rx_ws_names[i]);
+		if (!ccci->rx_ws[i]) {
+			while (i--)
+				wakeup_source_unregister(ccci->rx_ws[i]);
+			return -ENOMEM;
+		}
+	}
+	ret = devm_add_action_or_reset(ccci->dev, mtk_ccci_rx_ws_cleanup, ccci);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < MTK_CCCI_RINGQ_NUM; i++)
 		spin_lock_init(&ccci->tx_lock[i]);

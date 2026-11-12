@@ -54,6 +54,18 @@ module_param(power_ctrl, bool, 0444);
 MODULE_PARM_DESC(power_ctrl,
 		 "allow the debugfs FSM commands to call TF-A and switch the modem (default: no)");
 
+/*
+ * The factory firmware start takes TF-A's CCIF clock request for the boot only: it
+ * is released as soon as the modem is READY (factory firmware boot log:
+ * "fsm_routine_start [CCIF_CLK_RELEASE]" 6 ms after md_state 3 -> 4), and
+ * on every failed start. The CCIF clock gates stay on through the clock
+ * framework either way. 1: hold it until the stop, as before.
+ */
+static bool ccif_clk_hold;
+module_param(ccif_clk_hold, bool, 0644);
+MODULE_PARM_DESC(ccif_clk_hold,
+		 "keep TF-A's CCIF clock request after the modem is ready (default: release it, as the downstream driver does)");
+
 /* TF-A SiP service of the CCCI driver */
 #define MTK_SIP_KERNEL_CCCI_CONTROL	MTK_SIP_SMC_CMD(0x505)
 
@@ -331,10 +343,12 @@ static int mtk_ccci_wait_brom(struct mtk_ccci *ccci)
  * polls this after userspace sent AT+EPOF, for up to 4 s, and powers the
  * modem off only then (or after a dump on timeout).
  */
-static int mtk_ccci_md_sleep_mode(struct mtk_ccci *ccci)
+int mtk_ccci_md_sleep_mode(struct mtk_ccci *ccci)
 {
 	struct arm_smccc_res res;
 
+	if (!power_ctrl)
+		return -EPERM;
 	mtk_ccci_sip(ccci, CCCI_SIP_MD_CLOCK_REQUEST,
 		     CCCI_SIP_CLK_GET_SLEEP_MODE, 0, &res);
 	ccci->sleep.md_sleep[0] = res.a0;
@@ -559,16 +573,26 @@ static int mtk_ccci_boot_to_ready(struct mtk_ccci *ccci)
 	return 0;
 }
 
-/* stop talking to the modem; it must be off (or never touched) */
-static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
+/* TF-A's CCIF clock request, taken at the start: released once */
+static void mtk_ccci_ccif_clk_release(struct mtk_ccci *ccci)
 {
 	struct arm_smccc_res res;
 
+	if (!ccci->ccif_clk_req)
+		return;
+	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_RELEASE, 0, 0, &res);
+	ccci->ccif_clk_req = false;
+	dev_info(ccci->dev, "CCIF clock request released (%#lx)\n", res.a0);
+}
+
+/* stop talking to the modem; it must be off (or never touched) */
+static void mtk_ccci_hif_down(struct mtk_ccci *ccci)
+{
 	mtk_ccci_dpmaif_stop(ccci);
 	mtk_ccci_ccif_irq_stop(ccci);
 	mtk_ccci_hif_stop(ccci);
 	mtk_ccci_ccif_stop(ccci);
-	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_RELEASE, 0, 0, &res);
+	mtk_ccci_ccif_clk_release(ccci);
 }
 
 /*
@@ -598,6 +622,7 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 	mtk_ccci_ee_reset(ccci);
 
 	mtk_ccci_sip(ccci, CCCI_SIP_CCIF_CLK_REQUEST, 0, 0, &res);
+	ccci->ccif_clk_req = true;
 
 	ret = mtk_ccci_ccif_start(ccci);
 	if (ret) {
@@ -647,9 +672,12 @@ static int mtk_ccci_fsm_start(struct mtk_ccci *ccci)
 
 	if (mtk_ccci_rt_enabled()) {
 		ret = mtk_ccci_boot_to_ready(ccci);
-		if (!ret)
-			return 0;
-		goto fail;
+		if (ret)
+			goto fail;
+		/* as the downstream start: the request is for the boot only */
+		if (!READ_ONCE(ccif_clk_hold))
+			mtk_ccci_ccif_clk_release(ccci);
+		return 0;
 	}
 
 	/*
@@ -751,6 +779,18 @@ static int mtk_ccci_fsm_show(struct seq_file *s, void *unused)
 		   ccci->sleep.wake_query[0], ccci->sleep.wake_query[1],
 		   ccci->sleep.wake_query[2], ccci->sleep.wake_query[3],
 		   device_may_wakeup(ccci->dev) ? "enabled" : "DISABLED (suspend refused)");
+	seq_printf(s, "sleep: %lu CCIF0 raised at resume without TF-A naming it; modem at the last suspend: %s; slept in the last AP sleep: %s (%llu ms); CCIF clock request %s\n",
+		   ccci->sleep.ccif_raised,
+		   ccci->sleep.md_asleep_at_suspend == 1 ? "asleep" :
+		   ccci->sleep.md_asleep_at_suspend == 0 ? "awake" : "unknown",
+		   ccci->sleep.md_lp_state == 1 ? "yes" :
+		   ccci->sleep.md_lp_state == 0 ? "no" : "unknown",
+		   ccci->sleep.md_lp_slept_ms,
+		   ccci->ccif_clk_req ? "held" : "released");
+	if (ccci->sleep.ccif_wakeups || ccci->sleep.ccif_raised)
+		seq_printf(s, "last wake-up packet: channel %u queue %u %s\n",
+			   ccci->sleep.wake_rx_ch, ccci->sleep.wake_rx_q,
+			   ccci->sleep.wake_rx_what);
 	seq_printf(s, "md sleep: last answer %#lx %#lx %#lx %#lx, last stop waited %u ms\n",
 		   ccci->sleep.md_sleep[0], ccci->sleep.md_sleep[1],
 		   ccci->sleep.md_sleep[2], ccci->sleep.md_sleep[3],

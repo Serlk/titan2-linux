@@ -232,6 +232,45 @@ int mtk_ccci_ring_readable(const struct mtk_ccci_ring *ring)
 	return len;
 }
 
+/* an index of the peer may stand at the very end instead of at 0 */
+static bool mtk_ccci_ring_idx_differ(u32 a, u32 b, u32 len)
+{
+	return (a == len ? 0 : a) != (b == len ? 0 : b);
+}
+
+/**
+ * mtk_ccci_rings_pending() - which queues hold data their reader has not taken
+ * @ccci: driver state, rings set up
+ * @rx: bit q: queue q has modem data the AP has not read
+ * @tx: bit q: queue q has AP data the modem has not read
+ *
+ * Only the indices are compared, nothing is checked or consumed: for the
+ * log at system sleep.
+ */
+void mtk_ccci_rings_pending(struct mtk_ccci *ccci, u32 *rx, u32 *tx)
+{
+	unsigned int q;
+
+	*rx = 0;
+	*tx = 0;
+	for (q = 0; q < MTK_CCCI_RINGQ_NUM; q++) {
+		const struct mtk_ccci_ring *r = &ccci->ring[q];
+
+		if (!r->ctl)
+			continue;
+		if (r->rx_len &&
+		    mtk_ccci_ring_idx_differ(readl(r->ctl + RB_RX_READ),
+					     readl(r->ctl + RB_RX_WRITE),
+					     r->rx_len))
+			*rx |= BIT(q);
+		if (r->tx_len &&
+		    mtk_ccci_ring_idx_differ(readl(r->ctl + RB_TX_READ),
+					     readl(r->ctl + RB_TX_WRITE),
+					     r->tx_len))
+			*tx |= BIT(q);
+	}
+}
+
 /**
  * mtk_ccci_ring_peek() - copy the next modem packet, leave it queued
  * @ring: queue

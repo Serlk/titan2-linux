@@ -32,6 +32,8 @@
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/io.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/math64.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -123,6 +125,102 @@ static int mtk_ccci_md_mem_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(mtk_ccci_md_mem);
 
+/*
+ * The modem's sleep record, which the downstream lpm debug logger reads
+ * before and after every system sleep ("md_slp_duration", struct
+ * md_sleep_status, at the factory device tree's md_low_power_addr = SMEM LOW_POWER):
+ *
+ *	0x000	u64 guard 0x536c702e (low word), record count (high word)
+ *	0x028	u64 total sleep, 32 kHz ticks
+ *	0x038	u64 sleep of MD, 2G, 3G, 4G, 5G FR1, us (5 words)
+ *	0x1f8	u64 record count (low word), guard (high word)
+ *
+ * The record is valid if both guards are there and both counts agree;
+ * the modem bumps the count when it updates the record.
+ */
+#define MTK_CCCI_MD_LP_SIZE		0x200
+#define MTK_CCCI_MD_LP_GUARD		0x536c702e
+#define MTK_CCCI_MD_LP_HEAD		0x000
+#define MTK_CCCI_MD_LP_SLEEP_32K	0x028
+#define MTK_CCCI_MD_LP_RAT_US		0x038
+#define MTK_CCCI_MD_LP_TAIL		0x1f8
+
+static void mtk_ccci_md_lp_init(struct mtk_ccci *ccci)
+{
+	const struct mtk_ccci_smem_region *r;
+
+	r = mtk_ccci_lk_smem(ccci, MTK_CCCI_SMEM_LOW_POWER);
+	if (!r || le32_to_cpu(r->size) < MTK_CCCI_MD_LP_SIZE)
+		return;
+	ccci->sleep.md_lp = devm_ioremap_wc(ccci->dev, le64_to_cpu(r->ap_phys),
+					    MTK_CCCI_MD_LP_SIZE);
+	if (ccci->sleep.md_lp)
+		dev_info(ccci->dev, "modem sleep record (SMEM LOW_POWER) at %#llx\n",
+			 le64_to_cpu(r->ap_phys));
+}
+
+static void mtk_ccci_md_lp_read(struct mtk_ccci *ccci,
+				struct mtk_ccci_md_lp *lp)
+{
+	void __iomem *b = ccci->sleep.md_lp;
+	unsigned int i;
+	u64 head, tail;
+
+	memset(lp, 0, sizeof(*lp));
+	if (!b)
+		return;
+	head = readq(b + MTK_CCCI_MD_LP_HEAD);
+	tail = readq(b + MTK_CCCI_MD_LP_TAIL);
+	if (lower_32_bits(head) != MTK_CCCI_MD_LP_GUARD ||
+	    upper_32_bits(tail) != MTK_CCCI_MD_LP_GUARD ||
+	    upper_32_bits(head) != lower_32_bits(tail))
+		return;
+	lp->cnt = upper_32_bits(head);
+	lp->sleep_32k = readq(b + MTK_CCCI_MD_LP_SLEEP_32K);
+	for (i = 0; i < ARRAY_SIZE(lp->rat_us); i++)
+		lp->rat_us[i] = readq(b + MTK_CCCI_MD_LP_RAT_US + 8 * i);
+	lp->valid = true;
+}
+
+static u64 mtk_ccci_us_to_ms(u64 after, u64 before)
+{
+	return after >= before ? div_u64(after - before, 1000) : 0;
+}
+
+/* did the modem sleep while the AP slept? one line, as the downstream logger */
+static void mtk_ccci_md_lp_report(struct mtk_ccci *ccci)
+{
+	struct mtk_ccci_sleep *sl = &ccci->sleep;
+	const struct mtk_ccci_md_lp *b = &sl->md_lp_before;
+	struct mtk_ccci_md_lp a;
+	u64 ms[ARRAY_SIZE(a.rat_us)];
+	unsigned int i;
+
+	mtk_ccci_md_lp_read(ccci, &a);
+	sl->md_lp_slept_ms = 0;
+	if (!b->valid || !a.valid) {
+		sl->md_lp_state = -1;
+		if (sl->md_lp)
+			dev_info(ccci->dev, "modem sleep record not valid\n");
+		return;
+	}
+	if (a.cnt == b->cnt) {
+		/* nothing completed: awake all the time, or still asleep */
+		sl->md_lp_state = 0;
+		dev_info(ccci->dev, "modem sleep record not updated in the AP sleep (count %u)\n",
+			 a.cnt);
+		return;
+	}
+	sl->md_lp_state = 1;
+	sl->md_lp_slept_ms = a.sleep_32k >= b->sleep_32k ?
+			     div_u64((a.sleep_32k - b->sleep_32k) * 1000, 32768) : 0;
+	for (i = 0; i < ARRAY_SIZE(ms); i++)
+		ms[i] = mtk_ccci_us_to_ms(a.rat_us[i], b->rat_us[i]);
+	dev_info(ccci->dev, "modem slept %llu ms in the AP sleep (MD/2G/3G/4G/5G %llu/%llu/%llu/%llu/%llu ms, %u updates)\n",
+		 sl->md_lp_slept_ms, ms[0], ms[1], ms[2], ms[3], ms[4],
+		 a.cnt - b->cnt);
+}
+
 static int mtk_ccci_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -171,6 +269,8 @@ static int mtk_ccci_probe(struct platform_device *pdev)
 	ret = mtk_ccci_dpmaif_init(ccci);
 	if (ret)
 		return ret;
+
+	mtk_ccci_md_lp_init(ccci);
 
 	/*
 	 * The modem wakes the AP from system sleep. Being a wakeup device
@@ -221,10 +321,16 @@ static void mtk_ccci_remove(struct platform_device *pdev)
  *                leave the modem power domain as it is (active wakeup)
  *  suspend_late  the CCIF, watchdog and DPMAIF interrupts become wakeup
  *                interrupts; DPMAIF transmit is held
- *  suspend_noirq the CCIF poll timer stops; DPMAIF backs up its DL mask
- *  resume_noirq  TF-A is asked whether CCIF0 or the DPMAIF woke the AP;
+ *  suspend_noirq what is in flight is logged (CCIF channels both ways,
+ *                unread rings, the modem asleep or not, the wake IRQs) and
+ *                the modem's sleep record read; the CCIF poll timer
+ *                stops; DPMAIF backs up its DL mask
+ *  resume_noirq  how long the modem slept; TF-A is asked whether CCIF0 or
+ *                the DPMAIF woke the AP, and the CCIF0 channels raised in
+ *                the sleep are logged even if TF-A does not say so;
  *                DPMAIF restores its masks if its PD block lost power;
- *                the RX worker takes what arrived
+ *                the RX worker takes what arrived and names the first
+ *                packet
  *  resume_early  wakeup interrupts disarmed
  *  resume        DPMAIF transmit resumes
  *
@@ -277,8 +383,11 @@ static int mtk_ccci_suspend_noirq(struct device *dev)
 {
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
-	if (READ_ONCE(ccci->hif_on))
+	if (READ_ONCE(ccci->hif_on)) {
 		ccci->sleep.suspends++;
+		mtk_ccci_md_lp_read(ccci, &ccci->sleep.md_lp_before);
+		mtk_ccci_ccif_suspend_noirq(ccci);
+	}
 	mtk_ccci_hif_suspend(ccci);
 	mtk_ccci_dpmaif_suspend_noirq(ccci);
 	return 0;
@@ -288,6 +397,8 @@ static int mtk_ccci_resume_noirq(struct device *dev)
 {
 	struct mtk_ccci *ccci = dev_get_drvdata(dev);
 
+	if (READ_ONCE(ccci->hif_on))
+		mtk_ccci_md_lp_report(ccci);
 	mtk_ccci_ccif_resume_noirq(ccci);
 	mtk_ccci_dpmaif_resume_noirq(ccci);
 	mtk_ccci_hif_resume(ccci);
