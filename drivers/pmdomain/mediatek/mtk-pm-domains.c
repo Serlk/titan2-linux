@@ -77,7 +77,10 @@
 #define MMINFRA_CG_CON0			0x100
 #define MMINFRA_CG_CLR0			0x108
 #define MMINFRA_CG_CON1			0x110
+#define MMINFRA_CG0_GCED		BIT(0)
+#define MMINFRA_CG0_GCEM		BIT(1)
 #define MMINFRA_CG0_SMI			BIT(2)
+#define MMINFRA_CG1_GCE26M		BIT(17)
 
 #define MMINFRA_ON_DEVAPC		BIT(0)
 #define MMINFRA_ON_INIT_CMDS		BIT(1)
@@ -126,10 +129,41 @@ MODULE_PARM_DESC(mminfra_on, "MT6878 MM_INFRA power on steps: 1 DEVAPC, 2 init c
 #define DISP_ON_STAGED			BIT(0)
 #define DISP_ON_SUBSYS_CG		BIT(1)
 #define DISP_ON_PROBE			BIT(2)
+#define DISP_ON_DISP_VA			BIT(3)
 
+/*
+ * bit 3 (experiment, off by default): after every DISP power on, the
+ * "display VA" handshake of the downstream display driver
+ * (mediatek_v2/mtk_drm_crtc.c mtk_crtc_enable_iommu_runtime(), which lists
+ * MT6878: "set smi_larb_sec_con reg as 1"): the firmware arms a prebuilt
+ * GCE-D program (CMDQ_PREBUILT_ENABLE, hwid 0) and the display VA request
+ * (CMDQ_ENABLE_DISP_VA); the GCE token DISP_VA_START (692) starts it and it
+ * signals DISP_VA_END (693) when done. The downstream driver sets the start
+ * token from a GCE packet; here the CPU sets it through the GCE token update
+ * register.
+ * See scpsys_disp_va(); the disp_va parameter runs it once on demand.
+ */
 static unsigned int disp_on = DISP_ON_SUBSYS_CG;
 module_param(disp_on, uint, 0644);
-MODULE_PARM_DESC(disp_on, "MT6878 DISP power on/off: 1 staged power switches, 2 subsys clocks around the bus protection, 4 log crossbar writability (default 2)");
+MODULE_PARM_DESC(disp_on, "MT6878 DISP power on/off: 1 staged power switches, 2 subsys clocks around the bus protection, 4 log crossbar writability, 8 display VA handshake (default 2)");
+
+/* GCE-D tokens for DISP_ON_DISP_VA (cmdq mailbox register layout) */
+#define MT6878_GCE_D_PA			0x1e980000
+#define GCE_VA_MODE_CTL			0x54	/* bit 17 VA mode, 16 debug */
+#define GCE_SYNC_TOKEN_ID		0x60
+#define GCE_SYNC_TOKEN_VAL		0x64
+#define GCE_SYNC_TOKEN_UPD		0x68
+#define GCE_TOKEN_SET			BIT(16)
+#define GCE_TOKEN_DISP_VA_START		692
+#define GCE_TOKEN_DISP_VA_END		693
+#define CMDQ_SIP_ENABLE_DISP_VA		1
+#define CMDQ_SIP_PREBUILT_ENABLE	3
+#define GCE_D_HWID			0
+#define MMINFRA_CG_CLR1			0x118
+#define DISP_VA_TIMEOUT_US		20000
+/* SPM register the firmware checks before CMDQ_ENABLE_DISP_VA */
+#define SPM_DISP_VA_STA			0xe70
+#define SPM_DISP_VA_STA_ON		GENMASK(31, 30)
 
 #define SUBSYS_CG_CON			0x100
 #define SUBSYS_CG_CLR			0x108
@@ -490,6 +524,113 @@ static unsigned long scpsys_cmdq_sip(unsigned long req, unsigned long arg)
 	arm_smccc_smc(MTK_SIP_CMDQ_CONTROL, req, arg, 0, 0, 0, 0, 0, &res);
 	return res.a0;
 }
+
+/* for DISP_ON_DISP_VA: the MM_INFRA clock gates and the DISP domain */
+static void __iomem *scpsys_mminfra_cg;
+static void __iomem *scpsys_gce_d;
+static struct scpsys_domain *scpsys_disp_pd;
+
+static u32 scpsys_gce_token(void __iomem *gce, u32 id)
+{
+	writel(id, gce + GCE_SYNC_TOKEN_ID);
+	return readl(gce + GCE_SYNC_TOKEN_VAL);
+}
+
+/*
+ * The display VA handshake (DISP_ON_DISP_VA), in the order of the downstream
+ * kernel (mtk_crtc_exec_atf_prebuilt_instr(), cmdq_util_enable_disp_va()).
+ * Called with DISP, and with it MM_INFRA that holds GCE-D, powered; the GCE
+ * clocks are ungated first and stay so (GCE registers are not to be touched
+ * gated):
+ *   1. CMDQ_PREBUILT_ENABLE (hwid 0): the firmware sets the VA mode of
+ *      GCE-D (0x54 bit 17) and starts nothing;
+ *   2. token DISP_VA_END cleared; the SPM status the firmware requires
+ *      (0xe70 bits 31:30 both set, else it skips and only logs) and the
+ *      GCE-D VA mode logged;
+ *   3. CMDQ_ENABLE_DISP_VA: the firmware places its program in the boot
+ *      loader block me_cmdq_reserved and starts GCE-D secure thread 29;
+ *   4. token DISP_VA_START set. Downstream sets it from a display GCE packet
+ *      built before and flushed after the call; this kernel has no GCE
+ *      mailbox for MT6878, so the CPU sets it through the token update
+ *      register, after the call as the flushed packet would;
+ *   5. wait for DISP_VA_END (the downstream packet waits for it), consume it.
+ * The firmware returns 0 whether it did the work or not; its own log is
+ * in the boot loader block atf-log-reserved (mtk-atf-log debugfs).
+ */
+static void scpsys_disp_va(struct scpsys_domain *pd)
+{
+	struct device *dev = pd->scpsys->dev;
+	void __iomem *gce = scpsys_gce_d;
+	unsigned long r_pre, r_va;
+	u32 cg0, cg1, va0, va1, spm = 0, end = 0, start;
+	unsigned int us;
+
+	if (!gce || !scpsys_mminfra_cg) {
+		dev_warn(dev, "disp va: GCE-D or MM_INFRA clock gates not mapped\n");
+		return;
+	}
+
+	cg0 = readl(scpsys_mminfra_cg + MMINFRA_CG_CON0);
+	cg1 = readl(scpsys_mminfra_cg + MMINFRA_CG_CON1);
+	if (cg0 & (MMINFRA_CG0_GCED | MMINFRA_CG0_GCEM))
+		writel(MMINFRA_CG0_GCED | MMINFRA_CG0_GCEM,
+		       scpsys_mminfra_cg + MMINFRA_CG_CLR0);
+	if (cg1 & MMINFRA_CG1_GCE26M)
+		writel(MMINFRA_CG1_GCE26M, scpsys_mminfra_cg + MMINFRA_CG_CLR1);
+
+	va0 = readl(gce + GCE_VA_MODE_CTL);
+	r_pre = scpsys_cmdq_sip(CMDQ_SIP_PREBUILT_ENABLE, GCE_D_HWID);
+	va1 = readl(gce + GCE_VA_MODE_CTL);
+
+	writel(GCE_TOKEN_DISP_VA_END, gce + GCE_SYNC_TOKEN_UPD);	/* clear */
+	regmap_read(pd->scpsys->base, SPM_DISP_VA_STA, &spm);
+	r_va = scpsys_cmdq_sip(CMDQ_SIP_ENABLE_DISP_VA, 0);
+	writel(GCE_TOKEN_SET | GCE_TOKEN_DISP_VA_START, gce + GCE_SYNC_TOKEN_UPD);
+
+	for (us = 0; us < DISP_VA_TIMEOUT_US; us += 100) {
+		end = scpsys_gce_token(gce, GCE_TOKEN_DISP_VA_END);
+		if (end)
+			break;
+		udelay(100);
+	}
+	start = scpsys_gce_token(gce, GCE_TOKEN_DISP_VA_START);
+	/*
+	 * The secure thread registers (0xf80..) are not read: they may belong
+	 * to the secure world.
+	 */
+	writel(GCE_TOKEN_DISP_VA_END, gce + GCE_SYNC_TOKEN_UPD);	/* consumed */
+
+	dev_info(dev, "%s: disp va: spm 0xe70 %08x%s, gce 0x54 %08x -> %08x (prebuilt %#lx), enable %#lx, end token %u after %u us%s, start token %u, mminfra cg %08x %08x\n",
+		 pd->genpd.name, spm,
+		 (spm & SPM_DISP_VA_STA_ON) == SPM_DISP_VA_STA_ON ? "" :
+		 " (bits 31:30 not both set: the firmware skips)",
+		 va0, va1, r_pre, r_va, end, us, end ? "" : " (timeout)", start,
+		 cg0, cg1);
+}
+
+static int scpsys_disp_va_set(const char *val, const struct kernel_param *kp)
+{
+	struct scpsys_domain *pd = READ_ONCE(scpsys_disp_pd);
+	bool on;
+	int ret;
+
+	ret = kstrtobool(val, &on);
+	if (ret)
+		return ret;
+	if (!on)
+		return 0;
+	/* only with the display powered (GCE-D and the larbs are under it) */
+	if (!pd || !pd->powered)
+		return -ENODEV;
+	scpsys_disp_va(pd);
+	return 0;
+}
+
+static const struct kernel_param_ops scpsys_disp_va_ops = {
+	.set = scpsys_disp_va_set,
+};
+module_param_cb(disp_va, &scpsys_disp_va_ops, NULL, 0200);
+MODULE_PARM_DESC(disp_va, "MT6878 experiment: write 1 to run the display VA handshake now (DISP on)");
 
 /* MT6878 MM_INFRA is on again: firmware calls and clock gates, see above */
 static void scpsys_mminfra_powered_on(struct scpsys_domain *pd)
@@ -987,6 +1128,10 @@ static int scpsys_power_on_internal(struct scpsys_domain *pd)
 	if (probe)
 		scpsys_disp_probe(pd, n, "after the firmware call");
 
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON) &&
+	    (READ_ONCE(disp_on) & DISP_ON_DISP_VA))
+		scpsys_disp_va(pd);
+
 	return 0;
 
 err_enable_bus_protect:
@@ -1318,6 +1463,14 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 		pd->cg_base = devm_ioremap(scpsys->dev, pd->hwv_data->cg_base, SZ_4K);
 		if (!pd->cg_base)
 			dev_warn(scpsys->dev, "%pOF: cannot map the clock gates\n", node);
+		else if (MTK_SCPD_CAPS(pd, MTK_SCPD_MMINFRA_ON_SIP))
+			scpsys_mminfra_cg = pd->cg_base;
+	}
+
+	/* DISP_ON_DISP_VA: the GCE-D tokens */
+	if (pd->data && MTK_SCPD_CAPS(pd, MTK_SCPD_MT6878_DISP_ON)) {
+		scpsys_gce_d = devm_ioremap(scpsys->dev, MT6878_GCE_D_PA, SZ_4K);
+		scpsys_disp_pd = pd;
 	}
 
 	if (pd->data && pd->data->name)
