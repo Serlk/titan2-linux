@@ -3,9 +3,8 @@
  * Titan 2: every bring-up stage at once, the display on mediatek-drm.
  * Same as -all-fb plus the -drm stage, plus the MT6375 charger with the
  * Type-C port manager (PD sink 5 V / 9 V, host role with VBUS from the
- * charger's OTG boost) and USB in OTG mode. The battery limits stay the
- * conservative ones of the first controlled charge until the charger is
- * proven at the factory rate.
+ * charger's OTG boost) and USB in OTG mode, with the factory device tree
+ * battery limits (2.05 A, CV 4.45 V).
  *
  * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
  */
@@ -33,18 +32,19 @@
 };
 
 /*
- * Charge limits, stage 2 (12.11.2026): 1.5 A instead of the 0.5 A of the
- * first controlled charge; CV, termination and the 5..45 degC window stay.
- * Factory device tree (mtk_charger / pdc nodes): battery_cv 4.45 V, DCP
- * ac-charger-current 2.05 A (input 3.2 A), SDP 1.2 A, CDP 1.5 A, PD
- * sc-charger-current 3.0 A with the input at 1.5 A at 9 V, charging window
- * 0..50 degC. Next steps, one at a time after a watched charge: 2.05 A
- * (the factory DCP current, the highest factory value on every port with
- * a single battery maximum), then CV 4.45 V. Revert: 500000 here.
+ * Charge limits. Factory device tree (mtk_charger / pdc nodes): battery_cv
+ * 4.45 V, DCP ac-charger-current 2.05 A (input 3.2 A), SDP 1.2 A, CDP
+ * 1.5 A, PD sc-charger-current 3.0 A with the input at 1.5 A at 9 V,
+ * charging window 0..50 degC. Raised one step at a time after a watched
+ * charge each: 0.5 A at 4.35 V, then 1.5 A, then (12.11.2026) the factory
+ * device tree values, 2.05 A (the DCP current, the highest one valid on
+ * every port with a single battery maximum) and CV 4.45 V; at 9 V PD the
+ * battery reached 4.426 V at 31 degC. Termination and the 5..45 degC window
+ * stay conservative. Revert: 4350000 / 1500000.
  */
 &battery {
-	constant-charge-voltage-max-microvolt = <4350000>;
-	constant-charge-current-max-microamp = <1500000>;
+	constant-charge-voltage-max-microvolt = <4450000>;
+	constant-charge-current-max-microamp = <2050000>;
 	charge-term-current-microamp = <150000>;
 	operating-range-celsius = <5 45>;
 };

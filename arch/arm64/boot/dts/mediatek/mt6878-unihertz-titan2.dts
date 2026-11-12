@@ -136,14 +136,16 @@
 	};
 
 	/*
-	 * Li-ion pack (titan2-docs: docs/hardware). The charge voltage is the
-	 * stock one: mtk_charger battery_cv 4.45 V, the MT6375 CV field reads
-	 * 0x37 (4450 mV) in stock runtime logs. The current is a first-stage
-	 * cap, below the stock 1.2 A (SDP) / 2.05 A (DCP); termination and
-	 * the 0..50 degC charging window are the stock DT values.
+	 * Li-ion pack (titan2-docs: docs/hardware). The factory charge voltage
+	 * is 4.45 V (mtk_charger battery_cv of the factory device tree; the
+	 * MT6375 CV field reads 0x37, 4450 mV, in the factory firmware's boot
+	 * log); the factory currents are 1.2 A (SDP) / 2.05 A (DCP), and
+	 * termination and the 0..50 degC charging window are the factory
+	 * device tree values.
 	 *
-	 * First stage: 4.35 V, what LK itself programs before the kernel, until
-	 * charging has been watched on the device; the stock 4.45 V comes later.
+	 * This base board keeps the conservative first-stage limits: 4.35 V,
+	 * what LK itself programs before the kernel. The -all board uses the
+	 * factory device tree values, 4.45 V and 2.05 A.
 	 */
 	/*
 	 * Main display backlight: DISP_PWM0 drives the external LED driver, as
