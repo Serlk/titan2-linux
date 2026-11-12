@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: JPEG encoder bring-up without the IOMMU. Same as -all, plus the
+ * vencsys clocks, the smi-common, larb7 and the JPEG encoder.
+ *
+ * The encoder reads and writes physical addresses: its buffers come from
+ * CMA below 4 GiB (32-bit DMA mask of the driver) and its four larb7 ports
+ * (5, 6, 7, 9) must be in bypass. No IOMMU binds larb7, so the SMI driver
+ * leaves MMU_EN as it is after VEN0 power-on (assumed clear, not checked)
+ * and only switches the larb clocks.
+ *
+ * Nothing links the encoder to larb7 without the IOMMU: keep larb7
+ * resumed by hand during the test, else the encoder's requests stall in
+ * the unclocked larb and the frame times out after one second:
+ *   echo on > /sys/bus/platform/devices/17010000.smi/power/control
+ * The SMI common is runtime resumed through larb7 and then writes its
+ * init values and bus selection while the display is running, as with
+ * the -iommu DTB.
+ *
+ * If the encoder times out or the bus hangs, boot the -all DTB again.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+#include "mt6878-unihertz-titan2-all.dts"
+
+&vencsys {
+	status = "okay";
+};
+
+&smi_common {
+	status = "okay";
+};
+
+&larb7 {
+	status = "okay";
+};
+
+&jpgenc {
+	status = "okay";
+};

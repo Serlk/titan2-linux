@@ -36,6 +36,8 @@
 
 #define MTK_JPEG_ADDR_MASK GENMASK(1, 0)
 
+struct mtk_jpeg_enc_qlt;
+
 /**
  * enum mtk_jpeg_ctx_state - states of the context state machine
  * @MTK_JPEG_INIT:		current state is initialized
@@ -65,6 +67,11 @@ enum mtk_jpeg_ctx_state {
  * @multi_core:		mark jpeg hw is multi_core or not
  * @jpeg_worker:		jpeg dec or enc worker
  * @support_34bit:	flag to check support for 34-bit DMA address
+ * @enc_quality:	encoder quality table, sorted by quality; NULL for the
+ *			table of the first encoders
+ * @num_enc_quality:	number of entries of @enc_quality
+ * @enc_rdma_padding:	the encoder needs the RDMA padding bits of the control
+ *			register set
  */
 struct mtk_jpeg_variant {
 	struct clk_bulk_data *clks;
@@ -82,6 +89,9 @@ struct mtk_jpeg_variant {
 	bool multi_core;
 	void (*jpeg_worker)(struct work_struct *work);
 	bool support_34bit;
+	const struct mtk_jpeg_enc_qlt *enc_quality;
+	unsigned int num_enc_quality;
+	bool enc_rdma_padding;
 };
 
 struct mtk_jpeg_src_buf {

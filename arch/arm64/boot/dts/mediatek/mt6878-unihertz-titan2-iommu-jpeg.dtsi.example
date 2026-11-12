@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Titan 2: the JPEG encoder through the MM IOMMU. EXAMPLE, not built,
+ * untested.
+ *
+ * Include it at the end of a copy of mt6878-unihertz-titan2-iommu.dts
+ * (which enables the smi-common, larb0 and the M4U). It enables vencsys
+ * and larb7 and gives the encoder its four larb7 ports, as in the factory
+ * device tree (iommus 0xe5, 0xe6, 0xe7, 0xe9 = larb 7, ports 5, 6, 7, 9).
+ *
+ * The M4U then binds larb7 too and links the encoder to it: a runtime
+ * resume of the encoder resumes larb7 (clocks, MMU_EN on the four ports)
+ * and the smi-common, with no sysfs step. Larb7 is in the 0 ~ 4G IOVA
+ * region of mt6878_data_mm, which matches the 32-bit DMA mask of the
+ * driver; BANK_SEL stays 0.
+ *
+ * If the log shows M4U translation faults on ports 5/6/7/9 (the larb of a
+ * fault is reported as invalid on MT6878) or the frame times out, boot
+ * -iommu or -all again.
+ *
+ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+ */
+
+&vencsys {
+	status = "okay";
+};
+
+&larb7 {
+	status = "okay";
+};
+
+&jpgenc {
+	iommus = <&m4u M4U_L7_P5_JPGENC_Y_RDMA>,
+		 <&m4u M4U_L7_P6_JPGENC_C_RDMA>,
+		 <&m4u M4U_L7_P7_JPGENC_Q_RDMA>,
+		 <&m4u M4U_L7_P9_JPGENC_BSDMA>;
+	status = "okay";
+};

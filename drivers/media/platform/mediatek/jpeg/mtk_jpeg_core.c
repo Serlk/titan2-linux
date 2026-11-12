@@ -1899,6 +1899,45 @@ static const struct mtk_jpeg_variant mtk_jpeg_drvdata = {
 	.multi_core = false,
 };
 
+/* Sorted by quality, as mtk_jpeg_set_enc_params() expects */
+static const struct mtk_jpeg_enc_qlt mt6878_jpeg_enc_quality[] = {
+	{.quality_param = 24, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q24},
+	{.quality_param = 30, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q30},
+	{.quality_param = 34, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q34},
+	{.quality_param = 38, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q38},
+	{.quality_param = 44, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q44},
+	{.quality_param = 52, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q52},
+	{.quality_param = 60, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q60},
+	{.quality_param = 66, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q66},
+	{.quality_param = 72, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q72},
+	{.quality_param = 78, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q78},
+	{.quality_param = 82, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q82},
+	{.quality_param = 85, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q85},
+	{.quality_param = 90, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q90},
+	{.quality_param = 95, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q95},
+	{.quality_param = 97, .hardware_value = MT6878_JPEG_ENC_QUALITY_Q97},
+};
+
+static const struct mtk_jpeg_variant mt6878_jpegenc_drvdata = {
+	.clks = mtk_jpeg_clocks,
+	.num_clks = ARRAY_SIZE(mtk_jpeg_clocks),
+	.formats = mtk_jpeg_enc_formats,
+	.num_formats = MTK_JPEG_ENC_NUM_FORMATS,
+	.qops = &mtk_jpeg_enc_qops,
+	.irq_handler = mtk_jpeg_enc_irq,
+	.hw_reset = mtk_jpeg_enc_reset,
+	.m2m_ops = &mtk_jpeg_enc_m2m_ops,
+	.dev_name = "mtk-jpeg-enc",
+	.ioctl_ops = &mtk_jpeg_enc_ioctl_ops,
+	.out_q_default_fourcc = V4L2_PIX_FMT_YUYV,
+	.cap_q_default_fourcc = V4L2_PIX_FMT_JPEG,
+	.multi_core = false,
+	.support_34bit = true,
+	.enc_quality = mt6878_jpeg_enc_quality,
+	.num_enc_quality = ARRAY_SIZE(mt6878_jpeg_enc_quality),
+	.enc_rdma_padding = true,
+};
+
 static struct mtk_jpeg_variant mtk8195_jpegenc_drvdata = {
 	.formats = mtk_jpeg_enc_formats,
 	.num_formats = MTK_JPEG_ENC_NUM_FORMATS,
@@ -1937,6 +1976,10 @@ static const struct of_device_id mtk_jpeg_match[] = {
 	{
 		.compatible = "mediatek,mtk-jpgenc",
 		.data = &mtk_jpeg_drvdata,
+	},
+	{
+		.compatible = "mediatek,mt6878-jpgenc",
+		.data = &mt6878_jpegenc_drvdata,
 	},
 	{
 		.compatible = "mediatek,mt8195-jpgenc",

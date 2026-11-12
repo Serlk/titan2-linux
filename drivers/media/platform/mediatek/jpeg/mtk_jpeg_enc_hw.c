@@ -130,7 +130,9 @@ void mtk_jpeg_set_enc_dst(struct mtk_jpeg_ctx *ctx, void __iomem *base,
 	if (support_34bit) {
 		addr_ext = FIELD_PREP(MTK_JPEG_ADDR_MASK, upper_32_bits(dma_addr));
 		writel(addr_ext, base + JPEG_ENC_DEST_ADDR0_EXT);
-		writel(addr_ext + size, base + JPEG_ENC_STALL_ADDR0_EXT);
+		addr_ext = FIELD_PREP(MTK_JPEG_ADDR_MASK,
+				      upper_32_bits(dma_addr + size));
+		writel(addr_ext, base + JPEG_ENC_STALL_ADDR0_EXT);
 	}
 }
 EXPORT_SYMBOL_GPL(mtk_jpeg_set_enc_dst);
@@ -146,7 +148,14 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 	u32 img_stride;
 	u32 mem_stride;
 	u32 i, enc_quality;
+	const struct mtk_jpeg_variant *variant = ctx->jpeg->variant;
+	const struct mtk_jpeg_enc_qlt *qlt = mtk_jpeg_enc_quality;
 	u32 nr_enc_quality = ARRAY_SIZE(mtk_jpeg_enc_quality);
+
+	if (variant->enc_quality) {
+		qlt = variant->enc_quality;
+		nr_enc_quality = variant->num_enc_quality;
+	}
 
 	value = width << 16 | height;
 	writel(value, base + JPEG_ENC_IMG_SIZE);
@@ -177,10 +186,10 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 	writel(img_stride, base + JPEG_ENC_IMG_STRIDE);
 	writel(mem_stride, base + JPEG_ENC_STRIDE);
 
-	enc_quality = mtk_jpeg_enc_quality[nr_enc_quality - 1].hardware_value;
+	enc_quality = qlt[nr_enc_quality - 1].hardware_value;
 	for (i = 0; i < nr_enc_quality; i++) {
-		if (ctx->enc_quality <= mtk_jpeg_enc_quality[i].quality_param) {
-			enc_quality = mtk_jpeg_enc_quality[i].hardware_value;
+		if (ctx->enc_quality <= qlt[i].quality_param) {
+			enc_quality = qlt[i].hardware_value;
 			break;
 		}
 	}
@@ -197,6 +206,11 @@ void mtk_jpeg_set_enc_params(struct mtk_jpeg_ctx *ctx,  void __iomem *base)
 		value |= JPEG_ENC_CTRL_RESTART_EN_BIT;
 	else
 		value &= ~JPEG_ENC_CTRL_RESTART_EN_BIT;
+	if (variant->enc_rdma_padding) {
+		value |= JPEG_ENC_CTRL_RDMA_PADDING_EN_BIT |
+			 JPEG_ENC_CTRL_RDMA_RIGHT_PADDING_EN_BIT;
+		value &= ~JPEG_ENC_CTRL_RDMA_PADDING_0_EN_BIT;
+	}
 	writel(value, base + JPEG_ENC_CTRL);
 
 	writel(ctx->restart_interval, base + JPEG_ENC_RST_MCU_NUM);

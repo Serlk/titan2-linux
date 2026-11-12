@@ -1362,6 +1362,40 @@
 			compatible = "mediatek,mt6878-vencsys", "syscon";
 			reg = <0x17000000 0x1000>;
 			#clock-cells = <1>;
+			power-domains = <&spm MT6878_POWER_DOMAIN_VEN0>;
+			status = "disabled";
+		};
+
+		larb7: smi@17010000 {
+			compatible = "mediatek,mt6878-smi-larb";
+			reg = <0x17010000 0x1000>;
+			clocks = <&vencsys CLK_VEN1_CKE0_LARB>,
+				 <&vencsys CLK_VEN1_CKE1_VENC>;
+			clock-names = "apb", "smi";
+			power-domains = <&spm MT6878_POWER_DOMAIN_VEN0>;
+			mediatek,larb-id = <SMI_L7_ID>;
+			mediatek,smi = <&smi_common>;
+			status = "disabled";
+		};
+
+		/*
+		 * JPEG encoder, memory through larb7 ports 5 (Y RDMA), 6 (C RDMA),
+		 * 7 (Q table) and 9 (BSDMA). Without iommus (the default) it
+		 * reads and writes physical addresses, which needs the larb7
+		 * ports in bypass (MMU_EN clear, taken to be the state after
+		 * VEN0 power-on) and larb7 clocked by its SMI driver.
+		 * Not described: the downstream mmdvfs clock (the VENC rate is
+		 * set through the VCP there; here venc_sel stays where the
+		 * boot loader left it) and the interconnect paths of the four
+		 * ports (no MT6878 EMI interconnect provider).
+		 */
+		jpgenc: jpeg-encoder@17030000 {
+			compatible = "mediatek,mt6878-jpgenc";
+			reg = <0x17030000 0x10000>;
+			interrupts = <GIC_SPI 495 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&vencsys CLK_VEN1_CKE2_JPGENC>;
+			clock-names = "jpgenc";
+			power-domains = <&spm MT6878_POWER_DOMAIN_VEN0>;
 			status = "disabled";
 		};
 
